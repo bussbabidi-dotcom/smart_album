@@ -37,8 +37,34 @@ def novo(produto, pasta_fotos=None, fotos=()):
     return projeto
 
 
-def adicionar_fotos(projeto, caminhos):
-    """Acrescenta no fim, sem repetir. Devolve as que entraram."""
+def pasta_da_foto(foto):
+    if isinstance(foto, dict) and foto.get("pasta"):
+        return str(foto["pasta"])
+    caminho = foto["caminho"] if isinstance(foto, dict) else str(foto)
+    return str(Path(caminho).parent)
+
+
+def nome_pasta_da_foto(foto):
+    p = Path(pasta_da_foto(foto))
+    return p.name or str(p) or "Fotos"
+
+
+def listar_pastas_projeto(projeto):
+    """Lista ordenada de pastas únicas carregadas no projeto: [(chave_norm, caminho_pasta, nome_pasta, qtd)]."""
+    ordem = []
+    mapa = {}
+    for foto in projeto.get("fotos", []):
+        pasta = pasta_da_foto(foto)
+        chave = normalizar_caminho(pasta)
+        if chave not in mapa:
+            mapa[chave] = [chave, pasta, nome_pasta_da_foto(foto), 0]
+            ordem.append(chave)
+        mapa[chave][3] += 1
+    return [tuple(mapa[c]) for c in ordem]
+
+
+def adicionar_fotos(projeto, caminhos, pasta_origem=None):
+    """Acrescenta no fim, mantendo a divisão por pasta e sem repetir. Devolve as que entraram."""
     existentes = {normalizar_caminho(f["caminho"]) for f in projeto["fotos"]}
     novas = []
     for caminho in caminhos:
@@ -46,7 +72,12 @@ def adicionar_fotos(projeto, caminhos):
         if chave in existentes:
             continue
         existentes.add(chave)
-        projeto["fotos"].append({"caminho": str(Path(caminho)), "destaque": False})
+        p_foto = str(Path(pasta_origem)) if pasta_origem else str(Path(caminho).parent)
+        projeto["fotos"].append({
+            "caminho": str(Path(caminho)),
+            "destaque": False,
+            "pasta": p_foto,
+        })
         novas.append(str(Path(caminho)))
     return novas
 
@@ -94,19 +125,51 @@ def registro_foto(projeto, caminho):
 
 
 def ordenar_fotos(projeto, info, por="nome"):
+    """Ordena as fotos dentro de cada pasta sem misturar pastas diferentes."""
     from comum import chave_natural
+    import diagramar
+
+    pastas_ordem = {chave: idx for idx, (chave, _p, _n, _q) in enumerate(listar_pastas_projeto(projeto))}
+
+    if por == "cenario":
+        # Agrupa por pasta e dentro de cada pasta agrupa fotos do mesmo cenário juntas
+        por_pasta = {}
+        for f in projeto["fotos"]:
+            ch_p = normalizar_caminho(pasta_da_foto(f))
+            por_pasta.setdefault(ch_p, []).append(f)
+        nova_lista = []
+        for ch_p in sorted(por_pasta.keys(), key=lambda c: pastas_ordem.get(c, 9999)):
+            grupo_f = por_pasta[ch_p]
+            enriquecidas = []
+            for f in grupo_f:
+                dados = info.get(normalizar_caminho(f["caminho"])) or {}
+                enriquecidas.append({
+                    "ref": f,
+                    "caminho": f["caminho"],
+                    "data": dados.get("data") or 0,
+                    "cenario": dados.get("cenario"),
+                })
+            ordenadas_cen = diagramar.ordenar_e_agrupar_por_cenario(enriquecidas)
+            for item in ordenadas_cen:
+                item["ref"]["cenario_grupo"] = item.get("cenario_grupo", 1)
+                nova_lista.append(item["ref"])
+        projeto["fotos"] = nova_lista
+        return
+
     if por == "data":
         def chave(f):
+            ch_p = normalizar_caminho(pasta_da_foto(f))
             dados = info.get(normalizar_caminho(f["caminho"])) or {}
-            return (dados.get("data") or 0, chave_natural(f["caminho"]))
+            return (pastas_ordem.get(ch_p, 9999), dados.get("data") or 0, chave_natural(f["caminho"]))
     else:
         def chave(f):
-            return [chave_natural(p) for p in Path(f["caminho"]).parts]
+            ch_p = normalizar_caminho(pasta_da_foto(f))
+            return (pastas_ordem.get(ch_p, 9999), [chave_natural(p) for p in Path(f["caminho"]).parts])
     projeto["fotos"].sort(key=chave)
 
 
 def fotos_para_diagramar(projeto, info, somente_nao_usadas=False):
-    """Fotos analisadas, na ordem do projeto, no formato do diagramar."""
+    """Fotos analisadas, na ordem do projeto, com pasta, cenário e rosto para o diagramar."""
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
     saida = []
     for foto in projeto["fotos"]:
@@ -120,6 +183,9 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False):
             "data": dados.get("data"),
             "destaque": bool(foto.get("destaque")),
             "cenario": dados.get("cenario"),
+            "rosto": dados.get("rosto"),
+            "pasta": normalizar_caminho(pasta_da_foto(foto)),
+            "nome_pasta": nome_pasta_da_foto(foto),
         })
     return saida
 

@@ -126,17 +126,35 @@ def zoom_encaixar(W, H, aspecto):
     return min(bw / float(W), bh / float(H))
 
 
-def corte_automatico(W, H, aspecto, rosto_t):
+def corte_automatico(W, H, aspecto, rosto_t, dobra_x=None):
     """
     Preenche o espaço (zoom = 1.0) centralizando no rosto se houver.
-    A proteção de proporção máxima (22%) já é feita nos quadros do diagramar.py,
-    evitando que arredondamentos de 1px na prévia façam a imagem piscar entre
-    cortada (zoom 1.0) e encaixada inteira (zoom_encaixar).
+    Quando o quadro atravessa o meio da lâmina (dobra_x entre 0.05 e 0.95),
+    desloca o corte horizontalmente se o rosto cair perto da dobra central.
     """
     bw, bh = caixa_base(W, H, aspecto)
     if rosto_t:
         cx = rosto_t[0] * W
         cy = rosto_t[1] * H + (0.5 - OLHOS_NO_CORTE) * bh
+        if dobra_x is not None and 0.05 < float(dobra_x) < 0.95 and bw < W - 1.0:
+            dobra = float(dobra_x)
+            # Posição desejada do rosto longe da linha de dobra (margem de segurança de 14% da largura do quadro)
+            margem_dobra = 0.14
+            cx_clamped = min(max(cx, bw / 2.0), W - bw / 2.0)
+            u_rosto = (rosto_t[0] * W - (cx_clamped - bw / 2.0)) / max(1.0, bw)
+            if abs(u_rosto - dobra) < margem_dobra:
+                # Tenta empurrar o corte para que o rosto fique do lado com mais folga na foto
+                u_esq = dobra - margem_dobra
+                u_dir = dobra + margem_dobra
+                cx_op_esq = rosto_t[0] * W + bw * (0.5 - u_esq)
+                cx_op_dir = rosto_t[0] * W + bw * (0.5 - u_dir)
+                opcoes_cx = []
+                for cand in (cx_op_esq, cx_op_dir):
+                    c_lim = min(max(cand, bw / 2.0), W - bw / 2.0)
+                    u_cand = (rosto_t[0] * W - (c_lim - bw / 2.0)) / max(1.0, bw)
+                    opcoes_cx.append((abs(u_cand - dobra), -abs(c_lim - cx_clamped), c_lim))
+                opcoes_cx.sort(reverse=True)
+                cx = opcoes_cx[0][2]
     else:
         cx, cy = W / 2.0, H / 2.0
     cx = min(max(cx, bw / 2), W - bw / 2)
@@ -161,8 +179,8 @@ def limitar_corte(W, H, aspecto, corte):
     return {"cx": cx / W, "cy": cy / H, "zoom": zoom}
 
 
-def corte_do_espaco(W, H, aspecto, edicao, rosto, rosto_ja_transformado=False):
-    """Corte que vale para o espaço: o manual (limitado) ou o automático."""
+def corte_do_espaco(W, H, aspecto, edicao, rosto, rosto_ja_transformado=False, dobra_x=None):
+    """Corte que vale para o espaço: o manual (limitado) ou o automático (com desvio de dobra)."""
     ed = edicao or {}
     if ed.get("corte"):
         return limitar_corte(W, H, aspecto, ed["corte"])
@@ -172,7 +190,9 @@ def corte_do_espaco(W, H, aspecto, edicao, rosto, rosto_ja_transformado=False):
         rosto_t = rosto
     else:
         rosto_t = rosto_transformado(rosto, ed)
-    return corte_automatico(W, H, aspecto, rosto_t)
+    if dobra_x is None:
+        dobra_x = ed.get("dobra_x")
+    return corte_automatico(W, H, aspecto, rosto_t, dobra_x=dobra_x)
 
 
 def caixa_corte(W, H, aspecto, corte):
@@ -343,7 +363,7 @@ def aplicar_ajustes(img, edicao):
     return img
 
 
-def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapido=False):
+def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapido=False, dobra_x=None):
     """
     A foto pronta para o espaço, com o tamanho exato em pixels.
     rapido usa a miniatura (prévia); senão abre a foto inteira (exportação).
@@ -356,6 +376,6 @@ def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapid
     img = transformar(fonte, edicao)
     W, H = img.size
     aspecto = tw / float(th)
-    corte = corte_do_espaco(W, H, aspecto, edicao, rosto)
+    corte = corte_do_espaco(W, H, aspecto, edicao, rosto, dobra_x=dobra_x)
     saida = recortar(img, caixa_corte(W, H, aspecto, corte), (tw, th), fundo, rapido)
     return aplicar_ajustes(saida, edicao)

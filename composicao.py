@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Monta a imagem de uma lâmina: fundo (inteiro, por página ou misturado com fusão), fotos nos espaços e moldes PNG por cima."""
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+import math
 
 import analise
 from comum import cor_rgb, normalizar_caminho
@@ -9,8 +10,98 @@ from produtos import caixa_px
 from recorte import foto_no_espaco
 
 MODOS_FUNDO = ("preencher", "ajustar", "repetir")
+DIRECOES_DEGRADE = ("direita", "esquerda", "baixo", "cima", "radial", "bordas_h")
 LADRILHOS_NA_ALTURA = 2
 AJUSTES_FUNDO_PADRAO = {"brilho": 0, "contraste": 0, "saturacao": 0, "matiz": 0, "tingir_cor": "#c08a4a", "tingir_forca": 0}
+
+
+def degrade_padrao():
+    return {
+        "ativo": False,
+        "direcao": "direita",
+        "inicio": 30,
+        "fim": 100,
+        "opacidade_fim": 0,
+    }
+
+
+def tem_degrade_ativo(degrade, opacidade_geral=100):
+    if int(round(float(opacidade_geral if opacidade_geral is not None else 100))) < 100:
+        return True
+    if not isinstance(degrade, dict):
+        return False
+    return bool(degrade.get("ativo", False))
+
+
+def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
+    """
+    Gera uma máscara de canal alfa ('L', 0..255) do tamanho (W, H) aplicando
+    degradê suave estilo máscara do Photoshop e/ou opacidade geral.
+    Retorna None se opacidade for 100% e o degradê estiver desativado.
+    """
+    W, H = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
+    op_geral = max(0.0, min(100.0, float(opacidade_geral if opacidade_geral is not None else 100.0))) / 100.0
+    d = degrade_padrao()
+    if isinstance(degrade, dict):
+        d.update(degrade)
+    ativo = bool(d.get("ativo", False))
+    if not ativo and op_geral >= 0.999:
+        return None
+    if not ativo:
+        return Image.new("L", (W, H), int(round(op_geral * 255.0)))
+
+    direcao = d.get("direcao") if d.get("direcao") in DIRECOES_DEGRADE else "direita"
+    inicio = max(0.0, min(98.0, float(d.get("inicio", 30)))) / 100.0
+    fim = max(inicio + 0.02, min(100.0, float(d.get("fim", 100))) / 100.0)
+    op_fim = max(0.0, min(100.0, float(d.get("opacidade_fim", 0)))) / 100.0
+    span = max(0.001, fim - inicio)
+
+    def valor_alfa(pos):
+        if pos <= inicio:
+            f = 1.0
+        elif pos >= fim:
+            f = op_fim
+        else:
+            t = (pos - inicio) / span
+            suave = t * t * (3.0 - 2.0 * t)
+            f = 1.0 - suave * (1.0 - op_fim)
+        return int(round(max(0.0, min(1.0, f * op_geral)) * 255.0))
+
+    if direcao in ("direita", "esquerda", "bordas_h"):
+        linha = Image.new("L", (W, 1))
+        px = linha.load()
+        for x in range(W):
+            u = x / float(max(1, W - 1))
+            if direcao == "esquerda":
+                u = 1.0 - u
+            elif direcao == "bordas_h":
+                u = abs(u - 0.5) * 2.0
+            px[x, 0] = valor_alfa(u)
+        return linha.resize((W, H), Image.NEAREST)
+
+    if direcao in ("baixo", "cima"):
+        coluna = Image.new("L", (1, H))
+        px = coluna.load()
+        for y in range(H):
+            v = y / float(max(1, H - 1))
+            if direcao == "cima":
+                v = 1.0 - v
+            px[0, y] = valor_alfa(v)
+        return coluna.resize((W, H), Image.NEAREST)
+
+    # Radial (opaco no centro, transparente nas bordas)
+    grade_w, grade_h = min(W, 128), min(H, 128)
+    rad = Image.new("L", (grade_w, grade_h))
+    px = rad.load()
+    cx = (grade_w - 1) / 2.0 or 1.0
+    cy = (grade_h - 1) / 2.0 or 1.0
+    for y in range(grade_h):
+        dy = (y - cy) / max(1.0, cy)
+        for x in range(grade_w):
+            dx = (x - cx) / max(1.0, cx)
+            dist = min(1.0, math.sqrt(dx * dx + dy * dy))
+            px[x, y] = valor_alfa(dist)
+    return rad.resize((W, H), Image.BILINEAR)
 
 
 def rosto_de(info, caminho):
@@ -35,7 +126,7 @@ def ajustar_cores(img, ajustes):
     """
     a = dict(AJUSTES_FUNDO_PADRAO)
     a.update(ajustes or {})
-    if not any(float(a[k] or 0) for k in ("brilho", "contraste", "saturacao", "matiz", "tingir_forca")):
+    if not any(float(a[k] or 0) for k in ("brilho", "contraste", "saturacao", "matiz", "tingir_cor" if float(a.get("tingir_forca") or 0) else "tingir_forca")):
         return img
     alfa = img.getchannel("A") if img.mode == "RGBA" else None
     rgb = img.convert("RGB")
@@ -106,7 +197,7 @@ def raio_desfoque_fundo(desfoque, largura):
 
 
 def acabar_fundo(camada, fundo_imagem):
-    """Ajustes de cor, desfoque suave calibrado e opacidade sobre a camada posicionada."""
+    """Ajustes de cor, desfoque suave calibrado, opacidade e máscara de degradê sobre a camada posicionada."""
     dados = fundo_imagem_padrao()
     dados.update(fundo_imagem or {})
     entrada = camada
@@ -115,12 +206,14 @@ def acabar_fundo(camada, fundo_imagem):
     if raio >= 0.4:
         camada = camada.filter(ImageFilter.GaussianBlur(raio))
     opacidade = max(0, min(100, int(dados.get("opacidade", 100))))
-    if opacidade < 100:
+    degrade = dados.get("degrade")
+    mascara_deg = gerar_mascara_degrade(camada.size, degrade, opacidade)
+    if mascara_deg is not None:
         if camada.mode != "RGBA":
             camada = camada.convert("RGBA")
         elif camada is entrada:
             camada = camada.copy()
-        camada.putalpha(camada.getchannel("A").point(lambda v: v * opacidade // 100))
+        camada.putalpha(ImageChops.multiply(camada.getchannel("A"), mascara_deg))
     return camada
 
 
@@ -265,10 +358,8 @@ def colar_sobreposicoes(base, sobreposicoes):
 def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco=None, fundo_imagem=None,
            px_por_mm=None, opcoes_pagina=None):
     """
-    Imagem RGB com as fotos nos espaços. ao_espaco(indice, espaco, erro) é
-    chamado para cada espaço, com o erro quando a foto não abre. A imagem de
-    fundo que não abre é ignorada. Com fundo None devolve RGBA transparente
-    onde não há foto (a camada da frente, para a prévia rápida do fundo).
+    Imagem RGB com as fotos nos espaços (incluindo máscara de degradê de opacidade).
+    ao_espaco(indice, espaco, erro) é chamado para cada espaço, com o erro quando a foto não abre.
     """
     cor = cor_rgb(fundo)
     if fundo is None:
@@ -280,10 +371,18 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
         if not foto:
             continue
         x, y, w, h = caixa_px(espaco, tamanho)
+        ed = espaco.get("edicao") or {}
+        ex = float(espaco.get("x", 0.0))
+        ew = float(espaco.get("w", 0.0))
+        dobra_x = (0.5 - ex) / ew if (ew > 0.05 and ex < 0.495 and ex + ew > 0.505) else None
         try:
-            pronta = foto_no_espaco(foto, espaco.get("edicao"), rosto_de(info, foto), (w, h), cor, rapido)
-            aplicar_moldura(pronta, (espaco.get("edicao") or {}).get("moldura"), px_por_mm)
-            base.paste(pronta, (x, y))
+            pronta = foto_no_espaco(foto, ed, rosto_de(info, foto), (w, h), cor, rapido, dobra_x=dobra_x)
+            aplicar_moldura(pronta, ed.get("moldura"), px_por_mm)
+            mascara = gerar_mascara_degrade((w, h), ed.get("degrade"), ed.get("opacidade", 100))
+            if mascara is not None:
+                base.paste(pronta, (x, y), mascara)
+            else:
+                base.paste(pronta, (x, y))
             if ao_espaco:
                 ao_espaco(indice, espaco, None)
         except (OSError, ValueError) as e:

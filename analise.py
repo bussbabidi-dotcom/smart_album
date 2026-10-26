@@ -209,12 +209,36 @@ def nitidez(img):
 
 
 def assinatura_cenario(img):
-    """Histograma HSV reduzido para comparar o cenário entre fotos próximas."""
+    """
+    Assinatura visual de cenário (128 bins) combinando:
+    - Anel externo do fundo (ignora o centro onde ficam roupas/pessoas)
+    - Faixa superior (céu/iluminação/teto) e inferior (piso/gramado)
+    - Histograma HSV global
+    """
     pequena = img.convert("RGB").resize((96, 96), Image.Resampling.BILINEAR)
     hsv = cv2.cvtColor(np.asarray(pequena), cv2.COLOR_RGB2HSV)
-    hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 4, 4], [0, 180, 0, 256, 0, 256])
-    cv2.normalize(hist, hist, alpha=1.0, norm_type=cv2.NORM_L1)
-    return hist.reshape(-1).astype(float).tolist()
+
+    # Máscara do anel externo (fundo real ao redor dos assuntos)
+    mascara_fundo = np.ones((96, 96), dtype=np.uint8) * 255
+    mascara_fundo[22:78, 22:74] = 0
+
+    hist_fundo = cv2.calcHist([hsv], [0, 1, 2], mascara_fundo, [8, 3, 2], [0, 180, 0, 256, 0, 256])
+    cv2.normalize(hist_fundo, hist_fundo, alpha=0.50, norm_type=cv2.NORM_L1)
+
+    # Faixa superior (topo 35% da imagem: luz ambiente / céu / fundo)
+    topo_hsv = hsv[:34, :, :]
+    hist_topo = cv2.calcHist([topo_hsv], [0, 1, 2], None, [8, 2, 2], [0, 180, 0, 256, 0, 256])
+    cv2.normalize(hist_topo, hist_topo, alpha=0.25, norm_type=cv2.NORM_L1)
+
+    # Histograma global complementar
+    hist_global = cv2.calcHist([hsv], [0, 1, 2], None, [8, 3, 2], [0, 180, 0, 256, 0, 256])
+    cv2.normalize(hist_global, hist_global, alpha=0.25, norm_type=cv2.NORM_L1)
+
+    vetor = np.concatenate([hist_fundo.reshape(-1), hist_topo.reshape(-1), hist_global.reshape(-1)])
+    soma = float(np.sum(vetor))
+    if soma > 1e-9:
+        vetor = vetor / soma
+    return vetor.astype(float).tolist()
 
 
 def hash_perceptual(caminho):

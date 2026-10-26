@@ -542,61 +542,173 @@ def _layouts_sem_corte(proporcoes, area, espaco):
     return saida
 
 
-def _layout_cruzando_meio(fotos, produto, cfg):
-    """Uma foto panorâmica atravessa a dobra; as restantes preenchem a área abaixo."""
+def _custo_rosto_na_dobra(foto, quadro, lw):
+    """
+    Calcula o risco/custo de o rosto principal da foto cair sobre a linha de
+    dobra central da lâmina (meio = lw / 2.0) e devolve (penalidade, dobra_x).
+    """
+    qx, _qy, qw, qh = quadro
+    meio = lw / 2.0
+    if qw <= 1e-4 or not (qx < meio - 1.5 and qx + qw > meio + 1.5):
+        return 0.0, None
+    dobra_x = (meio - qx) / float(qw)
+    rosto = foto.get("rosto")
+    if not rosto or not isinstance(rosto, dict):
+        return 0.0, round(dobra_x, 4)
+    rx = float(rosto.get("cx", 0.5))
+    prop_foto = max(0.1, float(foto.get("proporcao") or 1.5))
+    aspecto_q = qw / max(1e-4, float(qh))
+    # Folga horizontal disponível para deslocar o enquadramento longe da dobra
+    folga_h = max(0.0, 1.0 - (aspecto_q / prop_foto)) if prop_foto > aspecto_q else 0.0
+    dist_dobra = abs(rx - dobra_x)
+    dist_efetiva = dist_dobra + folga_h * 0.45
+    if dist_efetiva < 0.14:
+        return (0.14 - dist_efetiva) * 14.0, round(dobra_x, 4)
+    return 0.0, round(dobra_x, 4)
+
+
+def _layouts_transpasse_central(fotos, produto, cfg):
+    """
+    Gera vários layouts que atravessam o meio da lâmina (x = 50%):
+    - Transpasse 60/40 (Esquerda -> Direita e Direita -> Esquerda)
+    - Transpasse 70/30 (Esquerda -> Direita e Direita -> Esquerda)
+    - Faixa Panorâmica atravessando o meio (Topo ou Base)
+    Todos desviam automaticamente rostos detectados da linha de dobra central.
+    """
     n = len(fotos)
     if n < 2 or n > 9 or produto.get("paginas_por_lamina", 1) < 2:
-        return None
+        return []
     W, H = lamina_mm(produto)
     margem = max(0.0, float(cfg["margem_mm"]))
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
     area_w = W - 2 * margem
-    if area_w <= 0:
-        return None
+    area_h = H - 2 * margem
+    if area_w <= intervalo * 2 or area_h <= intervalo * 2:
+        return []
 
+    saida = []
+
+    # Candidatos a foto principal que atravessa o meio (prioriza fotos horizontais ou de destaque)
+    candidatos_hero = sorted(
+        range(n),
+        key=lambda i: (bool(fotos[i].get("destaque")), float(fotos[i].get("proporcao") or 1.0)),
+        reverse=True,
+    )[:min(n, 3)]
+
+    # 1. Layouts 60/40 e 70/30 (Esquerda atravessando para Direita, e Direita atravessando para Esquerda)
+    for fracao_hero, etiqueta_tipo in ((0.60, "transpasse_60_40"), (0.70, "transpasse_70_30")):
+        w_hero = (area_w - intervalo) * fracao_hero
+        w_resto = (area_w - intervalo) - w_hero
+        if w_hero <= 20 or w_resto <= 20:
+            continue
+
+        for lado_hero in ("esq", "dir"):
+            if lado_hero == "esq":
+                x_hero = margem
+                x_resto = margem + w_hero + intervalo
+            else:
+                x_resto = margem
+                x_hero = margem + w_resto + intervalo
+
+            area_hero = (x_hero, margem, w_hero, area_h)
+            area_resto = (x_resto, margem, w_resto, area_h)
+
+            for idx_hero in candidatos_hero:
+                p_hero = max(0.15, float(fotos[idx_hero]["proporcao"]))
+                q_hero = area_hero
+                if _corte_quadro(p_hero, q_hero) > CORTE_MAXIMO + 0.08:
+                    q_hero = caixa_proporcao_padrao(p_hero, area_hero)
+                    # Garante que mesmo na proporção padrão o quadro continue atravessando o meio se couber
+                    if lado_hero == "esq":
+                        q_hero = (margem, q_hero[1], q_hero[2], q_hero[3])
+                    else:
+                        q_hero = (W - margem - q_hero[2], q_hero[1], q_hero[2], q_hero[3])
+
+                # Verifica se o quadro realmente atravessa a linha central (W / 2)
+                meio = W / 2.0
+                if not (q_hero[0] < meio - 4.0 and q_hero[0] + q_hero[2] > meio + 4.0):
+                    continue
+
+                indices_rest = [i for i in range(n) if i != idx_hero]
+                props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
+                opcoes_r = layouts_pagina(props_rest, area_resto, intervalo, (), produto=None, pagina=0, maximo=1)
+                if not opcoes_r or not opcoes_r[0][1]:
+                    continue
+                _cr, quadros_r, _mod_r, ordem_r = opcoes_r[0]
+
+                quadros_mapa = {idx_hero: q_hero}
+                for qr, idx_rel in zip(quadros_r, ordem_r):
+                    quadros_mapa[indices_rest[idx_rel]] = qr
+
+                quadros = [quadros_mapa[i] for i in range(n)]
+                cortes = [_corte_quadro(fotos[i]["proporcao"], q) for i, q in enumerate(quadros)]
+                usado = sum(q[2] * q[3] for q in quadros)
+                vazio = max(0.0, 1.0 - usado / max(1.0, area_w * area_h))
+                pen_rosto, _dobra_h = _custo_rosto_na_dobra(fotos[idx_hero], q_hero, W)
+
+                custo = (
+                    0.22
+                    + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n
+                    + PESO_VAZIO * 0.45 * vazio
+                    + pen_rosto
+                )
+                espacos = []
+                for foto_item, quadro_item in zip(fotos, quadros):
+                    _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
+                    ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
+                    espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
+
+                saida.append({
+                    "custo": custo,
+                    "espacos": espacos,
+                    "sobreposicoes": [],
+                    "modelo": None,
+                    "tipo_layout": etiqueta_tipo,
+                })
+
+    # 2. Layout Panorâmico Horizontal atravessando o meio no topo
     indice_hero = max(range(n), key=lambda i: fotos[i]["proporcao"])
     p_hero = max(0.2, float(fotos[indice_hero]["proporcao"]))
     hero_h_ideal = area_w / p_hero
     hero_h = min(H * 0.48, max(H * 0.28, hero_h_ideal))
-    if hero_h <= 0:
-        return None
+    if hero_h > 0:
+        hero_y = margem
+        inferior_y = hero_y + hero_h + intervalo
+        inferior_h = H - margem - inferior_y
+        if inferior_h > 0:
+            indices_restantes = [i for i in range(n) if i != indice_hero]
+            props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
+            area_inferior = (margem, inferior_y, area_w, inferior_h)
+            melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1)
+            if melhores_inf and melhores_inf[0][1]:
+                _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
+                quadro_hero = (margem, hero_y, area_w, hero_h)
+                if _corte_quadro(p_hero, quadro_hero) > CORTE_MAXIMO:
+                    quadro_hero = caixa_proporcao_padrao(p_hero, quadro_hero)
+                quadros_mapa = {indice_hero: quadro_hero}
+                for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
+                    quadros_mapa[indices_restantes[idx_rel]] = q_inf
+                quadros = [quadros_mapa[i] for i in range(n)]
+                cortes = [_corte_quadro(fotos[i]["proporcao"], quadro) for i, quadro in enumerate(quadros)]
+                usado = sum(q[2] * q[3] for q in quadros)
+                vazio = max(0.0, 1.0 - usado / max(1.0, area_w * area_h))
+                pen_rosto, _dobra = _custo_rosto_na_dobra(fotos[indice_hero], quadro_hero, W)
+                custo = 0.35 + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n + PESO_VAZIO * 0.5 * vazio + pen_rosto
+                espacos = []
+                for foto_item, quadro_item in zip(fotos, quadros):
+                    _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
+                    ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
+                    espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
+                saida.append({
+                    "custo": custo,
+                    "espacos": espacos,
+                    "sobreposicoes": [],
+                    "modelo": None,
+                    "tipo_layout": "panoramico_meio",
+                })
 
-    hero_y = margem
-    inferior_y = hero_y + hero_h + intervalo
-    inferior_h = H - margem - inferior_y
-    if inferior_h <= 0:
-        return None
-
-    indices_restantes = [i for i in range(n) if i != indice_hero]
-    props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
-    area_inferior = (margem, inferior_y, area_w, inferior_h)
-
-    melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1)
-    if not melhores_inf or not melhores_inf[0][1]:
-        return None
-    _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
-
-    quadro_hero = (margem, hero_y, area_w, hero_h)
-    if _corte_quadro(p_hero, quadro_hero) > CORTE_MAXIMO:
-        quadro_hero = caixa_proporcao_padrao(p_hero, quadro_hero)
-
-    quadros_mapa = {indice_hero: quadro_hero}
-    for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
-        quadros_mapa[indices_restantes[idx_rel]] = q_inf
-
-    quadros = [quadros_mapa[i] for i in range(n)]
-    cortes = [_corte_quadro(fotos[i]["proporcao"], quadro) for i, quadro in enumerate(quadros)]
-    usado = sum(q[2] * q[3] for q in quadros)
-    vazio = max(0.0, 1.0 - usado / max(1.0, area_w * (H - 2 * margem)))
-    custo = 0.35 + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n + PESO_VAZIO * 0.5 * vazio
-    espacos = [_espaco(produto, quadro, foto["caminho"]) for foto, quadro in zip(fotos, quadros)]
-    return {
-        "custo": custo,
-        "espacos": espacos,
-        "sobreposicoes": [],
-        "modelo": None,
-        "tipo_layout": "panoramico_meio",
-    }
+    saida.sort(key=lambda op: op["custo"])
+    return saida
 
 
 def _geometrias_parecidas(a, b, produto):
@@ -760,9 +872,8 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             "modelo": modelo["id"],
         })
 
-    panoramico = _layout_cruzando_meio(fotos, produto, cfg)
-    if panoramico:
-        opcoes.append(panoramico)
+    for op_transpasse in _layouts_transpasse_central(fotos, produto, cfg):
+        opcoes.append(op_transpasse)
 
     if paginas == 1:
         divisoes = [(n,)]
@@ -825,7 +936,13 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
 
     opcoes.sort(key=lambda o: o["custo"])
     unicas = []
+    tipos_transpasse_incluidos = set()
+    reserva_transpasse = []
     for opcao in opcoes:
+        t_lay = opcao.get("tipo_layout")
+        if t_lay in ("transpasse_60_40", "transpasse_70_30", "panoramico_meio") and t_lay not in tipos_transpasse_incluidos:
+            tipos_transpasse_incluidos.add(t_lay)
+            reserva_transpasse.append(opcao)
         semelhante = next(
             (i for i, anterior in enumerate(unicas) if _geometrias_parecidas(opcao["espacos"], anterior["espacos"], produto)),
             None,
@@ -840,6 +957,15 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         unicas.append(opcao)
         if len(unicas) >= maximo:
             break
+
+    # Garante que os layouts que atravessam o meio (60/40 e 70/30) sempre apareçam nas sugestões
+    if maximo >= 4:
+        for op_t in reserva_transpasse:
+            if not any(u.get("tipo_layout") == op_t.get("tipo_layout") for u in unicas):
+                if len(unicas) >= maximo:
+                    unicas.pop()
+                unicas.append(op_t)
+        unicas.sort(key=lambda o: o["custo"])
     return unicas
 
 
@@ -984,39 +1110,101 @@ def espacos_com_modelo(modelo, fotos, produto, pagina=None, cfg=None):
 
 
 # ------------------------------------------------------------
-# Dividir o álbum em lâminas
+# Reconhecimento de Cenário e Divisão Estrita por Pastas e Cenários
 # ------------------------------------------------------------
 
-def _numero_laminas(n, produto, cfg, destaques):
+def distancia_cenario(cenario_a, cenario_b):
+    """Distância de Bhattacharyya (0.0 = idêntico, 1.0 = totalmente distinto) entre duas assinaturas de cenário."""
+    if not cenario_a or not cenario_b or len(cenario_a) != len(cenario_b):
+        return 0.0
+    afinidade = sum(math.sqrt(max(0.0, float(x)) * max(0.0, float(y))) for x, y in zip(cenario_a, cenario_b))
+    return math.sqrt(max(0.0, 1.0 - min(1.0, afinidade)))
+
+
+def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
+    """
+    Agrupa fotos com o mesmo cenário visual (dentro da mesma pasta) em blocos
+    contíguos para que fiquem em páginas/lâminas seguidas sem se misturar.
+    Cada foto recebe `foto["cenario_grupo"] = 1, 2, ...`.
+    """
+    if not fotos:
+        return []
+    clusters = []  # [{"id": int, "centro": list, "fotos": list, "ultima_pos": int}]
+    for pos, foto in enumerate(fotos):
+        ass = foto.get("cenario")
+        if not ass:
+            if clusters:
+                clusters[-1]["fotos"].append(dict(foto, cenario_grupo=clusters[-1]["id"]))
+                clusters[-1]["ultima_pos"] = pos
+            else:
+                clusters.append({"id": 1, "centro": None, "fotos": [dict(foto, cenario_grupo=1)], "ultima_pos": pos})
+            continue
+
+        melhor_idx = None
+        melhor_dist = 999.0
+        for idx_c, cl in enumerate(clusters):
+            if not cl["centro"]:
+                continue
+            d = distancia_cenario(ass, cl["centro"])
+            # Bônus leve de continuidade se era o cenário imediatamente anterior
+            d_efetiva = d - (0.035 if cl["ultima_pos"] == pos - 1 else 0.0)
+            if d_efetiva <= limiar and d_efetiva < melhor_dist:
+                melhor_dist = d_efetiva
+                melhor_idx = idx_c
+
+        if melhor_idx is not None:
+            cl = clusters[melhor_idx]
+            k = len(cl["fotos"])
+            cl["centro"] = [(c * k + float(v)) / (k + 1.0) for c, v in zip(cl["centro"], ass)]
+            cl["fotos"].append(dict(foto, cenario_grupo=cl["id"]))
+            cl["ultima_pos"] = pos
+        else:
+            novo_id_c = len(clusters) + 1
+            clusters.append({
+                "id": novo_id_c,
+                "centro": [float(v) for v in ass],
+                "fotos": [dict(foto, cenario_grupo=novo_id_c)],
+                "ultima_pos": pos,
+            })
+
+    saida = []
+    for cl in clusters:
+        saida.extend(cl["fotos"])
+    return saida
+
+
+def _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=True):
     por_lamina = max(1, int(cfg["fotos_por_lamina"]))
     maximo = max(1, int(cfg["max_fotos_lamina"]))
     minimo_por_grupo = max(1, int(math.floor(por_lamina * 0.75)))
     maximo_por_grupo = min(maximo, int(math.ceil(por_lamina * 1.25)))
-    desejadas = int(cfg.get("laminas_desejadas", produto["laminas_min"]))
-    desejadas = max(produto["laminas_min"], min(produto["laminas_max"], desejadas))
     s_fotos = int(math.ceil(n / float(por_lamina))) if n else 0
     s_capacidade = int(math.ceil(n / float(maximo))) if n else 0
     s = max(s_fotos, s_capacidade, destaques)
-    if n and s_capacidade <= desejadas <= produto["laminas_max"]:
-        media_desejada = n / float(desejadas)
-        if minimo_por_grupo <= media_desejada <= maximo_por_grupo:
-            s = max(destaques, desejadas)
+    if respeitar_minimo_produto:
+        desejadas = int(cfg.get("laminas_desejadas", produto["laminas_min"]))
+        desejadas = max(produto["laminas_min"], min(produto["laminas_max"], desejadas))
+        if n and s_capacidade <= desejadas <= produto["laminas_max"]:
+            media_desejada = n / float(desejadas)
+            if minimo_por_grupo <= media_desejada <= maximo_por_grupo:
+                s = max(destaques, desejadas)
     s = min(s, produto["laminas_max"])
     return min(s, n) if n else 0
 
 
-def dividir(fotos, produto, cfg):
-    """Grupos de fotos (na ordem), um por lâmina, e as fotos que não couberam."""
-    maximo = max(1, int(cfg["max_fotos_lamina"]))
-    capacidade = produto["laminas_max"] * maximo
-    sobras = fotos[capacidade:]
-    fotos = fotos[:capacidade]
+def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
+    """Divide um único bloco homogêneo (mesma pasta e mesmo cenário) em lâminas."""
     n = len(fotos)
-    destaques = sum(1 for f in fotos if f.get("destaque"))
-    s = _numero_laminas(n, produto, cfg, destaques)
-    if s == 0:
-        return [], sobras
+    if n == 0:
+        return []
+    maximo = max(1, int(cfg["max_fotos_lamina"]))
     alvo = max(1, int(cfg["fotos_por_lamina"]))
+    destaques = sum(1 for f in fotos if f.get("destaque"))
+    s = s_alvo if s_alvo is not None else _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=False)
+    s = max(1, min(s, n))
+    if s == 1 and n <= maximo:
+        return [fotos]
+
     eh_destaque = [bool(f.get("destaque")) for f in fotos]
     bonus = [0.0] * (n + 1)
     for i in range(1, n):
@@ -1024,15 +1212,7 @@ def dividir(fotos, produto, cfg):
         b = fotos[i].get("data") or 0
         intervalo = abs(b - a)
         bonus[i] = PESO_INTERVALO * min(1.0, intervalo / INTERVALO_CHEIO)
-        if cfg.get("reconhecer_cenarios"):
-            cenario_a, cenario_b = fotos[i - 1].get("cenario"), fotos[i].get("cenario")
-            if cenario_a and cenario_b and len(cenario_a) == len(cenario_b):
-                afinidade = sum(
-                    math.sqrt(max(0.0, x) * max(0.0, y)) for x, y in zip(cenario_a, cenario_b)
-                )
-                distancia = math.sqrt(max(0.0, 1.0 - min(1.0, afinidade)))
-                if distancia > 0.28:
-                    bonus[i] += min(2.0, (distancia - 0.28) * 4.0)
+
     destaques_ate = [0] * (n + 1)
     for i, d in enumerate(eh_destaque):
         destaques_ate[i + 1] = destaques_ate[i] + (1 if d else 0)
@@ -1042,12 +1222,7 @@ def dividir(fotos, produto, cfg):
         tem_destaque = destaques_ate[i] - destaques_ate[j]
         if tem_destaque:
             return 0.0 if tamanho == 1 else None
-        if tamanho > maximo:
-            return None
-        tolerancia = max(1, int(math.ceil(alvo * 0.25)))
-        minimo_grupo = max(1, int(math.floor(alvo - tolerancia)))
-        maximo_grupo = min(maximo, int(math.ceil(alvo + tolerancia)))
-        if not minimo_grupo <= tamanho <= maximo_grupo:
+        if tamanho > maximo or tamanho < 1:
             return None
         return 2.0 * (tamanho - alvo) ** 2 / max(1.0, alvo) - bonus[j]
 
@@ -1068,8 +1243,7 @@ def dividir(fotos, produto, cfg):
                     melhor[k][i] = total
                     volta[k][i] = j
     if melhor[s][n] == infinito:
-        grupos = [fotos[i:i + maximo] for i in range(0, n, maximo)]
-        return grupos, sobras
+        return [fotos[i:i + maximo] for i in range(0, n, maximo)]
     grupos = []
     i = n
     for k in range(s, 0, -1):
@@ -1077,12 +1251,70 @@ def dividir(fotos, produto, cfg):
         grupos.append(fotos[j:i])
         i = j
     grupos.reverse()
-    return grupos, sobras
+    return grupos
+
+
+def dividir(fotos, produto, cfg):
+    """
+    Grupos de fotos (um por lâmina) e as fotos que não couberam.
+    - Respeita estritamente a separação por pastas (fotos de pastas diferentes não se misturam).
+    - Quando `reconhecer_cenarios` está ativo, agrupa fotos com o mesmo cenário visual em
+      páginas/lâminas seguidas sem nunca misturar cenários diferentes na mesma lâmina.
+    """
+    maximo = max(1, int(cfg["max_fotos_lamina"]))
+    capacidade = produto["laminas_max"] * maximo
+    sobras = list(fotos[capacidade:])
+    fotos = list(fotos[:capacidade])
+    if not fotos:
+        return [], sobras
+
+    # 1. Separa em blocos por Pasta (mantendo a ordem das pastas carregadas)
+    blocos_pasta = []
+    ordem_pastas = []
+    mapa_pastas = {}
+    for f in fotos:
+        ch_pasta = f.get("pasta") or ""
+        if ch_pasta not in mapa_pastas:
+            mapa_pastas[ch_pasta] = []
+            ordem_pastas.append(ch_pasta)
+        mapa_pastas[ch_pasta].append(f)
+    for ch_pasta in ordem_pastas:
+        blocos_pasta.append(mapa_pastas[ch_pasta])
+
+    # 2. Dentro de cada pasta, se reconhecer_cenarios estiver ativo, junta fotos de mesmo cenário
+    #    e cria sub-blocos estritos por cenário para não misturar cenários diferentes na mesma lâmina
+    blocos_finais = []
+    if cfg.get("reconhecer_cenarios", True):
+        for fotos_p in blocos_pasta:
+            agrupadas = ordenar_e_agrupar_por_cenario(fotos_p)
+            sub_blocos = {}
+            ordem_cen = []
+            for f in agrupadas:
+                cid = f.get("cenario_grupo", 1)
+                if cid not in sub_blocos:
+                    sub_blocos[cid] = []
+                    ordem_cen.append(cid)
+                sub_blocos[cid].append(f)
+            for cid in ordem_cen:
+                blocos_finais.append(sub_blocos[cid])
+    else:
+        blocos_finais = blocos_pasta
+
+    # 3. Divide cada bloco independente em lâminas seguidas (sem misturar blocos)
+    todos_grupos = []
+    for bloco in blocos_finais:
+        grupos_b = _dividir_bloco_unico(bloco, produto, cfg)
+        for g in grupos_b:
+            if len(todos_grupos) < produto["laminas_max"]:
+                todos_grupos.append(g)
+            else:
+                sobras.extend(g)
+    return todos_grupos, sobras
 
 
 def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
     """
-    fotos: [{"caminho", "proporcao", "data", "destaque"}] na ordem do álbum.
+    fotos: [{"caminho", "proporcao", "data", "destaque", "cenario", "pasta"}] na ordem do álbum.
     Devolve (lâminas, sobras).
     """
     grupos, sobras = dividir(list(fotos), produto, cfg)
@@ -1098,6 +1330,10 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         lamina["espacos"] = melhor["espacos"]
         lamina["sobreposicoes"] = melhor["sobreposicoes"]
         lamina["modelo"] = melhor["modelo"]
+        if grupo and grupo[0].get("cenario_grupo"):
+            lamina["cenario_grupo"] = grupo[0].get("cenario_grupo")
+        if grupo and grupo[0].get("nome_pasta"):
+            lamina["nome_pasta"] = grupo[0].get("nome_pasta")
         if foto_sobreposta:
             lw, lh = lamina_mm(produto)
             proporcao = max(0.2, float(foto_sobreposta.get("proporcao") or 1.0))
