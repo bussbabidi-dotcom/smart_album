@@ -63,7 +63,7 @@ ARQUIVO_JANELA = pasta_dados() / "janela.json"
 ARQUIVO_FUNDOS = pasta_dados() / "fundos.json"
 ARQUIVO_CAPA = pasta_dados() / "capa_programa.json"
 ARQUIVO_EXPORTACAO = pasta_dados() / "exportacao.json"
-VERSAO_ARRANJO = 2
+VERSAO_ARRANJO = 3
 ARRANJO_PADRAO = {
     "versao": VERSAO_ARRANJO,
     "geometria": "1520x940+40+30",
@@ -71,12 +71,12 @@ ARRANJO_PADRAO = {
     "mostrar_timeline": True,
     "mostrar_fotos": True,
     "mostrar_lateral": True,
-    "timeline": "esquerda",
+    "timeline": "baixo",
     "lateral": "direita",
-    "largura_timeline": 210,
-    "altura_timeline": 132,
-    "altura_fotos": 150,
-    "largura_lateral": 350,
+    "largura_timeline": 430,
+    "altura_timeline": 136,
+    "altura_fotos": 142,
+    "largura_lateral": 330,
 }
 LADOS_TIMELINE = ("esquerda", "direita", "cima", "baixo")
 CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline")
@@ -268,19 +268,41 @@ class Aplicativo:
     # ==================================================================
 
     def _montar(self):
-        topo = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 5))
+        # Variáveis compartilhadas com a Barra de Opções superior
+
+        topo = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 4))
         topo.pack(side="top", fill="x")
         self.barra_topo = topo
         self._montar_topo(topo)
 
+        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
+
+        barra_opcoes = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 3))
+        barra_opcoes.pack(side="top", fill="x")
+        self.barra_opcoes = barra_opcoes
+        self._montar_barra_opcoes(barra_opcoes)
+
+        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
+
         status = ttk.Frame(self.root, padding=(10, 3))
         status.pack(side="bottom", fill="x")
+        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="bottom", fill="x")
         self._montar_status(status)
 
-        opcoes = dict(bg=tema.BORDA, bd=0, sashwidth=5, sashrelief="flat", showhandle=False, opaqueresize=True)
-        self.painel_v = tk.PanedWindow(self.root, orient="vertical", **opcoes)
-        self.painel_v.pack(side="top", fill="both", expand=True)
+        corpo = ttk.Frame(self.root)
+        corpo.pack(side="top", fill="both", expand=True)
+
+        # Barra vertical esquerda de ferramentas estilo Adobe Photoshop CC (igual à demonstração)
+        self.barra_ferramentas = tk.Frame(corpo, bg=tema.PAINEL, width=40, padx=4, pady=6)
+        self.barra_ferramentas.pack(side="left", fill="y")
+        self._montar_ferramentas_esquerda(self.barra_ferramentas)
+        tk.Frame(corpo, bg=tema.BORDA, width=1).pack(side="left", fill="y")
+
+        opcoes = dict(bg=tema.BORDA, bd=0, sashwidth=4, sashrelief="flat", showhandle=False, opaqueresize=True)
+        self.painel_v = tk.PanedWindow(corpo, orient="vertical", **opcoes)
+        self.painel_v.pack(side="left", fill="both", expand=True)
         self.painel_h = tk.PanedWindow(self.painel_v, orient="horizontal", **opcoes)
+        self.painel_baixo = tk.PanedWindow(self.painel_v, orient="horizontal", **opcoes)
         self.quadro_timeline = ttk.Frame(self.painel_v)
         self._montar_timeline(self.quadro_timeline)
         self.quadro_fotos = ttk.Frame(self.painel_v)
@@ -289,13 +311,11 @@ class Aplicativo:
         centro = ttk.Frame(self.painel_h, style="Fundo.TFrame")
         self.quadro_centro = centro
         self.canvas = tk.Canvas(centro, bg=tema.FUNDO, highlightthickness=0)
-        self.rotulo_lamina = ttk.Label(centro, text="", style="Fundo.TLabel", anchor="center")
-        self.rotulo_lamina.pack(side="bottom", fill="x", pady=(0, 4))
         self.canvas.pack(fill="both", expand=True)
         self.quadro_lateral = ttk.Frame(self.painel_h)
         self._montar_direita(self.quadro_lateral)
         self._aplicar_arranjo()
-        for painel in (self.painel_v, self.painel_h):
+        for painel in (self.painel_v, self.painel_h, self.painel_baixo):
             painel.bind("<ButtonRelease-1>", lambda e: self.agendar("gravar_arranjo", 400, self.gravar_arranjo), add="+")
 
         self.canvas.bind("<Configure>", lambda e: self.agendar("lamina", 40, self.desenhar_lamina))
@@ -318,7 +338,12 @@ class Aplicativo:
         return botao
 
     def _montar_topo(self, topo):
-        ttk.Label(topo, text="ÁLBUM", style="Logo.TLabel").pack(side="left", padx=(2, 10))
+        selo = tk.Label(topo, text="Sa", bg="#001e36", fg="#31a8ff",
+                        font=(tema.FONTE, 9, "bold"), bd=1, relief="solid", padx=5, pady=1)
+        selo.pack(side="left", padx=(2, 6))
+        tema.dica(selo, "Smart Album CC · Motor Elástico Proporcional (Corte Máx ≤ 22%)")
+        ttk.Label(topo, text="Smart Album CC", style="Logo.TLabel").pack(side="left", padx=(0, 10))
+
         arquivo = ttk.Menubutton(topo, text="Arquivo", style="Compacto.TMenubutton")
         menu = tk.Menu(arquivo, tearoff=0)
         menu.add_command(label="Novo álbum", accelerator="Ctrl+N", command=self.novo_projeto)
@@ -349,6 +374,7 @@ class Aplicativo:
         arquivo["menu"] = menu
         arquivo.pack(side="left", padx=1)
         self.botao_arquivo = arquivo
+
         exibir = ttk.Menubutton(topo, text="Exibir", style="Compacto.TMenubutton")
         self.menu_exibir = tk.Menu(exibir, tearoff=0)
         self._montar_menu_exibir(self.menu_exibir)
@@ -356,22 +382,13 @@ class Aplicativo:
         exibir.pack(side="left", padx=1)
         self.botao_exibir = exibir
 
-        ttk.Frame(topo, width=12).pack(side="left")
+        ttk.Frame(topo, width=10).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_nome.pack(side="left", padx=(0, 8))
-        self.produto_var = tk.StringVar(value=self.produto["nome"] if self.produto else "")
-        self.combo_produto = ttk.Combobox(topo, textvariable=self.produto_var, state="readonly", width=8,
-                                          values=[p["nome"] for p in self.produtos])
-        self.combo_produto.pack(side="left", padx=(0, 4))
-        self.combo_produto.bind("<<ComboboxSelected>>", self._trocou_produto)
-        tema.dica(self.combo_produto, "Produto (tamanho do álbum)")
-        self.rotulo_produto = ttk.Label(topo, text="", style="Fraco.TLabel")
-        self.rotulo_produto.pack(side="left")
-        self.dica_produto = tema.Dica(self.rotulo_produto, "")
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
                                           "Exportar lâminas: formato, pasta e nomes dos arquivos (Ctrl+E)",
-                                          "PrimarioCompacto.TButton")
+                                          "Compacto.TButton")
         self.botao_exportar.pack(side="right", padx=(3, 0))
         self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
                                         "Tratar fotos no Photoshop (editar/Ação) ou Lightroom (preset)",
@@ -383,25 +400,136 @@ class Aplicativo:
                                       "Compacto.TButton")
         self.botao_capa.pack(side="right", padx=2)
 
-        guias = ttk.Checkbutton(topo, text="⊞", variable=self.guias, command=self.desenhar_lamina,
-                                style="Alternar.Toolbutton")
-        guias.pack(side="right", padx=2)
-        tema.dica(guias, "Guias: mostrar sangria, área de segurança e dobra central")
-        layout = ttk.Checkbutton(topo, text="⬚", variable=self.editar_layout, style="Alternar.Toolbutton",
-                                 command=self._mudou_modo_layout)
-        layout.pack(side="right", padx=2)
-        tema.dica(layout, "Modo Layout (L): mover e redimensionar espaços e moldes\n"
-                          "Duplo clique na lâmina também ativa. Esc sai.")
         ttk.Frame(topo, width=6).pack(side="right")
         self._botao(topo, "↷", self.refazer, "Refazer última alteração (Ctrl+Y)", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(topo, "↶", self.desfazer, "Desfazer última alteração (Ctrl+Z)", "Icone.TButton", width=3).pack(side="right", padx=1)
         ttk.Frame(topo, width=6).pack(side="right")
-        self._botao(topo, "⟳", self.rediagramar_lamina,
-                    "Diagramar esta lâmina de novo (alterna layout proporcional sem distorcer)",
-                    "Icone.TButton", width=3).pack(side="right", padx=1)
-        self._botao(topo, "⊞ Diagramar", self.abrir_diagramacao,
-                    "Diagramar o álbum inteiro automaticamente (preenchendo sem distorcer > 22%)",
+        self._botao(topo, "✦ Diagramar", self.abrir_diagramacao,
+                    "Diagramar o álbum inteiro automaticamente (preenchendo a página sem distorcer fotos > 22%)",
                     "PrimarioCompacto.TButton").pack(side="right", padx=2)
+
+    def _montar_barra_opcoes(self, barra):
+        """Barra de opções estilo Adobe Photoshop CC (idêntica à demonstração): Álbum, M:, E:, F/L: e ícones rápidos."""
+        rot_alb = ttk.Label(barra, text="Álbum:", style="Fraco.TLabel")
+        rot_alb.pack(side="left", padx=(2, 4))
+        self.produto_var = tk.StringVar(value=self.produto["nome"] if self.produto else "")
+        self.combo_produto = ttk.Combobox(barra, textvariable=self.produto_var, state="readonly", width=8,
+                                          values=[p["nome"] for p in self.produtos])
+        self.combo_produto.pack(side="left", padx=(0, 4))
+        self.combo_produto.bind("<<ComboboxSelected>>", self._trocou_produto)
+        tema.dica(self.combo_produto, "Produto (formato e dimensões do álbum)")
+        self.rotulo_produto = ttk.Label(barra, text="", style="Fraco.TLabel")
+        self.rotulo_produto.pack(side="left", padx=(0, 6))
+        self.dica_produto = tema.Dica(self.rotulo_produto, "")
+
+        tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
+
+        for rot_txt, dica_txt, var, de, ate, passo, sufixo in (
+            ("⬚ M:", "Margem externa de segurança da página (mm)", self.margem_var, 0, 60, 1, "mm"),
+            ("⇔ E:", "Espaçamento entre as fotos (mm)", self.espacamento_var, 0, 40, 0.5, "mm"),
+            ("⊞ F/L:", "Quantidade alvo de fotos por lâmina", self.fotos_lamina_var, 1, 12, 1, ""),
+        ):
+            r = ttk.Label(barra, text=rot_txt, style="Fraco.TLabel")
+            r.pack(side="left", padx=(4, 2))
+            tema.dica(r, dica_txt)
+            sp = ttk.Spinbox(barra, from_=de, to=ate, increment=passo, textvariable=var, width=4,
+                             command=self._mudou_config)
+            sp.pack(side="left")
+            tema.dica(sp, dica_txt)
+            if sufixo:
+                ttk.Label(barra, text=sufixo, style="Fraco.TLabel").pack(side="left", padx=(1, 4))
+
+        tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
+
+        self._botao(barra, "⟳", self.rediagramar_lamina,
+                    "Diagramar Esta Lâmina de Novo\nAlterna entre variações proporcionais sem cortar além de 22%",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra, "⊞", self.rediagramar_todas,
+                    "Aplicar Geometria em Todas as Lâminas\nRecalcula todas as lâminas do álbum com a margem e espaçamento atuais",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        guias = ttk.Checkbutton(barra, text="⌗", variable=self.guias, command=self.desenhar_lamina,
+                                style="Alternar.Toolbutton")
+        guias.pack(side="left", padx=1)
+        tema.dica(guias, "Mostrar/Ocultar Guias\nExibe sangria, margem de segurança e linha de dobra central")
+        layout = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout, style="Alternar.Toolbutton",
+                                 command=self._mudou_modo_layout)
+        layout.pack(side="left", padx=1)
+        tema.dica(layout, "Modo Layout (Tecla L ou Duplo Clique)\nMover e redimensionar espaços e moldes. Esc sai.")
+        self._botao(barra, "📁+", self.escolher_pasta,
+                    "Carregar Pasta de Fotos do PC\nAdiciona todas as imagens de uma pasta ao projeto",
+                    "Icone.TButton", width=4).pack(side="left", padx=1)
+        self._botao(barra, "🖼+", self.escolher_fotos,
+                    "Carregar Fotos do PC\nSeleciona imagens avulsas do computador para o projeto",
+                    "Icone.TButton", width=4).pack(side="left", padx=1)
+
+        # Telemetria da lâmina aberta alinhada à direita na barra de opções (igual à demonstração)
+        self.rotulo_lamina = ttk.Label(barra, text="", style="Fraco.TLabel", anchor="e")
+        self.rotulo_lamina.pack(side="right", padx=(8, 4))
+
+    def _montar_ferramentas_esquerda(self, barra):
+        """Dock vertical esquerdo de ferramentas estilo Adobe Photoshop CC com ícones autoexplicativos e dicas no mouse."""
+        def sep():
+            tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=2, pady=5)
+
+        self._botao(barra, "✦", self.abrir_diagramacao,
+                    "Diagramar Álbum Automaticamente\nMonta todas as lâminas preenchendo o máximo da folha sem distorcer (>22% usa proporção padrão)",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⟳", self.rediagramar_lamina,
+                    "Diagramar Esta Lâmina de Novo\nTesta o próximo arranjo elástico para as fotos desta lâmina",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⊞", self.rediagramar_todas,
+                    "Aplicar em Todas as Lâminas\nAplica margem e espaçamento atuais em todo o álbum",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⇉", self.distribuir_nao_usadas,
+                    "Distribuir Fotos Livres\nCria novas lâminas automaticamente com as fotos ainda não usadas",
+                    "Icone.TButton", width=3).pack(pady=1)
+
+        sep()
+
+        bt_mover = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout,
+                                   style="Alternar.Toolbutton", command=self._mudou_modo_layout, width=3)
+        bt_mover.pack(pady=1)
+        tema.dica(bt_mover, "Mover / Transformar Espaços (Tecla L)\nDuplo clique na lâmina também ativa. Esc sai.")
+
+        self._botao(barra, "✂", self.editar_foto_selecionada,
+                    "Recortar / Enquadrar Foto (Enter)\nAbre o editor de enquadramento, zoom e cor da foto selecionada",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "↻", self.girar_foto_selecionada,
+                    "Girar Foto 90°\nGira a foto do espaço selecionado e reajusta os quadros da página automaticamente",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⊡", lambda: self.alinhar_espaco("proporcao_foto"),
+                    "Usar Proporção Padrão da Foto\nAjusta o quadro exatamente para a proporção nativa da foto (0% de corte)",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⇕", lambda: self.alinhar_espaco("pagina_util"),
+                    "Preencher Página Útil\nExpande a foto selecionada na página respeitando o limite de 22% de corte",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "＋", self.adicionar_espaco,
+                    "Novo Espaço na Lâmina\nAdiciona um quadro de foto extra na página",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "❐", self.duplicar_espaco,
+                    "Duplicar Espaço Selecionado\nCria uma cópia com as mesmas medidas do espaço atual",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "↑", lambda: self.ordem_espaco(True),
+                    "Trazer para a Frente\nColoca o espaço selecionado acima dos demais",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "↓", lambda: self.ordem_espaco(False),
+                    "Mandar para Trás\nColoca o espaço selecionado atrás dos demais",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "🗑", self.apagar_espaco_selecionado,
+                    "Apagar Espaço Selecionado (Del)\nRemove o quadro e expande as demais fotos para ocupar a página",
+                    "Icone.TButton", width=3).pack(pady=1)
+
+        sep()
+
+        self._botao(barra, "✦", self.abrir_tratamento,
+                    "Tratar Fotos (Photoshop / Lightroom)\nAbre no Photoshop, roda Ação ou aplica preset do Lightroom",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "◧", self.abrir_programa_capa,
+                    "Programa de Capas\nEnvia e abre a capa no programa de capas configurado",
+                    "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "⤓", self.abrir_exportar,
+                    "Exportar Álbum (Ctrl+E)\nExporta as lâminas prontas em alta resolução (JPG/PNG/PDF)",
+                    "Icone.TButton", width=3).pack(pady=1)
 
     def _montar_menu_exibir(self, menu):
         a = self.arranjo
@@ -518,8 +646,12 @@ class Aplicativo:
 
     def _ler_tamanhos(self):
         """Passa para o arranjo o tamanho atual dos painéis (o usuário pode ter arrastado as divisórias)."""
-        chave_tl = "largura_timeline" if self._tl_vertical else "altura_timeline"
-        for chave, widget, altura in ((chave_tl, self.quadro_timeline, not self._tl_vertical),
+        em_baixo_junto = (self.arranjo.get("timeline") == "baixo"
+                          and self.arranjo.get("mostrar_timeline")
+                          and self.arranjo.get("mostrar_fotos"))
+        usa_largura_tl = self._tl_vertical or em_baixo_junto
+        chave_tl = "largura_timeline" if usa_largura_tl else "altura_timeline"
+        for chave, widget, altura in ((chave_tl, self.quadro_timeline, not usa_largura_tl),
                                       ("altura_fotos", self.quadro_fotos, True),
                                       ("largura_lateral", self.quadro_lateral, False)):
             if widget.winfo_ismapped():
@@ -529,8 +661,8 @@ class Aplicativo:
 
     def _aplicar_arranjo(self):
         a = self.arranjo
-        v, h = self.painel_v, self.painel_h
-        for painel in (v, h):
+        v, h, b = self.painel_v, self.painel_h, self.painel_baixo
+        for painel in (v, h, b):
             for nome in painel.panes():
                 painel.forget(nome)
         vertical = self._timeline_vertical()
@@ -551,10 +683,15 @@ class Aplicativo:
         if mostrar_tl and a["timeline"] == "cima":
             v.add(self.quadro_timeline, **tl_faixa)
         v.add(h, minsize=MINIMOS["meio"], stretch="always")
-        if a["mostrar_fotos"]:
-            v.add(self.quadro_fotos, height=a["altura_fotos"], minsize=MINIMOS["fotos"], stretch="never")
-        if mostrar_tl and a["timeline"] == "baixo":
-            v.add(self.quadro_timeline, **tl_faixa)
+        if mostrar_tl and a["timeline"] == "baixo" and a["mostrar_fotos"]:
+            b.add(self.quadro_timeline, width=max(260, a.get("largura_timeline", 420)), minsize=220, stretch="never")
+            b.add(self.quadro_fotos, minsize=260, stretch="always")
+            v.add(b, height=a["altura_fotos"], minsize=MINIMOS["fotos"], stretch="never")
+        else:
+            if a["mostrar_fotos"]:
+                v.add(self.quadro_fotos, height=a["altura_fotos"], minsize=MINIMOS["fotos"], stretch="never")
+            if mostrar_tl and a["timeline"] == "baixo":
+                v.add(self.quadro_timeline, **tl_faixa)
 
     def _orientar_timeline(self, vertical):
         """Lâminas empilhadas (lateral) ou lado a lado (em cima ou embaixo)."""
@@ -3297,6 +3434,26 @@ class Aplicativo:
                 self.espaco_sel = 0
 
         self._mudar_espacos(mudar)
+
+    def girar_foto_selecionada(self, graus=90):
+        if not (isinstance(self.atual, int) and self._espaco_sel_valido()):
+            self.registrar("Selecione um espaço com foto para girar.")
+            return
+        i = self.espaco_sel
+        lamina = self._lamina()
+        if not lamina or not lamina["espacos"][i].get("foto"):
+            self.registrar("O espaço selecionado está vazio.")
+            return
+
+        def mudar(l):
+            esp = l["espacos"][i]
+            ed = dict(esp.get("edicao") or {})
+            ed["rot"] = (int(ed.get("rot", 0)) + graus) % 360
+            ed.pop("corte", None)
+            esp["edicao"] = ed
+            self._ajustar_lamina_proporcional(l)
+
+        self._mudar_espacos(mudar, "Foto girada em %s° com reajuste proporcional da página." % graus)
 
     def alinhar_espaco(self, acao):
         alvo = self._alvo_sel() if isinstance(self.atual, int) else None
