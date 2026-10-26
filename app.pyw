@@ -86,7 +86,8 @@ CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline")
 MINIMOS = {"timeline": 86, "timeline_vertical": 120, "fotos": 96, "lateral": 280, "centro": 320, "meio": 260}
 ALCA = 4
 RAIO_ALCA = 7
-IMA_PX = 7
+IMA_PX = 5
+IMA_SANGRIA_PX = 2.0
 LADO_MINIMO_MM = 8
 SETA_MM = 1
 SETA_GRANDE_MM = 5
@@ -521,7 +522,7 @@ class Aplicativo:
                     "Usar Proporção Padrão da Foto\nAjusta o quadro exatamente para a proporção nativa da foto (0% de corte)",
                     "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "⇕", lambda: self.alinhar_espaco("pagina_util"),
-                    "Preencher Página Útil\nExpande a foto selecionada na página respeitando o limite de 22% de corte",
+                    "Preencher Página Inteira (100% até a sangria)\nPassa pelas linhas da Safe Zone e preenche a página toda ignorando o limite de 22%",
                     "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "＋", self.adicionar_espaco,
                     "Novo Espaço na Lâmina\nAdiciona um quadro de foto extra na página",
@@ -959,13 +960,13 @@ class Aplicativo:
         posicao = ttk.Menubutton(barra_ic, text="⊞", style="Compacto.TMenubutton", width=3)
         tema.dica(posicao, "Alinhar, distribuir ou igualar tamanho dos espaços selecionados")
         menu = tk.Menu(posicao, tearoff=0)
-        for texto, acao in (("＝ Igualar tamanho das fotos selecionadas", "igualar"),
-                            ("⇕ Preencher página útil (sem distorcer)", "pagina_util"),
-                            ("⊡ Usar proporção padrão da foto", "proporcao_foto"),
+        for texto, acao in (("⇕ Preencher página inteira (100% até a sangria)", "pagina_util"),
+                            ("⬚ Encaixar dentro da Safe Zone", "pagina_safe"),
+                            ("▭ Preencher lâmina inteira (100% até a sangria)", "lamina"),
+                            ("＝ Igualar tamanho das fotos selecionadas", "igualar"),
+                            ("⊡ Usar proporção padrão da foto (0% corte)", "proporcao_foto"),
                             ("↔ Centralizar na horizontal (na página)", "centro_h"),
-                            ("↕ Centralizar na vertical", "centro_v"),
-                            ("⬒ Página inteira (até a sangria)", "pagina"),
-                            ("▭ Lâmina inteira", "lamina")):
+                            ("↕ Centralizar na vertical", "centro_v")):
             menu.add_command(label=texto, command=lambda a=acao: self.alinhar_espaco(a))
         posicao["menu"] = menu
         posicao.pack(side="right", padx=(2, 0))
@@ -2193,6 +2194,8 @@ class Aplicativo:
         corte_max_pct_inicial = int(round((float(cfg.get("corte_maximo", diagramar.CORTE_MAXIMO)) - 1.0) * 100))
         corte_max_pct_var = tk.IntVar(value=max(5, min(35, corte_max_pct_inicial or 22)))
         transpasse_var = tk.BooleanVar(value=bool(cfg.get("permitir_transpasse", True)))
+        meio_termo_var = tk.BooleanVar(value=bool(cfg.get("permitir_meio_termo", True)))
+        sangria_total_var = tk.BooleanVar(value=bool(cfg.get("permitir_sangria_total", True)))
         rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
         preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
         repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
@@ -2225,6 +2228,16 @@ class Aplicativo:
 
         ttk.Separator(quadro_geom, orient="horizontal").pack(fill="x", pady=6)
 
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Incluir layouts Meio Termo (1 página inteira sangrada + outra dentro da Safe Zone)",
+            variable=meio_termo_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Incluir variações de Preenchimento Máximo / Sangria Total (sem respeitar linhas da Safe Zone)",
+            variable=sangria_total_var,
+        ).pack(anchor="w", pady=2)
         ttk.Checkbutton(
             quadro_geom,
             text="Incluir layouts 60/40, 70/30 e panorâmicos que passam do meio da lâmina",
@@ -2340,6 +2353,8 @@ class Aplicativo:
                 "modo_corte": modo_corte_var.get(),
                 "corte_maximo": 1.0 + (pct_c / 100.0),
                 "permitir_transpasse": bool(transpasse_var.get()),
+                "permitir_meio_termo": bool(meio_termo_var.get()),
+                "permitir_sangria_total": bool(sangria_total_var.get()),
                 "reconhecer_rostos": bool(rostos_var.get()),
                 "preencher_espacos_extras": bool(preencher_extras_var.get()),
                 "excluir_repetidas": bool(repetidas_var.get()),
@@ -3340,6 +3355,26 @@ class Aplicativo:
         editando = self.editar_layout.get()
         alvo = self._alvo_sel()
         selecionados = self._indices_espacos_selecionados()
+
+        # Linhas guias contínuas ciano no estilo Adobe Photoshop (Safe Zone e Sangria)
+        if self.guias.get():
+            lw, lh = self._mm()
+            b = float(self.produto["sangria_mm"])
+            margem_cfg = float(self._cfg()["margem_mm"])
+            # Linha de Sangria (ciano discreto contínuo)
+            sx0, sy0 = ox + (b / lw) * dw, oy + (b / lh) * dh
+            sx1, sy1 = ox + ((lw - b) / lw) * dw, oy + ((lh - b) / lh) * dh
+            c.create_rectangle(sx0, sy0, sx1, sy1, outline="#00afdb", width=1, tags="espaco")
+            # Linhas imaginárias da Safe Zone (ciano vivo contínuo estilo Photoshop #00e5ff)
+            for pag in range(self.produto["paginas_por_lamina"]):
+                ux, uy, uw, uh = area_util_pagina_mm(self.produto, pag, margem_cfg, respeitar_seguranca=True)
+                gx0, gy0 = ox + (ux / lw) * dw, oy + (uy / lh) * dh
+                gx1, gy1 = ox + ((ux + uw) / lw) * dw, oy + ((uy + uh) / lh) * dh
+                c.create_rectangle(gx0, gy0, gx1, gy1, outline="#00e5ff", width=1, tags="espaco")
+            if self.produto["paginas_por_lamina"] > 1:
+                xm = ox + dw / 2.0
+                c.create_line(xm, oy, xm, oy + dh, fill="#00cfe8", width=1, tags="espaco")
+
         if editando:
             for i, s in enumerate(lamina.get("sobreposicoes") or []):
                 if ("molde", i) == ocultar:
@@ -3348,28 +3383,24 @@ class Aplicativo:
                 x1, y1 = x0 + s["w"] * dw, y0 + s["h"] * dh
                 if ("molde", i) == alvo:
                     c.create_rectangle(x0, y0, x1, y1, outline=tema.ALERTA, width=2, tags="espaco")
-                else:
-                    c.create_rectangle(x0 + 1, y0 + 1, x1 - 1, y1 - 1, outline=tema.ALERTA, dash=(2, 6), tags="espaco")
         for i, e in enumerate(lamina["espacos"]):
             if ("espaco", i) == ocultar:
                 continue
             x0, y0 = ox + e["x"] * dw, oy + e["y"] * dh
             x1, y1 = x0 + e["w"] * dw, y0 + e["h"] * dh
             if not e.get("foto"):
-                c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, dash=(4, 3), tags="espaco")
+                c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, tags="espaco")
                 c.create_text((x0 + x1) / 2, (y0 + y1) / 2, text="+", fill=tema.TEXTO_FRACO,
                               font=("Segoe UI", 18), tags="espaco")
-            if editando and i not in selecionados:
-                c.create_rectangle(x0, y0, x1, y1, outline="#ffffff", width=1, tags="espaco")
-                c.create_rectangle(x0, y0, x1, y1, outline=tema.DESTAQUE_ESCURO, dash=(4, 4), width=1, tags="espaco")
+            # Sem pontilhado nas fotos não selecionadas! Apenas a(s) selecionada(s) recebem contorno contínuo:
             if i in selecionados or (not editando and i == self.espaco_sel):
-                c.create_rectangle(x0, y0, x1, y1, outline=tema.DESTAQUE,
-                                   width=3 if i == self.espaco_sel else 2, tags="espaco")
+                c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff" if editando else tema.DESTAQUE,
+                                   width=2 if i == self.espaco_sel else 1, tags="espaco")
         if editando and len(selecionados) > 1:
             grupo = self._caixa_selecao_espacos(selecionados)
             x0, y0 = ox + grupo["x"] * dw, oy + grupo["y"] * dh
             x1, y1 = x0 + grupo["w"] * dw, y0 + grupo["h"] * dh
-            c.create_rectangle(x0, y0, x1, y1, outline=tema.DESTAQUE, width=1, dash=(2, 2), tags="espaco")
+            c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff", width=1, tags="espaco")
             for hx, hy in self._alcas(grupo).values():
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
                                    outline=tema.DESTAQUE, width=1, tags="espaco")
@@ -3777,48 +3808,53 @@ class Aplicativo:
         return None
 
     def _alvos_ima(self, lamina, ignorar):
-        """Linhas (mm) onde as bordas e o centro do espaço grudam: (verticais, horizontais)."""
+        """
+        Linhas (mm) onde as bordas grudam com ímã suave estilo Photoshop:
+        Separa (xs_safe, ys_safe, xs_sangria, ys_sangria) para que as linhas de sangria
+        tenham tolerância mínima e nunca travem o movimento do mouse.
+        """
         p = self.produto
         lw, lh = self._mm()
-        b, seg = p["sangria_mm"], p["seguranca_mm"]
-        pw = p["pagina_mm"][0]
-        margem = self._cfg()["margem_mm"]
-        esp = self._cfg()["espacamento_mm"]
-        xs = {0.0, lw, b, lw - b, lw / 2.0}
-        ys = {0.0, lh, b, lh - b, b + seg, lh - b - seg, b + margem, lh - b - margem, lh / 2}
+        b = float(p["sangria_mm"])
+        margem = float(self._cfg()["margem_mm"])
+        esp = float(self._cfg()["espacamento_mm"])
+        xs_sangria = {0.0, lw, b, lw - b}
+        ys_sangria = {0.0, lh, b, lh - b}
+        xs_safe = {lw / 2.0}
+        ys_safe = {lh / 2.0}
         for pagina in range(p["paginas_por_lamina"]):
-            px, py, pw_pagina, ph_pagina = area_pagina_mm(p, pagina)
-            xs |= {px, px + pw_pagina, px + pw_pagina / 2}
-            ys |= {py, py + ph_pagina, py + ph_pagina / 2}
-            x0 = b + pw * pagina
-            xs |= {x0, x0 + pw, x0 + pw / 2, x0 + seg, x0 + pw - seg}
-            ux, uy, uw, uh = area_util_pagina_mm(p, pagina, margem)
-            xs |= {ux, ux + uw / 2, ux + uw}
-            ys |= {uy, uy + uh / 2, uy + uh}
+            ux, uy, uw, uh = area_util_pagina_mm(p, pagina, margem, respeitar_seguranca=True)
+            xs_safe |= {ux, ux + uw / 2.0, ux + uw}
+            ys_safe |= {uy, uy + uh / 2.0, uy + uh}
         for j, outro in enumerate(lamina["espacos"]):
             if ("espaco", j) == ignorar:
                 continue
             ex, ey, ew, eh = self._espaco_mm(outro)
-            xs |= {ex, ex + ew / 2, ex + ew, ex - esp, ex + ew + esp}
-            ys |= {ey, ey + eh / 2, ey + eh, ey - esp, ey + eh + esp}
-        return sorted(xs), sorted(ys)
+            xs_safe |= {ex, ex + ew / 2.0, ex + ew, ex - esp, ex + ew + esp}
+            ys_safe |= {ey, ey + eh / 2.0, ey + eh, ey - esp, ey + eh + esp}
+        return sorted(xs_safe), sorted(ys_safe), sorted(xs_sangria), sorted(ys_sangria)
 
     @staticmethod
-    def _imantar(valores, alvos, tolerancia, anterior=None):
+    def _imantar(valores, alvos, tolerancia, anterior=None, valores_sangria=None, alvos_sangria=None, tol_sangria=None):
         """
-        (deslocamento, linha) que leva o valor mais perto até uma linha, ou (0, None).
-        A linha que já estava grudada vale até um pouco mais longe, para não pular entre duas.
+        Ímã suave estilo Photoshop sem histerese pegajosa:
+        Prioriza Safe Zone e fotos vizinhas (tolerância normal), e aplica ímã ultraleve
+        nas linhas de sangria (tol_sangria) para nunca travar perto da borda.
         """
-        if anterior is not None and valores:
-            d = min((anterior - v for v in valores), key=abs)
-            if abs(d) <= tolerancia * 1.6:
-                return d, anterior
         melhor = None
         for v in valores:
             for a in alvos:
                 d = a - v
                 if abs(d) <= tolerancia and (melhor is None or abs(d) < abs(melhor[0])):
                     melhor = (d, a)
+        if melhor is not None:
+            return melhor
+        if valores_sangria and alvos_sangria and tol_sangria:
+            for v in valores_sangria:
+                for a in alvos_sangria:
+                    d = a - v
+                    if abs(d) <= tol_sangria and (melhor is None or abs(d) < abs(melhor[0])):
+                        melhor = (d, a)
         return melhor or (0.0, None)
 
     def _layout_pressionou(self, evento):
@@ -3928,14 +3964,15 @@ class Aplicativo:
         ima = not (estado & ALT)
         proporcao_livre = bool(estado & SHIFT)
         tolerancia = IMA_PX * k
-        xs, ys = a["alvos"] if ima else ([], [])
+        tol_sangria = IMA_SANGRIA_PX * k
+        xs, ys, xs_sang, ys_sang = a["alvos"] if ima else ([], [], [], [])
         memoria = a["ima"] if ima else {}
         x0, y0, w0, h0 = a["inicio"]
         guias_x, guias_y = [], []
         alca = a["alca"]
 
-        def imantar(chave, valores, alvos):
-            d, linha = self._imantar(valores, alvos, tolerancia, memoria.get(chave))
+        def imantar(chave, valores, alvos, val_sang=None, alv_sang=None):
+            d, linha = self._imantar(valores, alvos, tolerancia, memoria.get(chave), val_sang, alv_sang, tol_sangria)
             memoria[chave] = linha
             return d, linha
 
@@ -3943,11 +3980,11 @@ class Aplicativo:
             x = min(max(x0 + dx, 0.0), lw - w0)
             y = min(max(y0 + dy, 0.0), lh - h0)
             if ima:
-                d, linha = imantar("x", [x, x + w0 / 2, x + w0], xs)
+                d, linha = imantar("x", [x, x + w0 / 2, x + w0], xs, [x, x + w0], xs_sang)
                 if linha is not None and 0 <= x + d <= lw - w0:
                     x += d
                     guias_x.append(linha)
-                d, linha = imantar("y", [y, y + h0 / 2, y + h0], ys)
+                d, linha = imantar("y", [y, y + h0 / 2, y + h0], ys, [y, y + h0], ys_sang)
                 if linha is not None and 0 <= y + d <= lh - h0:
                     y += d
                     guias_y.append(linha)
@@ -3965,7 +4002,8 @@ class Aplicativo:
             if ima:
                 for lado in ("w", "e"):
                     if lado in alca:
-                        d, linha = imantar(lado, [esq if lado == "w" else dir_], xs)
+                        v_lado = [esq if lado == "w" else dir_]
+                        d, linha = imantar(lado, v_lado, xs, v_lado, xs_sang)
                         if linha is not None:
                             guias_x.append(linha)
                             if lado == "w":
@@ -3974,7 +4012,8 @@ class Aplicativo:
                                 dir_ += d
                 for lado in ("n", "s"):
                     if lado in alca:
-                        d, linha = imantar(lado, [topo if lado == "n" else base], ys)
+                        v_lado = [topo if lado == "n" else base]
+                        d, linha = imantar(lado, v_lado, ys, v_lado, ys_sang)
                         if linha is not None:
                             guias_y.append(linha)
                             if lado == "n":
@@ -4484,6 +4523,20 @@ class Aplicativo:
         selecionados = self._indices_espacos_selecionados()
 
         def mudar(l):
+            if acao in ("pagina_util", "pagina"):
+                # Botão Preencher Página: passa pelas linhas da Safe Zone e preenche 100% da página até a sangria
+                # ignorando a trava de 22% (suporta 1 ou mais fotos selecionadas)
+                alvos_p = sorted(selecionados) if selecionados and alvo[0] == "espaco" else None
+                if alvos_p:
+                    for idx_p in alvos_p:
+                        esp_p = l["espacos"][idx_p]
+                        pag_p = self._pagina_do_espaco(esp_p)
+                        px, py, pw_p, ph_p = area_pagina_mm(self.produto, pag_p)
+                        self._definir_espaco_mm(esp_p, px, py, pw_p, ph_p)
+                    return
+                x, y, w, h = area_pagina_mm(self.produto, pagina)
+                self._definir_espaco_mm(e, x, y, w, h)
+                return
             x, y, w, h = self._espaco_mm(e)
             if acao == "centro_h":
                 x = ux + (uw - w) / 2
@@ -4493,24 +4546,14 @@ class Aplicativo:
                 if e.get("foto"):
                     prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
                     x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (x, y, w, h))
-            elif acao == "pagina_util":
+            elif acao == "pagina_safe":
                 x, y, w, h = ux, uy, uw, uh
                 if e.get("foto"):
                     prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
                     if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
                         x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (ux, uy, uw, uh))
-            elif acao == "pagina":
-                x, y, w, h = area_pagina_mm(self.produto, pagina)
-                if e.get("foto"):
-                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
-                    if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
-                        x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (x, y, w, h))
             elif acao == "lamina":
                 x, y, w, h = 0.0, 0.0, lw, lh
-                if e.get("foto"):
-                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
-                    if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
-                        x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (0.0, 0.0, lw, lh))
             elif acao == "igualar":
                 alvos_ig = selecionados if len(selecionados) > 1 else set(range(len(l["espacos"])))
                 caixas_ig = [self._espaco_mm(l["espacos"][j]) for j in alvos_ig]
@@ -4527,7 +4570,14 @@ class Aplicativo:
             x, y = min(max(x, 0.0), lw - w), min(max(y, 0.0), lh - h)
             self._definir_espaco_mm(e, x, y, w, h)
 
-        self._mudar_espacos(mudar, "Tamanho das fotos igualado." if acao == "igualar" else None)
+        msg_acao = {
+            "igualar": "Tamanho das fotos igualado.",
+            "pagina_util": "Foto expandida 100% na página até a sangria (ultrapassando a Safe Zone).",
+            "pagina": "Foto expandida 100% na página até a sangria (ultrapassando a Safe Zone).",
+            "pagina_safe": "Foto encaixada dentro das linhas da Safe Zone.",
+            "lamina": "Foto expandida 100% na lâmina inteira até a sangria.",
+        }.get(acao)
+        self._mudar_espacos(mudar, msg_acao)
 
     def _atualizar_numeros(self):
         if not hasattr(self, "num_vars"):
@@ -5316,6 +5366,9 @@ class Aplicativo:
         self._areas_sugestoes = []
         y = 4
         rotulos = {
+            "meio_termo_esq": "Meio Termo (Esq. Sangrada + Safe)",
+            "meio_termo_dir": "Meio Termo (Safe + Dir. Sangrada)",
+            "sangria_total": "Preenchimento Máx. (Sangria Total)",
             "panoramico_meio": "Panorâmica atravessa a dobra",
             "transpasse_60_40": "Transpassa o meio (60/40)",
             "transpasse_70_30": "Transpassa o meio (70/30)",

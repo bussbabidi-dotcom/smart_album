@@ -102,22 +102,29 @@ def area_pagina_mm(produto, indice):
     return (x0, 0, x1 - x0, ph + 2 * b)
 
 
-def area_util_pagina_mm(produto, indice, margem=None):
-    """Área onde as fotos entram: a página sem sangria, menos a margem e a dobra."""
+def area_util_pagina_mm(produto, indice, margem=None, respeitar_seguranca=True):
+    """
+    Área onde as fotos entram respeitando as linhas imaginárias da Safe Zone:
+    a página sem sangria, menos a margem (no mínimo seguranca_mm quando respeitar_seguranca=True)
+    e a proteção da dobra central.
+    """
     pw, ph = produto["pagina_mm"]
-    b = produto["sangria_mm"]
+    b = float(produto["sangria_mm"])
+    seg = float(produto.get("seguranca_mm", 8.0))
     n = produto["paginas_por_lamina"]
-    margem = produto["margem_mm"] if margem is None else margem
-    if margem <= 0:
+    margem_cfg = float(produto["margem_mm"] if margem is None else margem)
+    if not respeitar_seguranca and margem_cfg <= 0:
         return area_pagina_mm(produto, indice)
-    meia_dobra = produto["dobra_mm"] / 2.0 if n > 1 else 0
-    x0 = b + pw * indice + margem
-    x1 = b + pw * (indice + 1) - margem
+    margem_efetiva = max(seg, margem_cfg) if respeitar_seguranca else max(0.0, margem_cfg)
+    meia_dobra = float(produto.get("dobra_mm", 10.0)) / 2.0 if n > 1 else 0.0
+    margem_dobra = max(margem_efetiva, meia_dobra)
+    x0 = b + pw * indice + margem_efetiva
+    x1 = b + pw * (indice + 1) - margem_efetiva
     if n > 1 and indice > 0:
-        x0 = b + pw * indice + max(margem, meia_dobra)
+        x0 = b + pw * indice + margem_dobra
     if n > 1 and indice < n - 1:
-        x1 = b + pw * (indice + 1) - max(margem, meia_dobra)
-    return (x0, b + margem, x1 - x0, ph - 2 * margem)
+        x1 = b + pw * (indice + 1) - margem_dobra
+    return (x0, b + margem_efetiva, max(10.0, x1 - x0), max(10.0, ph - 2 * margem_efetiva))
 
 
 def normalizar_mm(produto, caixa):

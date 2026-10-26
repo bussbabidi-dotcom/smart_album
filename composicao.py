@@ -429,13 +429,15 @@ def aplicar_moldura(imagem, moldura, px_por_mm=None):
 
 
 def desenhar_guias(img, linhas_sangria, linhas_seguranca, linhas_dobra):
-    """Guias só para a prévia. Cada lista tem retângulos (x0, y0, x1, y1) ou linhas verticais x."""
+    """Guias estilo Adobe Photoshop: linhas ciano contínuas (0, 229, 255) para Safe Zone e Sangria."""
     desenho = ImageDraw.Draw(img)
+    # Linha de Sangria (ciano discreto estilo guia secundária do Photoshop)
     for caixa in linhas_sangria:
-        desenho.rectangle(caixa, outline=(230, 60, 60), width=1)
+        desenho.rectangle(caixa, outline=(0, 175, 215), width=1)
+    # Linhas imaginárias da Safe Zone (ciano vivo contínuo estilo Photoshop #00E5FF)
     for caixa in linhas_seguranca:
-        desenho.rectangle(caixa, outline=(60, 170, 230), width=1)
+        desenho.rectangle(caixa, outline=(0, 229, 255), width=1)
+    # Linha da dobra central
     for x in linhas_dobra:
-        for y in range(0, img.height, 8):
-            desenho.line([(x, y), (x, min(img.height, y + 4))], fill=(120, 120, 120), width=1)
+        desenho.line([(x, 0), (x, img.height)], fill=(0, 205, 240), width=1)
     return img

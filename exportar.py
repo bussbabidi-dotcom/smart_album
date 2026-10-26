@@ -124,18 +124,18 @@ def tamanho_final_px(produto, dpi=None, marcas_registro=False):
     return (w, h)
 
 
-def _guias_lamina(img, produto):
+def _guias_lamina(img, produto, margem=None):
+    from produtos import area_util_pagina_mm
     W_mm, H_mm = lamina_mm(produto)
     k = img.width / W_mm
     b = produto["sangria_mm"] * k
-    seg = (produto["sangria_mm"] + produto["seguranca_mm"]) * k
     pw = produto["pagina_mm"][0] * k
     n = produto["paginas_por_lamina"]
     sangria = [(b, b, img.width - b, img.height - b)]
     seguranca = []
     for i in range(n):
-        x0 = b + pw * i
-        seguranca.append((x0 + seg - b, seg, x0 + pw - (seg - b), img.height - seg))
+        ux, uy, uw, uh = area_util_pagina_mm(produto, i, margem, respeitar_seguranca=True)
+        seguranca.append((ux * k, uy * k, (ux + uw) * k, (uy + uh) * k))
     dobras = [b + pw * i for i in range(1, n)]
     return desenhar_guias(img, sangria, seguranca, dobras)
 
