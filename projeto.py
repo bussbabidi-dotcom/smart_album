@@ -168,14 +168,18 @@ def ordenar_fotos(projeto, info, por="nome"):
     projeto["fotos"].sort(key=chave)
 
 
-def fotos_para_diagramar(projeto, info, somente_nao_usadas=False):
+def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=None):
     """Fotos analisadas, na ordem do projeto, com pasta, cenário e rosto para o diagramar."""
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
+    chave_pasta_alvo = normalizar_caminho(pasta_alvo) if pasta_alvo else None
     saida = []
     for foto in projeto["fotos"]:
         chave = normalizar_caminho(foto["caminho"])
         dados = info.get(chave)
         if not dados or ja_usadas.get(chave):
+            continue
+        ch_pasta = normalizar_caminho(pasta_da_foto(foto))
+        if chave_pasta_alvo and ch_pasta != chave_pasta_alvo:
             continue
         saida.append({
             "caminho": foto["caminho"],
@@ -184,7 +188,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False):
             "destaque": bool(foto.get("destaque")),
             "cenario": dados.get("cenario"),
             "rosto": dados.get("rosto"),
-            "pasta": normalizar_caminho(pasta_da_foto(foto)),
+            "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),
         })
     return saida

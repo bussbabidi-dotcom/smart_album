@@ -42,8 +42,13 @@ def configuracao(produto, projeto_cfg=None):
         "max_fotos_lamina": produto["max_fotos_lamina"],
         "max_fotos_pagina": MAX_POR_PAGINA,
         "laminas_desejadas": produto["laminas_min"],
+        "separar_pastas": True,
         "reconhecer_cenarios": True,
+        "limiar_cenario": 0.28,
         "reconhecer_rostos": True,
+        "permitir_transpasse": True,
+        "modo_corte": "elastico",
+        "corte_maximo": CORTE_MAXIMO,
         "preencher_espacos_extras": False,
         "excluir_repetidas": False,
         "fundo": "#ffffff",
@@ -52,6 +57,17 @@ def configuracao(produto, projeto_cfg=None):
         if valor is not None:
             cfg[chave] = valor
     return cfg
+
+
+def _limite_corte_cfg(cfg):
+    if not cfg:
+        return CORTE_MAXIMO
+    if cfg.get("modo_corte") == "sem_corte":
+        return 1.0
+    try:
+        return max(1.0, min(1.50, float(cfg.get("corte_maximo", CORTE_MAXIMO))))
+    except (TypeError, ValueError):
+        return CORTE_MAXIMO
 
 
 def novo_id():
@@ -94,19 +110,19 @@ def caixa_proporcao_padrao(proporcao, area):
     return (x0 + (W - w) / 2.0, y0 + (H - h) / 2.0, w, h)
 
 
-def quadros_1_foto(proporcao, area):
+def quadros_1_foto(proporcao, area, corte_max=CORTE_MAXIMO):
     """
     Para 1 única foto na área:
-    - Se preencher toda a área útil causar corte <= CORTE_MAXIMO (22%),
+    - Se preencher toda a área útil causar corte <= corte_max (22%),
       preenche 100% da área.
-    - Se distorcer/cortar mais que CORTE_MAXIMO, usa a proporção padrão
+    - Se distorcer/cortar mais que corte_max, usa a proporção padrão
       original da imagem ocupando a dimensão máxima da área.
     """
     x0, y0, W, H = area
     p = max(0.1, float(proporcao or 1.0))
     quadro_cheio = (x0, y0, W, H)
     corte_cheio = _corte_quadro(p, quadro_cheio)
-    if corte_cheio <= CORTE_MAXIMO:
+    if corte_cheio <= corte_max + 1e-4:
         return [(quadro_cheio, corte_cheio, 0.0, "preenchimento_total")]
     quadro_padrao = caixa_proporcao_padrao(p, area)
     usado = quadro_padrao[2] * quadro_padrao[3]
@@ -132,15 +148,15 @@ def _composicoes(n, max_partes, max_tamanho):
             yield (primeiro,) + resto
 
 
-def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha):
+def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha, corte_max=CORTE_MAXIMO):
     """
     Distribui as larguras das fotos dentro de uma linha de altura `altura_linha`
     tentando preencher `largura_util`:
-    - Se o ajuste proporcional mantiver todas as fotos com corte <= CORTE_MAXIMO,
+    - Se o ajuste proporcional mantiver todas as fotos com corte <= corte_max,
       preenche 100% da largura da linha.
-    - Se alguma foto for forçada além de CORTE_MAXIMO, trava essa foto na sua
+    - Se alguma foto for forçada além de corte_max, trava essa foto na sua
       proporção padrão (`w = altura_linha * p`) e expande as demais fotos da
-      linha (até o limite seguro de CORTE_MAXIMO) para absorver o espaço restante.
+      linha (até o limite seguro de corte_max) para absorver o espaço restante.
     """
     k = len(proporcoes_linha)
     if k == 0 or largura_util <= 0 or altura_linha <= 0:
@@ -152,11 +168,11 @@ def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha):
 
     escala = largura_util / soma_nat
     corte_uniforme = max(escala, 1.0 / max(1e-6, escala))
-    if corte_uniforme <= CORTE_MAXIMO:
+    if corte_uniforme <= corte_max + 1e-4:
         return [w * escala for w in larguras_nat], False
 
-    # Quando estoura CORTE_MAXIMO, identificamos fotos com proporção extrema na linha
-    # para mantê-las na proporção padrão enquanto as demais se expandem até CORTE_MAXIMO.
+    # Quando estoura corte_max, identificamos fotos com proporção extrema na linha
+    # para mantê-las na proporção padrão enquanto as demais se expandem até corte_max.
     if k == 1:
         # 1 foto sozinha na linha: trava na proporção padrão limitada à largura_util
         w_padrao = min(largura_util, larguras_nat[0])
@@ -171,12 +187,10 @@ def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha):
     )
     travadas = set()
     larguras = list(larguras_nat)
-    usou_padrao = False
 
     # Tenta travar na proporção padrão a(s) foto(s) mais extrema(s) e expandir as vizinhas
     for candidato in ordem_discrepancia:
         travadas.add(candidato)
-        usou_padrao = True
         largura_travada = sum(larguras_nat[i] for i in travadas)
         livres = [i for i in range(k) if i not in travadas]
         if not livres:
@@ -185,25 +199,25 @@ def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha):
         soma_livres = sum(larguras_nat[i] for i in livres)
         if restante > 0 and soma_livres > 0:
             fator_livres = restante / soma_livres
-            # Limita a expansão das fotos vizinhas a CORTE_MAXIMO para não distorcê-las
-            fator_clamped = min(CORTE_MAXIMO, max(1.0 / CORTE_MAXIMO, fator_livres))
+            # Limita a expansão das fotos vizinhas a corte_max para não distorcê-las
+            fator_clamped = min(corte_max, max(1.0 / max(1.0, corte_max), fator_livres))
             for i in range(k):
                 larguras[i] = larguras_nat[i] if i in travadas else larguras_nat[i] * fator_clamped
             if abs(fator_livres - fator_clamped) <= 1e-4:
                 return larguras, True
 
     # Se todas precisarem de ajuste no mesmo sentido (ex.: linha inteira muito alta ou baixa),
-    # expande/contrai até o limite seguro CORTE_MAXIMO ou mantém proporção padrão
-    fator_seguro = min(CORTE_MAXIMO, max(1.0 / CORTE_MAXIMO, escala))
+    # expande/contrai até o limite seguro corte_max ou mantém proporção padrão
+    fator_seguro = min(corte_max, max(1.0 / max(1.0, corte_max), escala))
     return [w * fator_seguro for w in larguras_nat], True
 
 
-def _layout_linhas(proporcoes, area, espaco, linhas):
+def _layout_linhas(proporcoes, area, espaco, linhas, corte_max=CORTE_MAXIMO):
     """
     Fotos em linhas tentando preencher 100% da área útil da página.
-    - Se a escala vertical global ficar dentro de CORTE_MAXIMO (22%), fecha
+    - Se a escala vertical global ficar dentro de corte_max (22%), fecha
       100% da página (largura e altura totais).
-    - Se alguma linha distorcer além de CORTE_MAXIMO, essa linha volta para a
+    - Se alguma linha distorcer além de corte_max, essa linha volta para a
       proporção padrão das suas fotos e as demais linhas da página se expandem
       para ocupar a altura restante.
     """
@@ -212,7 +226,7 @@ def _layout_linhas(proporcoes, area, espaco, linhas):
     if n_linhas == 0 or W <= 0 or H <= 0:
         return None
     if len(proporcoes) == 1 and n_linhas == 1:
-        q, corte, vazio, _tipo = quadros_1_foto(proporcoes[0], area)[0]
+        q, corte, vazio, _tipo = quadros_1_foto(proporcoes[0], area, corte_max=corte_max)[0]
         return [q], corte, vazio
 
     disponivel_h = H - espaco * (n_linhas - 1)
@@ -240,13 +254,13 @@ def _layout_linhas(proporcoes, area, espaco, linhas):
     s = disponivel_h / total_nat
     corte_global = max(s, 1.0 / max(1e-6, s))
 
-    if corte_global <= CORTE_MAXIMO:
-        # Preenche 100% da página dentro do limite de 22%
+    if corte_global <= corte_max + 1e-4:
+        # Preenche 100% da página dentro do limite configurado
         alturas = [h * s for h in alturas_nat]
     else:
-        # Quando o esticamento uniforme estoura 22%:
+        # Quando o esticamento uniforme estoura corte_max:
         # Se houver mais de 1 linha, preserva na proporção padrão a linha com fotos
-        # mais sensíveis (ou de menor folga) e expande as outras linhas até CORTE_MAXIMO.
+        # mais sensíveis (ou de menor folga) e expande as outras linhas até corte_max.
         alturas = list(alturas_nat)
         if n_linhas > 1:
             # Ordena linhas pela quantidade de fotos (linhas com 1 foto sentem mais a distorção)
@@ -258,29 +272,26 @@ def _layout_linhas(proporcoes, area, espaco, linhas):
             restante_h = disponivel_h - h_fixas
             if restante_h > 0 and h_livres_nat > 0:
                 fator_livres = restante_h / h_livres_nat
-                fator_livres = min(CORTE_MAXIMO, max(1.0 / CORTE_MAXIMO, fator_livres))
+                fator_livres = min(corte_max, max(1.0 / max(1.0, corte_max), fator_livres))
                 for r in livres:
                     alturas[r] = alturas_nat[r] * fator_livres
-                # Se ainda sobrar espaço na página e a linha fixa puder absorver até CORTE_MAXIMO:
+                # Se ainda sobrar espaço na página e a linha fixa puder absorver até corte_max:
                 sobra = disponivel_h - sum(alturas)
                 if abs(sobra) > 1e-3:
                     for r in fixas:
                         alvo_r = alturas[r] + sobra / len(fixas)
                         fator_r = alvo_r / alturas_nat[r]
-                        if max(fator_r, 1.0 / max(1e-6, fator_r)) <= CORTE_MAXIMO:
+                        if max(fator_r, 1.0 / max(1e-6, fator_r)) <= corte_max + 1e-4:
                             alturas[r] = alvo_r
                         else:
                             # Mantém proporção padrão na foto que estouraria o limite!
                             alturas[r] = alturas_nat[r]
         else:
             # 1 única linha com várias fotos:
-            # Se s < 1 / CORTE_MAXIMO (a linha é muito mais alta que a página), limita pela altura H
-            if s < 1.0 / CORTE_MAXIMO:
+            if s < 1.0 / max(1.0, corte_max):
                 alturas = [disponivel_h]
             else:
-                # Linha mais baixa que a página: tenta expandir até CORTE_MAXIMO se couber,
-                # ou mantém proporção padrão se distorcer demais
-                alturas = [alturas_nat[0] * CORTE_MAXIMO if s > CORTE_MAXIMO else alturas_nat[0]]
+                alturas = [alturas_nat[0] * corte_max if s > corte_max else alturas_nat[0]]
 
     # Se mesmo assim a soma das alturas passar de disponivel_h, reescala dentro de disponivel_h
     soma_h = sum(alturas)
@@ -295,15 +306,15 @@ def _layout_linhas(proporcoes, area, espaco, linhas):
     maior_corte = 1.0
 
     for ps, w_util, h in zip(grupos_p, larguras_uteis, alturas):
-        larguras, _padrao = _distribuir_larguras_linha(ps, w_util, h)
+        larguras, _padrao = _distribuir_larguras_linha(ps, w_util, h, corte_max=corte_max)
         largura_linha = sum(larguras) + espaco * (len(ps) - 1)
         x = x0 + (W - largura_linha) / 2.0
         for p, w in zip(ps, larguras):
             q = (x, y, w, h)
             c_foto = _corte_quadro(p, q)
             # Proteção final individual: se por geometria extrema este quadro ainda
-            # passou de CORTE_MAXIMO + 0.02, crava na proporção padrão dentro da célula
-            if c_foto > CORTE_MAXIMO + 0.02:
+            # passou de corte_max + 0.02, crava na proporção padrão dentro da célula
+            if c_foto > corte_max + 0.02:
                 q = caixa_proporcao_padrao(p, q)
                 c_foto = 1.0
             quadros.append(q)
@@ -316,7 +327,7 @@ def _layout_linhas(proporcoes, area, espaco, linhas):
     return quadros, maior_corte, vazio
 
 
-def _layouts_assimetricos(proporcoes, area, espaco):
+def _layouts_assimetricos(proporcoes, area, espaco, corte_max=CORTE_MAXIMO):
     """
     Gera composições dinâmicas assimétricas (1 foto destaque + coluna/linha com as
     demais fotos) calculadas exatamente pelas proporções das fotos:
@@ -324,7 +335,7 @@ def _layouts_assimetricos(proporcoes, area, espaco):
     - Pilha à Esquerda + Destaque à Direita
     - Destaque no Topo + Linha na Base
     - Linha no Topo + Destaque na Base
-    Se alguma foto exceder CORTE_MAXIMO (22%), usa sua proporção padrão e expande
+    Se alguma foto exceder corte_max (22%), usa sua proporção padrão e expande
     o bloco vizinho para preencher o restante da página.
     """
     n = len(proporcoes)
@@ -356,19 +367,19 @@ def _layouts_assimetricos(proporcoes, area, espaco):
             soma_w_nat = w_hero_nat + w_pilha_nat
             fator_w = w_disp / max(1e-6, soma_w_nat)
 
-            if max(fator_w, 1.0 / max(1e-6, fator_w)) <= CORTE_MAXIMO:
+            if max(fator_w, 1.0 / max(1e-6, fator_w)) <= corte_max + 1e-4:
                 w_hero = w_hero_nat * fator_w
                 w_pilha = w_pilha_nat * fator_w
                 h_hero = H
             else:
-                # Se estourar 22%, trava a foto de destaque na proporção padrão e expande a pilha
+                # Se estourar corte_max, trava a foto de destaque na proporção padrão e expande a pilha
                 # (ou vice-versa) para ocupar o espaço restante da página!
                 w_hero = min(w_disp * 0.68, max(w_disp * 0.25, w_hero_nat))
                 w_pilha = w_disp - w_hero
                 corte_pilha = max((w_pilha / max(1e-6, w_pilha_nat)), (w_pilha_nat / max(1e-6, w_pilha)))
-                if corte_pilha > CORTE_MAXIMO:
-                    w_pilha = w_pilha_nat * (CORTE_MAXIMO if w_pilha > w_pilha_nat else 1.0 / CORTE_MAXIMO)
-                    w_hero = min(w_disp - w_pilha, w_hero_nat * CORTE_MAXIMO)
+                if corte_pilha > corte_max:
+                    w_pilha = w_pilha_nat * (corte_max if w_pilha > w_pilha_nat else 1.0 / max(1.0, corte_max))
+                    w_hero = min(w_disp - w_pilha, w_hero_nat * corte_max)
                 h_hero = min(H, w_hero / p_hero) if abs(w_hero - w_hero_nat) < 1e-3 else H
 
             for lado_hero in ("esq", "dir"):
@@ -382,14 +393,14 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                     x_hero = inicio_x + w_pilha + espaco
 
                 q_hero = (x_hero, y0 + (H - h_hero) / 2.0, w_hero, h_hero)
-                if _corte_quadro(p_hero, q_hero) > CORTE_MAXIMO + 0.02:
+                if _corte_quadro(p_hero, q_hero) > corte_max + 0.02:
                     q_hero = caixa_proporcao_padrao(p_hero, (x_hero, y0, w_hero, H))
 
                 # Alturas da pilha à direita/esquerda
                 alturas_p_nat = [w_pilha / p for p in p_outros]
                 soma_hp = sum(alturas_p_nat)
                 fator_hp = h_pilha_disp / max(1e-6, soma_hp)
-                fator_hp_seguro = min(CORTE_MAXIMO, max(1.0 / CORTE_MAXIMO, fator_hp))
+                fator_hp_seguro = min(corte_max, max(1.0 / max(1.0, corte_max), fator_hp))
                 alturas_p = [h * fator_hp_seguro for h in alturas_p_nat]
                 total_hp = sum(alturas_p) + espaco * (k - 1)
                 yp = y0 + (H - total_hp) / 2.0
@@ -397,7 +408,7 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                 quadros_mapa = {idx_hero: q_hero}
                 for i_outro, p_o, hp in zip(outros, p_outros, alturas_p):
                     qp = (x_pilha, yp, w_pilha, hp)
-                    if _corte_quadro(p_o, qp) > CORTE_MAXIMO + 0.02:
+                    if _corte_quadro(p_o, qp) > corte_max + 0.02:
                         qp = caixa_proporcao_padrao(p_o, qp)
                     quadros_mapa[i_outro] = qp
                     yp += hp + espaco
@@ -409,7 +420,7 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                 usado = sum(q[2] * q[3] for q in quadros)
                 vazio = max(0.0, 1.0 - usado / max(1.0, W * H))
                 desordem = sum(1 for pos, idx_orig in enumerate(ordem) if pos != idx_orig) * 0.04
-                custo = _custo(quadros, props_ordem, area, maior_corte, vazio) + desordem
+                custo = _custo(quadros, props_ordem, area, maior_corte, vazio, corte_max=corte_max) + desordem
                 opcoes.append((custo, quadros, None, ordem))
 
         # --- 2) Faixa Principal (Topo ou Base) + Linha com as Demais ---
@@ -422,7 +433,7 @@ def _layouts_assimetricos(proporcoes, area, espaco):
             soma_h_nat = h_hero_nat + h_linha_nat
             fator_h = h_disp / max(1e-6, soma_h_nat)
 
-            if max(fator_h, 1.0 / max(1e-6, fator_h)) <= CORTE_MAXIMO:
+            if max(fator_h, 1.0 / max(1e-6, fator_h)) <= corte_max + 1e-4:
                 h_hero = h_hero_nat * fator_h
                 h_linha = h_linha_nat * fator_h
                 w_hero = W
@@ -430,9 +441,9 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                 h_hero = min(h_disp * 0.68, max(h_disp * 0.25, h_hero_nat))
                 h_linha = h_disp - h_hero
                 corte_linha = max((h_linha / max(1e-6, h_linha_nat)), (h_linha_nat / max(1e-6, h_linha)))
-                if corte_linha > CORTE_MAXIMO:
-                    h_linha = h_linha_nat * (CORTE_MAXIMO if h_linha > h_linha_nat else 1.0 / CORTE_MAXIMO)
-                    h_hero = min(h_disp - h_linha, h_hero_nat * CORTE_MAXIMO)
+                if corte_linha > corte_max:
+                    h_linha = h_linha_nat * (corte_max if h_linha > h_linha_nat else 1.0 / max(1.0, corte_max))
+                    h_hero = min(h_disp - h_linha, h_hero_nat * corte_max)
                 w_hero = min(W, h_hero * p_hero) if abs(h_hero - h_hero_nat) < 1e-3 else W
 
             for pos_hero in ("topo", "base"):
@@ -446,17 +457,17 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                     y_hero = inicio_y + h_linha + espaco
 
                 q_hero = (x0 + (W - w_hero) / 2.0, y_hero, w_hero, h_hero)
-                if _corte_quadro(p_hero, q_hero) > CORTE_MAXIMO + 0.02:
+                if _corte_quadro(p_hero, q_hero) > corte_max + 0.02:
                     q_hero = caixa_proporcao_padrao(p_hero, (x0, y_hero, W, h_hero))
 
-                larguras_l, _padrao = _distribuir_larguras_linha(p_outros, w_linha_disp, h_linha)
+                larguras_l, _padrao = _distribuir_larguras_linha(p_outros, w_linha_disp, h_linha, corte_max=corte_max)
                 total_wl = sum(larguras_l) + espaco * (k - 1)
                 xl = x0 + (W - total_wl) / 2.0
 
                 quadros_mapa = {idx_hero: q_hero}
                 for i_outro, p_o, wl in zip(outros, p_outros, larguras_l):
                     ql = (xl, y_linha, wl, h_linha)
-                    if _corte_quadro(p_o, ql) > CORTE_MAXIMO + 0.02:
+                    if _corte_quadro(p_o, ql) > corte_max + 0.02:
                         ql = caixa_proporcao_padrao(p_o, ql)
                     quadros_mapa[i_outro] = ql
                     xl += wl + espaco
@@ -468,16 +479,16 @@ def _layouts_assimetricos(proporcoes, area, espaco):
                 usado = sum(q[2] * q[3] for q in quadros)
                 vazio = max(0.0, 1.0 - usado / max(1.0, W * H))
                 desordem = sum(1 for pos, idx_orig in enumerate(ordem) if pos != idx_orig) * 0.04
-                custo = _custo(quadros, props_ordem, area, maior_corte, vazio) + desordem
+                custo = _custo(quadros, props_ordem, area, maior_corte, vazio, corte_max=corte_max) + desordem
                 opcoes.append((custo, quadros, None, ordem))
 
     return opcoes
 
 
-def _custo(quadros, proporcoes, area, corte, vazio):
+def _custo(quadros, proporcoes, area, corte, vazio, corte_max=CORTE_MAXIMO):
     _x, _y, W, H = area
-    # Penaliza fortemente qualquer corte que tente passar de CORTE_MAXIMO
-    excesso_corte = max(0.0, corte - CORTE_MAXIMO)
+    # Penaliza fortemente qualquer corte que tente passar de corte_max
+    excesso_corte = max(0.0, corte - corte_max)
     custo = (
         PESO_CORTE * (math.log(max(1.0, corte)) ** 2)
         + 45.0 * (excesso_corte ** 2)
@@ -494,7 +505,7 @@ def _custo(quadros, proporcoes, area, corte, vazio):
     return custo
 
 
-def _layouts_sem_corte(proporcoes, area, espaco):
+def _layouts_sem_corte(proporcoes, area, espaco, priorizar=False):
     """
     Layouts que preservam 100% da proporção original de cada foto, mas
     expandindo cada linha ao máximo possível dentro da página.
@@ -537,7 +548,8 @@ def _layouts_sem_corte(proporcoes, area, espaco):
             inicio += quantidade
         usado = sum(w * h for _x, _y, w, h in quadros)
         vazio = max(0.0, 1.0 - usado / max(1.0, W * H))
-        custo = 0.35 + PESO_VAZIO * 0.55 * vazio + 0.06 * (len(linhas) - 1)
+        base = 0.02 if priorizar else 0.35
+        custo = base + PESO_VAZIO * (0.25 if priorizar else 0.55) * vazio + 0.06 * (len(linhas) - 1)
         saida.append((custo, quadros, "__sem_corte__", list(range(n))))
     return saida
 
@@ -575,12 +587,15 @@ def _layouts_transpasse_central(fotos, produto, cfg):
     - Faixa Panorâmica atravessando o meio (Topo ou Base)
     Todos desviam automaticamente rostos detectados da linha de dobra central.
     """
+    if not cfg.get("permitir_transpasse", True):
+        return []
     n = len(fotos)
     if n < 2 or n > 9 or produto.get("paginas_por_lamina", 1) < 2:
         return []
     W, H = lamina_mm(produto)
     margem = max(0.0, float(cfg["margem_mm"]))
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
+    corte_max = _limite_corte_cfg(cfg)
     area_w = W - 2 * margem
     area_h = H - 2 * margem
     if area_w <= intervalo * 2 or area_h <= intervalo * 2:
@@ -616,7 +631,7 @@ def _layouts_transpasse_central(fotos, produto, cfg):
             for idx_hero in candidatos_hero:
                 p_hero = max(0.15, float(fotos[idx_hero]["proporcao"]))
                 q_hero = area_hero
-                if _corte_quadro(p_hero, q_hero) > CORTE_MAXIMO + 0.08:
+                if _corte_quadro(p_hero, q_hero) > corte_max + 0.08:
                     q_hero = caixa_proporcao_padrao(p_hero, area_hero)
                     # Garante que mesmo na proporção padrão o quadro continue atravessando o meio se couber
                     if lado_hero == "esq":
@@ -631,7 +646,7 @@ def _layouts_transpasse_central(fotos, produto, cfg):
 
                 indices_rest = [i for i in range(n) if i != idx_hero]
                 props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
-                opcoes_r = layouts_pagina(props_rest, area_resto, intervalo, (), produto=None, pagina=0, maximo=1)
+                opcoes_r = layouts_pagina(props_rest, area_resto, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
                 if not opcoes_r or not opcoes_r[0][1]:
                     continue
                 _cr, quadros_r, _mod_r, ordem_r = opcoes_r[0]
@@ -679,11 +694,11 @@ def _layouts_transpasse_central(fotos, produto, cfg):
             indices_restantes = [i for i in range(n) if i != indice_hero]
             props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
             area_inferior = (margem, inferior_y, area_w, inferior_h)
-            melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1)
+            melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
             if melhores_inf and melhores_inf[0][1]:
                 _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
                 quadro_hero = (margem, hero_y, area_w, hero_h)
-                if _corte_quadro(p_hero, quadro_hero) > CORTE_MAXIMO:
+                if _corte_quadro(p_hero, quadro_hero) > corte_max:
                     quadro_hero = caixa_proporcao_padrao(p_hero, quadro_hero)
                 quadros_mapa = {indice_hero: quadro_hero}
                 for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
@@ -728,11 +743,11 @@ def _geometrias_parecidas(a, b, produto):
     )
 
 
-def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pagina=0, maximo=5):
+def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pagina=0, maximo=5, corte_max=CORTE_MAXIMO):
     """
     Opções para uma página: [(custo, quadros em mm, modelo, ordem)].
-    Prioriza preencher 100% da área útil da página mantendo corte <= CORTE_MAXIMO (22%).
-    Caso o preenchimento total distorça alguma imagem > 22%, usa a proporção padrão
+    Prioriza preencher 100% da área útil da página mantendo corte <= corte_max (22%).
+    Caso o preenchimento total distorça alguma imagem > corte_max, usa a proporção padrão
     daquela imagem e expande as demais imagens da página.
     """
     n = len(proporcoes)
@@ -740,29 +755,31 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
     if n == 0:
         return [(0.0, [], None, [])]
     ordem_natural = list(range(n))
+    somente_sem_corte = corte_max <= 1.005
 
     if n == 1:
-        for quadro, corte, vazio, tipo in quadros_1_foto(proporcoes[0], area):
+        for quadro, corte, vazio, tipo in quadros_1_foto(proporcoes[0], area, corte_max=corte_max):
             marcador = "__sem_corte__" if tipo == "proporcao_padrao" else None
-            opcoes.append((_custo([quadro], proporcoes, area, corte, vazio), [quadro], marcador, [0]))
+            opcoes.append((_custo([quadro], proporcoes, area, corte, vazio, corte_max=corte_max), [quadro], marcador, [0]))
     else:
-        # 1. Partições em Linhas Horizontais Elásticas
-        for linhas in _composicoes(n, MAX_LINHAS, MAX_LINHAS):
-            r = _layout_linhas(proporcoes, area, espaco, linhas)
-            if r:
-                quadros, corte, vazio = r
-                opcoes.append((_custo(quadros, proporcoes, area, corte, vazio), quadros, None, ordem_natural))
-            # 2. Partições em Colunas Verticais Elásticas (transpondo x<->y e w<->h)
-            x0, y0, W, H = area
-            invertidas = [1.0 / max(0.1, float(p)) for p in proporcoes]
-            r_col = _layout_linhas(invertidas, (y0, x0, H, W), espaco, linhas)
-            if r_col:
-                quadros_t, corte, vazio = r_col
-                quadros = [(qy, qx, qh, qw) for (qx, qy, qw, qh) in quadros_t]
-                opcoes.append((_custo(quadros, proporcoes, area, corte, vazio) + 0.01, quadros, None, ordem_natural))
+        if not somente_sem_corte:
+            # 1. Partições em Linhas Horizontais Elásticas
+            for linhas in _composicoes(n, MAX_LINHAS, MAX_LINHAS):
+                r = _layout_linhas(proporcoes, area, espaco, linhas, corte_max=corte_max)
+                if r:
+                    quadros, corte, vazio = r
+                    opcoes.append((_custo(quadros, proporcoes, area, corte, vazio, corte_max=corte_max), quadros, None, ordem_natural))
+                # 2. Partições em Colunas Verticais Elásticas (transpondo x<->y e w<->h)
+                x0, y0, W, H = area
+                invertidas = [1.0 / max(0.1, float(p)) for p in proporcoes]
+                r_col = _layout_linhas(invertidas, (y0, x0, H, W), espaco, linhas, corte_max=corte_max)
+                if r_col:
+                    quadros_t, corte, vazio = r_col
+                    quadros = [(qy, qx, qh, qw) for (qx, qy, qw, qh) in quadros_t]
+                    opcoes.append((_custo(quadros, proporcoes, area, corte, vazio, corte_max=corte_max) + 0.01, quadros, None, ordem_natural))
 
-        # 3. Composições Assimétricas Dinâmicas (Destaque + Coadjuvantes)
-        opcoes.extend(_layouts_assimetricos(proporcoes, area, espaco))
+            # 3. Composições Assimétricas Dinâmicas (Destaque + Coadjuvantes)
+            opcoes.extend(_layouts_assimetricos(proporcoes, area, espaco, corte_max=corte_max))
 
     # 4. Caso o usuário tenha salvado manualmente algum molde PNG/customizado compatível
     if produto is not None and modelos_pagina:
@@ -781,16 +798,16 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
                 if melhor is None or c < melhor[0]:
                     melhor = (c, list(perm))
             if melhor is not None:
-                # Se não tiver molde PNG rígido e estourar CORTE_MAXIMO, adapta os quadros
+                # Se não tiver molde PNG rígido e estourar corte_max, adapta os quadros
                 quadros_finais = list(quadros)
                 if not modelo.get("molde_png"):
                     for idx_q, idx_f in enumerate(melhor[1]):
-                        if _corte_quadro(proporcoes[idx_f], quadros_finais[idx_q]) > CORTE_MAXIMO:
+                        if _corte_quadro(proporcoes[idx_f], quadros_finais[idx_q]) > corte_max:
                             quadros_finais[idx_q] = caixa_proporcao_padrao(proporcoes[idx_f], quadros_finais[idx_q])
                 opcoes.append((melhor[0], quadros_finais, modelo, melhor[1]))
 
     # 5. Opções com proporção 100% nativa sem corte
-    opcoes.extend(_layouts_sem_corte(proporcoes, area, espaco))
+    opcoes.extend(_layouts_sem_corte(proporcoes, area, espaco, priorizar=somente_sem_corte))
     opcoes.sort(key=lambda o: o[0])
 
     vistos = set()
@@ -837,6 +854,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
     margem = float(cfg["margem_mm"])
     paginas = produto["paginas_por_lamina"]
     max_pagina = max(1, int(cfg.get("max_fotos_pagina", MAX_POR_PAGINA)))
+    corte_max = _limite_corte_cfg(cfg)
 
     modelos_lamina = [m for m in modelos if m.get("escopo") == "lamina" and len(m["espacos"]) == n]
     modelos_pagina = [m for m in modelos if m.get("escopo") == "pagina"]
@@ -846,11 +864,11 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         p = max(0.1, float(fotos[0]["proporcao"]))
         area_lamina_util = (margem, margem, max(1.0, lw - 2 * margem), max(1.0, lh - 2 * margem))
         corte_lamina = _corte_quadro(p, (0, 0, lw, lh))
-        if corte_lamina <= CORTE_MAXIMO or (fotos[0].get("destaque") and p >= 1.35):
+        if cfg.get("permitir_transpasse", True) and (corte_lamina <= corte_max or (fotos[0].get("destaque") and p >= 1.35)):
             bonus = -2.0 if fotos[0].get("destaque") and p > 1.25 else 0.0
-            quadro_l = (0, 0, lw, lh) if corte_lamina <= CORTE_MAXIMO else caixa_proporcao_padrao(p, area_lamina_util)
+            quadro_l = (0, 0, lw, lh) if corte_lamina <= corte_max else caixa_proporcao_padrao(p, area_lamina_util)
             opcoes.append({
-                "custo": PESO_CORTE * math.log(max(1.0, min(corte_lamina, CORTE_MAXIMO))) ** 2 * 0.5 + bonus,
+                "custo": PESO_CORTE * math.log(max(1.0, min(corte_lamina, corte_max))) ** 2 * 0.5 + bonus,
                 "espacos": [_espaco(produto, quadro_l, fotos[0]["caminho"])],
                 "sobreposicoes": [],
                 "modelo": None,
@@ -862,7 +880,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         quadros = [(e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh) for e in espacos_m]
         if not modelo.get("molde_png"):
             for i_q, f in enumerate(fotos):
-                if _corte_quadro(f["proporcao"], quadros[i_q]) > CORTE_MAXIMO:
+                if _corte_quadro(f["proporcao"], quadros[i_q]) > corte_max:
                     quadros[i_q] = caixa_proporcao_padrao(f["proporcao"], quadros[i_q])
         corte = max(_corte_quadro(f["proporcao"], q) for f, q in zip(fotos, quadros))
         opcoes.append({
@@ -872,8 +890,9 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             "modelo": modelo["id"],
         })
 
-    for op_transpasse in _layouts_transpasse_central(fotos, produto, cfg):
-        opcoes.append(op_transpasse)
+    if cfg.get("permitir_transpasse", True):
+        for op_transpasse in _layouts_transpasse_central(fotos, produto, cfg):
+            opcoes.append(op_transpasse)
 
     if paginas == 1:
         divisoes = [(n,)]
@@ -900,6 +919,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
                     produto,
                     pagina,
                     maximo=4,
+                    corte_max=corte_max,
                 ),
             ))
         vazias = sum(1 for k in divisao if k == 0)
@@ -958,8 +978,8 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         if len(unicas) >= maximo:
             break
 
-    # Garante que os layouts que atravessam o meio (60/40 e 70/30) sempre apareçam nas sugestões
-    if maximo >= 4:
+    # Garante que os layouts que atravessam o meio (60/40 e 70/30) sempre apareçam nas sugestões quando permitido
+    if maximo >= 4 and cfg.get("permitir_transpasse", True):
         for op_t in reserva_transpasse:
             if not any(u.get("tipo_layout") == op_t.get("tipo_layout") for u in unicas):
                 if len(unicas) >= maximo:
@@ -1129,9 +1149,10 @@ def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
     """
     if not fotos:
         return []
+    limiar = max(0.10, min(0.65, float(limiar or 0.28)))
     clusters = []  # [{"id": int, "centro": list, "fotos": list, "ultima_pos": int}]
     for pos, foto in enumerate(fotos):
-        ass = foto.get("cenario")
+        ass = foto.get("cenario") or foto.get("assinatura_cenario")
         if not ass:
             if clusters:
                 clusters[-1]["fotos"].append(dict(foto, cenario_grupo=clusters[-1]["id"]))
@@ -1254,39 +1275,34 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
     return grupos
 
 
-def dividir(fotos, produto, cfg):
+def _blocos_pastas_e_cenarios(fotos, cfg):
     """
-    Grupos de fotos (um por lâmina) e as fotos que não couberam.
-    - Respeita estritamente a separação por pastas (fotos de pastas diferentes não se misturam).
-    - Quando `reconhecer_cenarios` está ativo, agrupa fotos com o mesmo cenário visual em
-      páginas/lâminas seguidas sem nunca misturar cenários diferentes na mesma lâmina.
+    Organiza a lista de fotos em blocos homogêneos respeitando `separar_pastas`
+    e `reconhecer_cenarios` (com sensibilidade `limiar_cenario`).
+    Devolve (blocos_finais, qtd_pastas, qtd_cenarios).
     """
-    maximo = max(1, int(cfg["max_fotos_lamina"]))
-    capacidade = produto["laminas_max"] * maximo
-    sobras = list(fotos[capacidade:])
-    fotos = list(fotos[:capacidade])
     if not fotos:
-        return [], sobras
+        return [], 0, 0
 
-    # 1. Separa em blocos por Pasta (mantendo a ordem das pastas carregadas)
-    blocos_pasta = []
-    ordem_pastas = []
+    pastas_unicas = []
     mapa_pastas = {}
     for f in fotos:
-        ch_pasta = f.get("pasta") or ""
+        ch_pasta = f.get("pasta") or f.get("nome_pasta") or ""
         if ch_pasta not in mapa_pastas:
             mapa_pastas[ch_pasta] = []
-            ordem_pastas.append(ch_pasta)
+            pastas_unicas.append(ch_pasta)
         mapa_pastas[ch_pasta].append(f)
-    for ch_pasta in ordem_pastas:
-        blocos_pasta.append(mapa_pastas[ch_pasta])
 
-    # 2. Dentro de cada pasta, se reconhecer_cenarios estiver ativo, junta fotos de mesmo cenário
-    #    e cria sub-blocos estritos por cenário para não misturar cenários diferentes na mesma lâmina
+    if cfg.get("separar_pastas", True):
+        blocos_pasta = [mapa_pastas[ch] for ch in pastas_unicas]
+    else:
+        blocos_pasta = [list(fotos)]
+
+    limiar = float(cfg.get("limiar_cenario", 0.28))
     blocos_finais = []
     if cfg.get("reconhecer_cenarios", True):
         for fotos_p in blocos_pasta:
-            agrupadas = ordenar_e_agrupar_por_cenario(fotos_p)
+            agrupadas = ordenar_e_agrupar_por_cenario(fotos_p, limiar=limiar)
             sub_blocos = {}
             ordem_cen = []
             for f in agrupadas:
@@ -1300,16 +1316,116 @@ def dividir(fotos, produto, cfg):
     else:
         blocos_finais = blocos_pasta
 
+    return blocos_finais, max(1, len(pastas_unicas)), max(1, len(blocos_finais))
+
+
+def dividir(fotos, produto, cfg):
+    """
+    Grupos de fotos (um por lâmina) e as fotos que não couberam.
+    - Quando `separar_pastas` está ativo, fotos de pastas diferentes nunca se misturam.
+    - Quando `reconhecer_cenarios` está ativo, agrupa fotos com o mesmo cenário visual em
+      páginas/lâminas seguidas sem nunca misturar cenários diferentes na mesma lâmina.
+    - Distribui proporcionalmente `laminas_desejadas` entre os blocos quando viável.
+    """
+    maximo = max(1, int(cfg["max_fotos_lamina"]))
+    capacidade = produto["laminas_max"] * maximo
+    sobras = list(fotos[capacidade:])
+    fotos = list(fotos[:capacidade])
+    if not fotos:
+        return [], sobras
+
+    blocos_finais, _n_pastas, _n_cenarios = _blocos_pastas_e_cenarios(fotos, cfg)
+    if not blocos_finais:
+        return [], sobras
+
+    # Calcula quantidades mínimas, máximas e naturais de lâminas para cada bloco
+    mins_b = []
+    maxs_b = []
+    alvos_b = []
+    for bloco in blocos_finais:
+        nb = len(bloco)
+        destaques_b = sum(1 for f in bloco if f.get("destaque"))
+        s_min = max(1, int(math.ceil(nb / float(maximo))), destaques_b)
+        s_max = max(s_min, nb)
+        s_nat = _numero_laminas(nb, produto, cfg, destaques_b, respeitar_minimo_produto=False)
+        s_nat = max(s_min, min(s_max, s_nat))
+        mins_b.append(s_min)
+        maxs_b.append(s_max)
+        alvos_b.append(s_nat)
+
+    # Se o usuário definiu laminas_desejadas compatível com a capacidade dos blocos,
+    # ajusta proporcionalmente os alvos por bloco para aproximar do total desejado
+    if produto.get("laminas_min", 0) > 0 or "laminas_desejadas" in cfg:
+        desejadas = int(cfg.get("laminas_desejadas", sum(alvos_b)))
+        desejadas = max(sum(mins_b), min(produto["laminas_max"], sum(maxs_b), desejadas))
+        por_lamina = max(1, int(cfg["fotos_por_lamina"]))
+        total_fotos = len(fotos)
+        media_desejada = total_fotos / float(max(1, desejadas))
+        # Permite ajustar os blocos se a média por lâmina continuar razoável (entre 1 e max_fotos_lamina)
+        if 1.0 <= media_desejada <= maximo and abs(media_desejada - por_lamina) <= max(2.0, por_lamina * 0.65):
+            while sum(alvos_b) < desejadas:
+                # Escolhe o bloco com maior densidade de fotos por lâmina para ganhar +1 lâmina
+                candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] < maxs_b[i]]
+                if not candidatos:
+                    break
+                melhor_i = max(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
+                alvos_b[melhor_i] += 1
+            while sum(alvos_b) > desejadas:
+                # Escolhe o bloco com menor densidade de fotos por lâmina para reduzir -1 lâmina
+                candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] > mins_b[i]]
+                if not candidatos:
+                    break
+                melhor_i = min(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
+                alvos_b[melhor_i] -= 1
+
     # 3. Divide cada bloco independente em lâminas seguidas (sem misturar blocos)
     todos_grupos = []
-    for bloco in blocos_finais:
-        grupos_b = _dividir_bloco_unico(bloco, produto, cfg)
+    for bloco, s_alvo in zip(blocos_finais, alvos_b):
+        grupos_b = _dividir_bloco_unico(bloco, produto, cfg, s_alvo=s_alvo)
         for g in grupos_b:
             if len(todos_grupos) < produto["laminas_max"]:
                 todos_grupos.append(g)
             else:
                 sobras.extend(g)
     return todos_grupos, sobras
+
+
+def previa_diagramacao(fotos, produto, cfg):
+    """
+    Calcula instantaneamente a prévia de como ficará a diagramação para exibir
+    ao vivo na Janela de Diagramação Automática.
+    """
+    fotos_lista = list(fotos or [])
+    if not fotos_lista:
+        return {
+            "total_fotos": 0,
+            "pastas": 0,
+            "cenarios": 0,
+            "laminas_com_fotos": 0,
+            "laminas_extras_vazias": 0,
+            "laminas_estimadas": 0,
+            "sobras": 0,
+            "media_fotos_lamina": 0.0,
+        }
+    _blocos, qtd_pastas, qtd_cenarios = _blocos_pastas_e_cenarios(fotos_lista, cfg)
+    grupos, sobras = dividir(fotos_lista, produto, cfg)
+    laminas_com_fotos = len(grupos)
+    desejadas = int(cfg.get("laminas_desejadas", produto.get("laminas_min", 0)))
+    alvo_min = max(int(produto.get("laminas_min", 0)), min(int(produto["laminas_max"]), desejadas))
+    laminas_totais = max(laminas_com_fotos, alvo_min)
+    extras_vazias = max(0, laminas_totais - laminas_com_fotos)
+    usadas = sum(len(g) for g in grupos)
+    media = usadas / float(max(1, laminas_com_fotos)) if laminas_com_fotos else 0.0
+    return {
+        "total_fotos": len(fotos_lista),
+        "pastas": qtd_pastas,
+        "cenarios": qtd_cenarios,
+        "laminas_com_fotos": laminas_com_fotos,
+        "laminas_extras_vazias": extras_vazias,
+        "laminas_estimadas": laminas_totais,
+        "sobras": len(sobras),
+        "media_fotos_lamina": round(media, 1),
+    }
 
 
 def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
@@ -1330,10 +1446,14 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         lamina["espacos"] = melhor["espacos"]
         lamina["sobreposicoes"] = melhor["sobreposicoes"]
         lamina["modelo"] = melhor["modelo"]
+        if melhor.get("tipo_layout"):
+            lamina["tipo_layout"] = melhor.get("tipo_layout")
         if grupo and grupo[0].get("cenario_grupo"):
             lamina["cenario_grupo"] = grupo[0].get("cenario_grupo")
         if grupo and grupo[0].get("nome_pasta"):
             lamina["nome_pasta"] = grupo[0].get("nome_pasta")
+        if grupo and grupo[0].get("pasta"):
+            lamina["pasta"] = grupo[0].get("pasta")
         if foto_sobreposta:
             lw, lh = lamina_mm(produto)
             proporcao = max(0.2, float(foto_sobreposta.get("proporcao") or 1.0))
@@ -1352,8 +1472,9 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         laminas.append(lamina)
         if ao_progresso:
             ao_progresso(indice, len(grupos))
-    desejadas = int(cfg.get("laminas_desejadas", produto["laminas_min"]))
-    alvo = max(produto["laminas_min"], min(produto["laminas_max"], desejadas))
+    min_prod = int(produto.get("laminas_min", 0))
+    desejadas = int(cfg.get("laminas_desejadas", min_prod))
+    alvo = max(min_prod, min(int(produto["laminas_max"]), desejadas))
     while len(laminas) < alvo:
         laminas.append(lamina_vazia(cfg))
     for lamina in laminas:

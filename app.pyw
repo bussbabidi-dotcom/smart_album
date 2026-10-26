@@ -2053,97 +2053,407 @@ class Aplicativo:
     # ==================================================================
 
     def abrir_diagramacao(self):
-        if not proj.fotos_para_diagramar(self.projeto, self.info):
+        todas_fotos = proj.fotos_para_diagramar(self.projeto, self.info)
+        if not todas_fotos:
             self.registrar("Adicione fotos antes de diagramar.")
             return
+        fotos_livres = proj.fotos_para_diagramar(self.projeto, self.info, somente_nao_usadas=True)
+        pastas_proj = proj.listar_pastas_projeto(self.projeto)
+
         cfg = self._cfg()
+        paginas = max(1, int(self.produto["paginas_por_lamina"]))
+
         janela = tk.Toplevel(self.root)
-        janela.title("Diagramação automática")
+        janela.title("Diagramação Automática — Motor Elástico e Cenários")
         janela.transient(self.root)
         janela.resizable(False, False)
         janela.grab_set()
+
         quadro = ttk.Frame(janela, padding=16)
         quadro.pack(fill="both", expand=True)
         ttk.Label(quadro, text="Diagramação automática", style="Titulo.TLabel").pack(anchor="w")
-        ttk.Label(quadro, text="Escolha como organizar as fotos nas lâminas.",
-                  style="Fraco.TLabel").pack(anchor="w", pady=(2, 12))
+        ttk.Label(
+            quadro,
+            text="Configure o escopo, separação por pastas/cenários, limite de corte elástico e layouts 60/40 e 70/30.",
+            style="Fraco.TLabel",
+        ).pack(anchor="w", pady=(2, 10))
 
-        opcoes = ttk.LabelFrame(quadro, text="Organização", padding=10)
-        opcoes.pack(fill="x")
-        cenario = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
-        rostos = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
-        preencher_extras = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
-        repetidas = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
-        ttk.Checkbutton(opcoes, text="Reconhecer mudanças de cenário e separar as lâminas",
-                        variable=cenario).pack(anchor="w", pady=2)
-        ttk.Checkbutton(opcoes, text="Reconhecer rostos e priorizar o enquadramento neles",
-                        variable=rostos).pack(anchor="w", pady=2)
-        ttk.Checkbutton(opcoes, text="Sobrepor uma foto da mesma lâmina sem repetir imagens",
-                        variable=preencher_extras).pack(anchor="w", pady=2)
-        ttk.Checkbutton(opcoes, text="Excluir fotos repetidas (mantém uma cópia)",
-                        variable=repetidas).pack(anchor="w", pady=2)
+        # --- 1. Escopo da Diagramação ---
+        quadro_escopo = ttk.LabelFrame(quadro, text="1. O que você deseja diagramar?", padding=10)
+        quadro_escopo.pack(fill="x", pady=(0, 8))
 
-        numeros = ttk.LabelFrame(quadro, text="Quantidade e espaços", padding=10)
-        numeros.pack(fill="x", pady=(10, 0))
-        paginas = max(1, int(self.produto["paginas_por_lamina"]))
+        filtro_atual = getattr(self, "pasta_filtro_ativa", "todas")
+        escopo_inicial = "pasta" if (filtro_atual and filtro_atual != "todas" and len(pastas_proj) > 0) else "tudo"
+        escopo_var = tk.StringVar(value=escopo_inicial)
+
+        opcoes_pastas_texto = []
+        mapa_texto_pasta = {}
+        indice_pasta_inicial = 0
+        for idx_p, (ch_norm, _cam_p, nome_p, qtd_p) in enumerate(pastas_proj):
+            rotulo = "%s (%d fotos)" % (nome_p, qtd_p)
+            opcoes_pastas_texto.append(rotulo)
+            mapa_texto_pasta[rotulo] = ch_norm
+            if filtro_atual != "todas" and ch_norm == filtro_atual:
+                indice_pasta_inicial = idx_p
+
+        pasta_escolhida_var = tk.StringVar(
+            value=opcoes_pastas_texto[indice_pasta_inicial] if opcoes_pastas_texto else ""
+        )
+
+        ttk.Radiobutton(
+            quadro_escopo,
+            text="Álbum inteiro — substituir todas as lâminas (%d fotos no projeto)" % len(todas_fotos),
+            value="tudo",
+            variable=escopo_var,
+        ).pack(anchor="w", pady=2)
+
+        linha_pasta = ttk.Frame(quadro_escopo)
+        linha_pasta.pack(fill="x", pady=2)
+        rb_pasta = ttk.Radiobutton(
+            linha_pasta,
+            text="Somente a pasta:",
+            value="pasta",
+            variable=escopo_var,
+        )
+        rb_pasta.pack(side="left")
+        combo_pasta = ttk.Combobox(
+            linha_pasta,
+            textvariable=pasta_escolhida_var,
+            values=opcoes_pastas_texto,
+            state="readonly" if opcoes_pastas_texto else "disabled",
+            width=32,
+        )
+        combo_pasta.pack(side="left", padx=(8, 0))
+        combo_pasta.bind("<<ComboboxSelected>>", lambda _e: escopo_var.set("pasta"))
+
+        rb_livres = ttk.Radiobutton(
+            quadro_escopo,
+            text="Somente fotos ainda não usadas — criar novas lâminas no final (%d livres)" % len(fotos_livres),
+            value="nao_usadas",
+            variable=escopo_var,
+        )
+        rb_livres.pack(anchor="w", pady=2)
+        if not fotos_livres:
+            rb_livres.configure(state="disabled")
+
+        # --- 2. Pastas e Reconhecimento de Cenário ---
+        quadro_cenario = ttk.LabelFrame(quadro, text="2. Divisão por Pastas e Reconhecimento de Cenário", padding=10)
+        quadro_cenario.pack(fill="x", pady=(0, 8))
+
+        separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
+        cenario_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
+        limiar_cenario_var = tk.DoubleVar(value=round(float(cfg.get("limiar_cenario", 0.28)), 2))
+
+        ttk.Checkbutton(
+            quadro_cenario,
+            text="Respeitar divisão por pastas (nunca misturar pastas diferentes na mesma lâmina)",
+            variable=separar_pastas_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_cenario,
+            text="Reconhecer cenário visual e juntar fotos do mesmo ambiente em lâminas seguidas",
+            variable=cenario_var,
+        ).pack(anchor="w", pady=2)
+
+        linha_limiar = ttk.Frame(quadro_cenario)
+        linha_limiar.pack(fill="x", pady=(4, 0))
+        ttk.Label(linha_limiar, text="Sensibilidade de mudança de cenário:").pack(side="left")
+
+        spin_limiar = ttk.Spinbox(
+            linha_limiar,
+            from_=0.15,
+            to=0.45,
+            increment=0.02,
+            textvariable=limiar_cenario_var,
+            width=6,
+        )
+        spin_limiar.pack(side="right")
+
+        def _aplicar_preset_limiar(valor):
+            limiar_cenario_var.set(valor)
+
+        botoes_limiar = ttk.Frame(linha_limiar)
+        botoes_limiar.pack(side="right", padx=(0, 8))
+        for rot_l, val_l in (("Alta (0.20)", 0.20), ("Padrão (0.28)", 0.28), ("Suave (0.36)", 0.36)):
+            ttk.Button(
+                botoes_limiar,
+                text=rot_l,
+                command=lambda v=val_l: _aplicar_preset_limiar(v),
+            ).pack(side="left", padx=2)
+
+        # --- 3. Geometria Elástica, Limite de Corte e Layouts no Meio ---
+        quadro_geom = ttk.LabelFrame(
+            quadro,
+            text="3. Proporção Elástica (22% vs Sem Corte) e Layouts no Meio (60/40 e 70/30)",
+            padding=10,
+        )
+        quadro_geom.pack(fill="x", pady=(0, 8))
+
+        modo_corte_var = tk.StringVar(value=str(cfg.get("modo_corte", "elastico")))
+        corte_max_pct_inicial = int(round((float(cfg.get("corte_maximo", diagramar.CORTE_MAXIMO)) - 1.0) * 100))
+        corte_max_pct_var = tk.IntVar(value=max(5, min(35, corte_max_pct_inicial or 22)))
+        transpasse_var = tk.BooleanVar(value=bool(cfg.get("permitir_transpasse", True)))
+        rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
+        preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
+        repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
+
+        linha_modo_corte = ttk.Frame(quadro_geom)
+        linha_modo_corte.pack(fill="x", pady=2)
+        ttk.Radiobutton(
+            linha_modo_corte,
+            text="Preencher página (corte elástico até o limite + expansão vizinha):",
+            value="elastico",
+            variable=modo_corte_var,
+        ).pack(side="left")
+        ttk.Label(linha_modo_corte, text="% máx:").pack(side="right", padx=(4, 0))
+        spin_corte_pct = ttk.Spinbox(
+            linha_modo_corte,
+            from_=5,
+            to=35,
+            increment=1,
+            textvariable=corte_max_pct_var,
+            width=5,
+        )
+        spin_corte_pct.pack(side="right")
+
+        ttk.Radiobutton(
+            quadro_geom,
+            text="Preservar 100% da proporção original em todas as fotos (0% de corte forçado)",
+            value="sem_corte",
+            variable=modo_corte_var,
+        ).pack(anchor="w", pady=2)
+
+        ttk.Separator(quadro_geom, orient="horizontal").pack(fill="x", pady=6)
+
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Incluir layouts 60/40, 70/30 e panorâmicos que passam do meio da lâmina",
+            variable=transpasse_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Reconhecer rostos e desviá-los automaticamente da linha de dobra central",
+            variable=rostos_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Sobrepor uma foto extra na lâmina sem repetir imagens",
+            variable=preencher_extras_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Excluir fotos visualmente repetidas (mantém apenas uma cópia)",
+            variable=repetidas_var,
+        ).pack(anchor="w", pady=2)
+
+        # --- 4. Quantidade e Espaços ---
+        numeros = ttk.LabelFrame(quadro, text="4. Quantidade de Lâminas, Fotos por Página e Margens", padding=10)
+        numeros.pack(fill="x", pady=(0, 8))
+
         vars_num = {
             "laminas_desejadas": tk.IntVar(value=int(cfg.get("laminas_desejadas", self.produto["laminas_min"]))),
             "fotos_por_pagina": tk.IntVar(value=max(1, int(round(cfg["fotos_por_lamina"] / float(paginas))))),
-            "max_fotos_pagina": tk.IntVar(value=max(1, min(diagramar.MAX_POR_PAGINA,
-                                           int(cfg["max_fotos_lamina"]) // paginas))),
+            "max_fotos_pagina": tk.IntVar(
+                value=max(1, min(diagramar.MAX_POR_PAGINA, int(cfg["max_fotos_lamina"]) // paginas))
+            ),
             "margem_mm": tk.DoubleVar(value=float(cfg["margem_mm"])),
             "espacamento_mm": tk.DoubleVar(value=float(cfg["espacamento_mm"])),
         }
         campos = (
             ("Lâminas desejadas", "laminas_desejadas", 1, self.produto["laminas_max"], 1),
-            ("Fotos por página (quantidade desejada)", "fotos_por_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
+            ("Fotos por página (meta ideal)", "fotos_por_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
             ("Máximo de fotos por página", "max_fotos_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
-            ("Margem (mm)", "margem_mm", 0, 60, 1),
+            ("Margem externa de segurança (mm)", "margem_mm", 0, 60, 1),
             ("Espaçamento entre fotos (mm)", "espacamento_mm", 0, 40, 0.5),
         )
         for texto, chave, minimo, maximo, passo in campos:
             linha = ttk.Frame(numeros)
             linha.pack(fill="x", pady=2)
             ttk.Label(linha, text=texto).pack(side="left")
-            ttk.Spinbox(linha, from_=minimo, to=maximo, increment=passo,
-                        textvariable=vars_num[chave], width=8).pack(side="right")
-        ttk.Label(numeros, text="A quantidade de fotos por página tem prioridade; o total de lâminas pode variar para respeitar essa meta e o mínimo do produto.",
-                  style="Fraco.TLabel", wraplength=340, justify="left").pack(anchor="w", pady=(5, 0))
+            ttk.Spinbox(
+                linha,
+                from_=minimo,
+                to=maximo,
+                increment=passo,
+                textvariable=vars_num[chave],
+                width=8,
+            ).pack(side="right")
+
+        # --- 5. Prévia ao Vivo da Diagramação ---
+        quadro_previa = ttk.LabelFrame(quadro, text="Prévia ao vivo do resultado", padding=10)
+        quadro_previa.pack(fill="x", pady=(0, 10))
+        lbl_previa_1 = ttk.Label(quadro_previa, text="", font=("Segoe UI", 9, "bold"))
+        lbl_previa_1.pack(anchor="w")
+        lbl_previa_2 = ttk.Label(quadro_previa, text="", style="Fraco.TLabel")
+        lbl_previa_2.pack(anchor="w", pady=(2, 0))
+
+        def _obter_fotos_escopo():
+            esc = escopo_var.get()
+            if esc == "nao_usadas":
+                return fotos_livres
+            if esc == "pasta":
+                ch_p = mapa_texto_pasta.get(pasta_escolhida_var.get())
+                return proj.fotos_para_diagramar(self.projeto, self.info, pasta_alvo=ch_p) if ch_p else todas_fotos
+            return todas_fotos
+
+        def _montar_cfg_atual():
+            try:
+                f_pag = max(1, int(vars_num["fotos_por_pagina"].get()))
+            except (tk.TclError, ValueError):
+                f_pag = max(1, int(round(cfg["fotos_por_lamina"] / float(paginas))))
+            try:
+                max_pag = max(f_pag, int(vars_num["max_fotos_pagina"].get()))
+            except (tk.TclError, ValueError):
+                max_pag = max(f_pag, int(cfg["max_fotos_lamina"]) // paginas)
+            try:
+                lam_des = max(1, int(vars_num["laminas_desejadas"].get()))
+            except (tk.TclError, ValueError):
+                lam_des = int(self.produto["laminas_min"])
+            try:
+                marg = max(0.0, float(vars_num["margem_mm"].get()))
+            except (tk.TclError, ValueError):
+                marg = float(cfg["margem_mm"])
+            try:
+                esp = max(0.0, float(vars_num["espacamento_mm"].get()))
+            except (tk.TclError, ValueError):
+                esp = float(cfg["espacamento_mm"])
+            try:
+                lim_cen = max(0.12, min(0.55, float(limiar_cenario_var.get())))
+            except (tk.TclError, ValueError):
+                lim_cen = 0.28
+            try:
+                pct_c = max(5, min(35, int(corte_max_pct_var.get())))
+            except (tk.TclError, ValueError):
+                pct_c = 22
+
+            cfg_temp = dict(cfg)
+            cfg_temp.update({
+                "laminas_desejadas": lam_des,
+                "fotos_por_lamina": f_pag * paginas,
+                "max_fotos_pagina": max_pag,
+                "max_fotos_lamina": max_pag * paginas,
+                "margem_mm": marg,
+                "espacamento_mm": esp,
+                "separar_pastas": bool(separar_pastas_var.get()),
+                "reconhecer_cenarios": bool(cenario_var.get()),
+                "limiar_cenario": lim_cen,
+                "modo_corte": modo_corte_var.get(),
+                "corte_maximo": 1.0 + (pct_c / 100.0),
+                "permitir_transpasse": bool(transpasse_var.get()),
+                "reconhecer_rostos": bool(rostos_var.get()),
+                "preencher_espacos_extras": bool(preencher_extras_var.get()),
+                "excluir_repetidas": bool(repetidas_var.get()),
+            })
+            return cfg_temp
+
+        def _atualizar_previa(*_args):
+            fotos_esc = _obter_fotos_escopo()
+            cfg_t = _montar_cfg_atual()
+            esc = escopo_var.get()
+            prod_p = dict(self.produto)
+            if esc in ("pasta", "nao_usadas"):
+                prod_p["laminas_min"] = 0
+                cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
+            prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
+            lbl_previa_1.configure(
+                text="Fotos no escopo: %d  |  Pastas: %d  |  Cenários detectados: %d  →  %d lâmina(s) gerada(s)"
+                % (prev["total_fotos"], prev["pastas"], prev["cenarios"], prev["laminas_estimadas"])
+            )
+            detalhes = "Média de %.1f fotos/lâmina (%d lâminas com fotos" % (
+                prev["media_fotos_lamina"],
+                prev["laminas_com_fotos"],
+            )
+            if prev["laminas_extras_vazias"] > 0:
+                detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
+            detalhes += ")."
+            if prev["sobras"] > 0:
+                detalhes += " Atenção: %d foto(s) excedem o limite máximo de lâminas." % prev["sobras"]
+            lbl_previa_2.configure(text=detalhes)
+
+        for v in (
+            escopo_var,
+            pasta_escolhida_var,
+            separar_pastas_var,
+            cenario_var,
+            limiar_cenario_var,
+            modo_corte_var,
+            corte_max_pct_var,
+            transpasse_var,
+            rostos_var,
+            preencher_extras_var,
+            repetidas_var,
+            *vars_num.values(),
+        ):
+            v.trace_add("write", _atualizar_previa)
+
+        _atualizar_previa()
 
         botoes = ttk.Frame(quadro)
-        botoes.pack(fill="x", pady=(14, 0))
+        botoes.pack(fill="x", pady=(6, 0))
+
+        def _calcular_laminas_ideais():
+            fotos_esc = _obter_fotos_escopo()
+            try:
+                f_pag = max(1, int(vars_num["fotos_por_pagina"].get()))
+            except (tk.TclError, ValueError):
+                f_pag = 2
+            por_lam = max(1, f_pag * paginas)
+            ideal = max(self.produto["laminas_min"], int(math.ceil(len(fotos_esc) / float(por_lam))))
+            ideal = min(self.produto["laminas_max"], ideal)
+            vars_num["laminas_desejadas"].set(ideal)
+
+        ttk.Button(
+            botoes,
+            text="Calcular nº ideal de lâminas",
+            command=_calcular_laminas_ideais,
+        ).pack(side="left")
 
         def iniciar():
             try:
-                cfg_novo = {chave: var.get() for chave, var in vars_num.items()}
-                cfg_novo["laminas_desejadas"] = int(cfg_novo["laminas_desejadas"])
-                cfg_novo["fotos_por_pagina"] = int(cfg_novo["fotos_por_pagina"])
-                cfg_novo["max_fotos_pagina"] = int(cfg_novo["max_fotos_pagina"])
-                cfg_novo["margem_mm"] = float(cfg_novo["margem_mm"])
-                cfg_novo["espacamento_mm"] = float(cfg_novo["espacamento_mm"])
+                f_pag = int(vars_num["fotos_por_pagina"].get())
+                max_pag = int(vars_num["max_fotos_pagina"].get())
+                lam_des = int(vars_num["laminas_desejadas"].get())
+                _m = float(vars_num["margem_mm"].get())
+                _e = float(vars_num["espacamento_mm"].get())
             except (tk.TclError, ValueError):
-                messagebox.showwarning("Diagramação", "Confira os valores numéricos.", parent=janela)
+                messagebox.showwarning("Diagramação", "Confira os valores numéricos informados.", parent=janela)
                 return
-            if cfg_novo["max_fotos_pagina"] < cfg_novo["fotos_por_pagina"]:
-                messagebox.showwarning("Diagramação", "O máximo por página deve ser igual ou maior que a quantidade desejada.",
-                                       parent=janela)
+            if max_pag < f_pag:
+                messagebox.showwarning(
+                    "Diagramação",
+                    "O máximo de fotos por página deve ser igual ou maior que a quantidade desejada.",
+                    parent=janela,
+                )
                 return
-            if any(e.get("foto") for e in proj.todos_espacos(self.projeto)) and not messagebox.askyesno(
-                    "Refazer diagramação", "As lâminas existentes serão substituídas. É possível desfazer depois.",
-                    parent=janela):
+            esc = escopo_var.get()
+            pasta_alvo_ch = mapa_texto_pasta.get(pasta_escolhida_var.get()) if esc == "pasta" else None
+            fotos_esc = _obter_fotos_escopo()
+            if not fotos_esc:
+                messagebox.showinfo("Diagramação", "Não há fotos disponíveis para o escopo selecionado.", parent=janela)
                 return
-            cfg_novo["reconhecer_cenarios"] = cenario.get()
-            cfg_novo["reconhecer_rostos"] = rostos.get()
-            cfg_novo["preencher_espacos_extras"] = preencher_extras.get()
-            cfg_novo["excluir_repetidas"] = repetidas.get()
-            cfg_novo["fotos_por_lamina"] = cfg_novo.pop("fotos_por_pagina") * paginas
-            cfg_novo["max_fotos_lamina"] = cfg_novo["max_fotos_pagina"] * paginas
+            if esc == "tudo" and any(e.get("foto") for e in proj.todos_espacos(self.projeto)):
+                if not messagebox.askyesno(
+                    "Refazer diagramação",
+                    "As lâminas existentes serão substituídas pela nova diagramação. É possível desfazer depois (Ctrl+Z).",
+                    parent=janela,
+                ):
+                    return
+            cfg_novo = _montar_cfg_atual()
+            cfg_novo["laminas_desejadas"] = lam_des
             janela.grab_release()
             janela.destroy()
-            self.diagramar_tudo(False, cfg_novo, repetidas.get())
+            self.diagramar_tudo(
+                confirmar=False,
+                configuracao=cfg_novo,
+                excluir_repetidas=bool(repetidas_var.get()),
+                escopo=esc,
+                pasta_alvo=pasta_alvo_ch,
+            )
 
         ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right")
-        ttk.Button(botoes, text="Diagramar", style="Primario.TButton", command=iniciar).pack(side="right", padx=(0, 6))
+        ttk.Button(botoes, text="Diagramar Agora", style="Primario.TButton", command=iniciar).pack(
+            side="right", padx=(0, 6)
+        )
         janela.bind("<Escape>", lambda _e: janela.destroy())
         janela.bind("<Return>", lambda _e: iniciar())
         janela.update_idletasks()
@@ -2178,19 +2488,33 @@ class Aplicativo:
                 ao_progresso(indice, len(fotos))
         return saida, removidas
 
-    def diagramar_tudo(self, confirmar=True, configuracao=None, excluir_repetidas=False):
-        fotos = proj.fotos_para_diagramar(self.projeto, self.info)
+    def diagramar_tudo(self, confirmar=True, configuracao=None, excluir_repetidas=False, escopo="tudo", pasta_alvo=None):
+        somente_livres = escopo == "nao_usadas"
+        fotos = proj.fotos_para_diagramar(
+            self.projeto,
+            self.info,
+            somente_nao_usadas=somente_livres,
+            pasta_alvo=pasta_alvo if escopo == "pasta" else None,
+        )
         if not fotos:
-            self.registrar("Adicione fotos antes de diagramar.")
+            self.registrar("Não há fotos disponíveis para diagramar neste escopo.")
             return
-        if confirmar and any(e.get("foto") for e in proj.todos_espacos(self.projeto)):
-            if not messagebox.askyesno("Diagramar", "Refazer o álbum inteiro? Os cortes e trocas feitos na mão "
-                                       "serão perdidos (dá para desfazer).", parent=self.root):
+        if confirmar and escopo == "tudo" and any(e.get("foto") for e in proj.todos_espacos(self.projeto)):
+            if not messagebox.askyesno(
+                "Diagramar",
+                "Refazer o álbum inteiro? Os cortes e trocas feitos na mão serão perdidos (dá para desfazer).",
+                parent=self.root,
+            ):
                 return
-        produto = self.produto
+        produto = dict(self.produto)
         cfg = dict(self._cfg())
         if configuracao:
             cfg.update(configuracao)
+        if escopo in ("pasta", "nao_usadas"):
+            produto["laminas_min"] = 0
+            cfg["laminas_desejadas"] = max(
+                1, int(math.ceil(len(fotos) / float(max(1, int(cfg.get("fotos_por_lamina", 4))))))
+            )
         modelos = self._modelos()
 
         def trabalho(t):
@@ -2209,39 +2533,67 @@ class Aplicativo:
                 return
             if resultado is None:
                 return
-            (laminas, sobras), removidas = resultado
+            (novas_laminas, sobras), removidas = resultado
             self.marcar_historico()
             if configuracao:
-                self.projeto.setdefault("config", {}).update(configuracao)
-            self.projeto["laminas"] = laminas
-            self.atual = 0
+                cfg_salvar = dict(configuracao)
+                if escopo in ("pasta", "nao_usadas") and "laminas_desejadas" in self.projeto.get("config", {}):
+                    cfg_salvar["laminas_desejadas"] = self.projeto["config"]["laminas_desejadas"]
+                self.projeto.setdefault("config", {}).update(cfg_salvar)
+
+            if escopo == "nao_usadas":
+                self.projeto["laminas"].extend(novas_laminas)
+                self.atual = max(0, len(self.projeto["laminas"]) - len(novas_laminas))
+                texto = "%s lâmina(s) adicionada(s) com as fotos não usadas." % len(novas_laminas)
+            elif escopo == "pasta" and pasta_alvo:
+                ch_alvo = normalizar_caminho(pasta_alvo)
+                caminhos_pasta = {
+                    normalizar_caminho(f["caminho"])
+                    for f in self.projeto.get("fotos", [])
+                    if normalizar_caminho(proj.pasta_da_foto(f)) == ch_alvo
+                }
+                atuais = self.projeto.get("laminas", [])
+                pos_insercao = None
+                mantidas = []
+                for idx_l, lam in enumerate(atuais):
+                    fotos_lam = [normalizar_caminho(e["foto"]) for e in lam.get("espacos", []) if e.get("foto")]
+                    pertence = (lam.get("pasta") and normalizar_caminho(lam["pasta"]) == ch_alvo) or (
+                        fotos_lam and all(c in caminhos_pasta for c in fotos_lam)
+                    )
+                    if pertence:
+                        if pos_insercao is None:
+                            pos_insercao = len(mantidas)
+                    else:
+                        mantidas.append(lam)
+                if pos_insercao is None:
+                    pos_insercao = len(mantidas)
+                self.projeto["laminas"] = mantidas[:pos_insercao] + novas_laminas + mantidas[pos_insercao:]
+                self.atual = min(pos_insercao, max(0, len(self.projeto["laminas"]) - 1))
+                texto = "Pasta rediagramada: %s lâmina(s) atualizada(s)." % len(novas_laminas)
+            else:
+                self.projeto["laminas"] = novas_laminas
+                self.atual = 0
+                texto = "Álbum diagramado: %s lâminas." % len(novas_laminas)
+
             self.espaco_sel = None
-            texto = "Álbum diagramado: %s lâminas." % len(laminas)
+            if hasattr(self, "espacos_selecionados"):
+                self.espacos_selecionados.clear()
             if removidas:
                 texto += " %s foto(s) repetida(s) ignorada(s)." % len(removidas)
             self.registrar(texto)
             if sobras:
-                messagebox.showinfo("Diagramar", "%s foto(s) não couberam no máximo de %s lâminas do produto."
-                                    % (len(sobras), self.produto["laminas_max"]), parent=self.root)
+                messagebox.showinfo(
+                    "Diagramar",
+                    "%s foto(s) não couberam no máximo de %s lâminas do produto."
+                    % (len(sobras), self.produto["laminas_max"]),
+                    parent=self.root,
+                )
             self.atualizar_tudo()
 
         self.executar("Diagramando", trabalho, fim)
 
     def distribuir_nao_usadas(self):
-        fotos = proj.fotos_para_diagramar(self.projeto, self.info, somente_nao_usadas=True)
-        if not fotos:
-            self.registrar("Todas as fotos já estão no álbum.")
-            return
-        cfg = self._cfg()
-        grupos, _sobras = diagramar.dividir(fotos, dict(self.produto, laminas_min=0), cfg)
-        self.marcar_historico()
-        for grupo in grupos:
-            melhor = diagramar.opcoes_lamina(grupo, self.produto, cfg, self._modelos(), maximo=1)[0]
-            lamina = diagramar.lamina_vazia(cfg)
-            lamina.update({k: melhor[k] for k in ("espacos", "sobreposicoes", "modelo")})
-            self.projeto["laminas"].append(lamina)
-        self.registrar("%s lâmina(s) novas com as fotos que faltavam." % len(grupos))
-        self.atualizar_tudo()
+        self.diagramar_tudo(confirmar=False, escopo="nao_usadas")
 
     def _proporcao_efetiva(self, caminho, edicao=None):
         dados = self.info.get(normalizar_caminho(caminho))
