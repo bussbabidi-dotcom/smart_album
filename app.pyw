@@ -5653,8 +5653,8 @@ class Aplicativo:
             messagebox.showwarning("Exportar", "Escolha a pasta de saída.", parent=janela or self.root)
             return False
         pasta = janela_exportar.pasta_final(op, self.projeto)
-        extensoes = {"jpg": [".jpg"], "psd": [".psd"], "ambos": [".jpg", ".psd"]}[op["formato"]]
-        existentes = [nome + ext for nome, _i in itens for ext in extensoes if (pasta / (nome + ext)).exists()]
+        previstos = janela_exportar.arquivos_previstos(op, self.projeto, self.produto, itens)
+        existentes = [arq for arq in previstos if (pasta / arq).exists()]
         modo = op["existentes"]
         if modo == "perguntar" and existentes:
             resposta = messagebox.askyesnocancel(
@@ -5673,8 +5673,10 @@ class Aplicativo:
 
         def trabalho(t):
             gravados = []
-            if formato in ("jpg", "ambos"):
+            if formato in ("jpg", "ambos", "jpg_pdf"):
                 gravados += exportar.exportar_jpg(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)
+            if formato in ("pdf", "jpg_pdf") and not t.parar():
+                gravados += exportar.exportar_pdf(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)
             if formato in ("psd", "ambos") and not t.parar():
                 import exportar_psd
                 gravados += exportar_psd.exportar_psd(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)

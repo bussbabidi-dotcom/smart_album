@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Janela Exportar: formato, qualidade, perfil de cor, pasta, quais lâminas,
-nomes dos arquivos, o que fazer com os que já existem, conferência antes de
-exportar, andamento e lista do que foi gravado.
+Janela Exportar: formato (JPG, PDF Industrial, PSD), resolução DPI (150/300),
+perfil de cor (sRGB/AdobeRGB), marca de registro para corte industrial,
+pasta, quais lâminas, nomes dos arquivos, conferência antes de exportar,
+andamento e lista do que foi gravado.
 """
 
 import os
@@ -14,10 +15,21 @@ from tkinter import filedialog, ttk
 import exportar
 import tema
 from comum import gravar_json, ler_json, normalizar_caminho
+from produtos import lamina_mm
 
 LIMITE_RECENTES = 8
-FORMATOS = (("jpg", "JPG (laboratório)"), ("psd", "PSD com camadas (Photoshop)"), ("ambos", "JPG e PSD"))
-EXISTENTES = (("substituir", "Substituir"), ("pular", "Pular (manter o que já existe)"), ("perguntar", "Perguntar"))
+FORMATOS = (
+    ("jpg", "JPG (laboratório)"),
+    ("pdf", "PDF (impressão / corte industrial)"),
+    ("psd", "PSD com camadas (Photoshop)"),
+    ("jpg_pdf", "JPG e PDF"),
+    ("ambos", "JPG e PSD"),
+)
+EXISTENTES = (
+    ("substituir", "Substituir"),
+    ("pular", "Pular (manter o que já existe)"),
+    ("perguntar", "Perguntar"),
+)
 
 
 def ler_recentes(arquivo):
@@ -63,6 +75,23 @@ def indices_escolhidos(opcoes, projeto, atual):
     return list(range(total))
 
 
+def arquivos_previstos(opcoes, projeto, produto, itens):
+    """Lista de nomes de arquivos (com extensão) que serão gerados na pasta de destino."""
+    fmt = opcoes.get("formato", "jpg")
+    pdf_unico = bool(opcoes.get("pdf_unico", True))
+    saida = []
+    if fmt in ("jpg", "ambos", "jpg_pdf"):
+        saida.extend(nome + ".jpg" for nome, _i in itens)
+    if fmt in ("psd", "ambos"):
+        saida.extend(nome + ".psd" for nome, _i in itens)
+    if fmt in ("pdf", "jpg_pdf"):
+        if pdf_unico:
+            saida.append(exportar.nome_pdf_unico(projeto, produto))
+        else:
+            saida.extend(nome + ".pdf" for nome, _i in itens)
+    return saida
+
+
 def conferir(projeto, indices):
     """Avisos sobre as lâminas escolhidas: espaços vazios, fotos e fundos que sumiram."""
     vazios, faltam_fotos, faltam_fundos = 0, set(), set()
@@ -73,9 +102,10 @@ def conferir(projeto, indices):
                 vazios += 1
             elif not Path(espaco["foto"]).is_file():
                 faltam_fotos.add(normalizar_caminho(espaco["foto"]))
-        fundo = (lamina.get("fundo_imagem") or {}).get("caminho")
-        if fundo and not Path(fundo).is_file():
-            faltam_fundos.add(normalizar_caminho(fundo))
+        for ch_f in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
+            fundo = (lamina.get(ch_f) or {}).get("caminho")
+            if fundo and not Path(fundo).is_file():
+                faltam_fundos.add(normalizar_caminho(fundo))
     avisos = []
     if vazios:
         avisos.append("%s espaço(s) sem foto (saem só com o fundo)." % vazios)
@@ -90,10 +120,10 @@ class JanelaExportar(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        self.title("Exportar")
+        self.title("Exportar Álbum (JPG · PDF Industrial · PSD)")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.minsize(560, 300)
+        self.minsize(620, 420)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.gravados = []
@@ -102,11 +132,19 @@ class JanelaExportar(tk.Toplevel):
         self._agendado = None
         op = app.opcoes_exportacao()
         self.vars = {
-            "formato": tk.StringVar(value=op["formato"]), "qualidade": tk.IntVar(value=int(op["qualidade"])),
-            "icc": tk.BooleanVar(value=bool(op["icc"])), "pasta": tk.StringVar(value=op["pasta"]),
-            "subpasta": tk.BooleanVar(value=bool(op["subpasta"])), "laminas": tk.StringVar(value=op["laminas"]),
-            "intervalo": tk.StringVar(value=op["intervalo"]), "padrao": tk.StringVar(value=op["padrao"]),
-            "existentes": tk.StringVar(value=op["existentes"]),
+            "formato": tk.StringVar(value=op.get("formato", "jpg")),
+            "qualidade": tk.IntVar(value=int(op.get("qualidade", exportar.QUALIDADE_JPG))),
+            "icc": tk.BooleanVar(value=bool(op.get("icc", True))),
+            "dpi": tk.IntVar(value=int(op.get("dpi", 300)) if int(op.get("dpi", 300)) in (150, 300) else 300),
+            "perfil_cor": tk.StringVar(value=op.get("perfil_cor", "sRGB") if op.get("perfil_cor") in ("sRGB", "AdobeRGB") else "sRGB"),
+            "marcas_registro": tk.BooleanVar(value=bool(op.get("marcas_registro", False))),
+            "pdf_unico": tk.BooleanVar(value=bool(op.get("pdf_unico", True))),
+            "pasta": tk.StringVar(value=op.get("pasta", "")),
+            "subpasta": tk.BooleanVar(value=bool(op.get("subpasta", False))),
+            "laminas": tk.StringVar(value=op.get("laminas", "todas")),
+            "intervalo": tk.StringVar(value=op.get("intervalo", "")),
+            "padrao": tk.StringVar(value=op.get("padrao", exportar.PADRAO_NOME)),
+            "existentes": tk.StringVar(value=op.get("existentes", "substituir")),
         }
         self._montar()
         for var in self.vars.values():
@@ -114,7 +152,7 @@ class JanelaExportar(tk.Toplevel):
         self.atualizar()
         self.update_idletasks()
         x = app.root.winfo_rootx() + max(0, (app.root.winfo_width() - self.winfo_reqwidth()) // 2)
-        y = app.root.winfo_rooty() + 40
+        y = max(20, app.root.winfo_rooty() + 28)
         self.geometry("+%d+%d" % (x, y))
 
     def _montar(self):
@@ -123,16 +161,56 @@ class JanelaExportar(tk.Toplevel):
         quadro.columnconfigure(0, weight=1)
         quadro.columnconfigure(1, weight=1)
 
-        formato = ttk.LabelFrame(quadro, text="Formato", padding=8)
+        formato = ttk.LabelFrame(quadro, text="Formato e Impressão Industrial", padding=8)
         formato.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
         for valor, texto in FORMATOS:
             ttk.Radiobutton(formato, text=texto, value=valor, variable=self.vars["formato"]).pack(anchor="w")
-        linha = ttk.Frame(formato)
-        linha.pack(fill="x", pady=(6, 0))
-        ttk.Label(linha, text="Qualidade do JPG").pack(side="left")
-        ttk.Spinbox(linha, from_=60, to=100, increment=1, width=5, textvariable=self.vars["qualidade"]).pack(side="right")
-        self.caixa_icc = ttk.Checkbutton(formato, text="", variable=self.vars["icc"])
-        self.caixa_icc.pack(anchor="w", pady=(4, 0))
+
+        # Resolução DPI (150 / 300)
+        linha_dpi = ttk.Frame(formato)
+        linha_dpi.pack(fill="x", pady=(6, 0))
+        ttk.Label(linha_dpi, text="Resolução (DPI):").pack(side="left")
+        ttk.Radiobutton(linha_dpi, text="300 DPI", value=300, variable=self.vars["dpi"]).pack(side="right", padx=(6, 0))
+        ttk.Radiobutton(linha_dpi, text="150 DPI", value=150, variable=self.vars["dpi"]).pack(side="right")
+
+        # Perfil de Cor (sRGB / AdobeRGB)
+        linha_cor = ttk.Frame(formato)
+        linha_cor.pack(fill="x", pady=(4, 0))
+        ttk.Label(linha_cor, text="Perfil de Cor:").pack(side="left")
+        ttk.Radiobutton(linha_cor, text="AdobeRGB", value="AdobeRGB", variable=self.vars["perfil_cor"]).pack(side="right", padx=(6, 0))
+        ttk.Radiobutton(linha_cor, text="sRGB", value="sRGB", variable=self.vars["perfil_cor"]).pack(side="right")
+
+        # Qualidade do JPG
+        linha_qual = ttk.Frame(formato)
+        linha_qual.pack(fill="x", pady=(4, 0))
+        ttk.Label(linha_qual, text="Qualidade do JPG:").pack(side="left")
+        ttk.Spinbox(linha_qual, from_=60, to=100, increment=1, width=5, textvariable=self.vars["qualidade"]).pack(side="right")
+
+        # Opções de ICC, Marca de Registro Industrial e PDF Único
+        self.caixa_icc = ttk.Checkbutton(formato, text="Embutir perfil ICC no arquivo", variable=self.vars["icc"])
+        self.caixa_icc.pack(anchor="w", pady=(5, 0))
+
+        self.caixa_marcas = ttk.Checkbutton(
+            formato,
+            text="Marca de registro para corte industrial (guilhotina ⊕)",
+            variable=self.vars["marcas_registro"],
+        )
+        self.caixa_marcas.pack(anchor="w", pady=(2, 0))
+        tema.dica(
+            self.caixa_marcas,
+            "Adiciona margem técnica de 10 mm com marcas de corte nos 4 cantos,\n"
+            "marcas de dobra central, alvos ópticos de registro (⊕) e barra de controle CMYK/RGB.",
+        )
+
+        self.caixa_pdf_unico = ttk.Checkbutton(
+            formato,
+            text="PDF em arquivo único multipágina ({album}.pdf)",
+            variable=self.vars["pdf_unico"],
+        )
+        self.caixa_pdf_unico.pack(anchor="w", pady=(2, 0))
+
+        self.rotulo_especificacoes = ttk.Label(formato, text="", style="Fraco.TLabel", wraplength=290, justify="left")
+        self.rotulo_especificacoes.pack(anchor="w", pady=(4, 0))
 
         laminas = ttk.LabelFrame(quadro, text="Quais lâminas", padding=8)
         laminas.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
@@ -162,7 +240,7 @@ class JanelaExportar(tk.Toplevel):
         self.botao_sugestoes.pack(side="left", padx=(4, 0))
         self.caixa_subpasta = ttk.Checkbutton(destino, text="", variable=self.vars["subpasta"])
         self.caixa_subpasta.pack(anchor="w", pady=(4, 0))
-        self.rotulo_destino = ttk.Label(destino, text="", style="Fraco.TLabel", wraplength=560, justify="left")
+        self.rotulo_destino = ttk.Label(destino, text="", style="Fraco.TLabel", wraplength=580, justify="left")
         self.rotulo_destino.pack(anchor="w", pady=(2, 0))
 
         nomes = ttk.LabelFrame(quadro, text="Nomes dos arquivos", padding=8)
@@ -175,7 +253,7 @@ class JanelaExportar(tk.Toplevel):
                    command=lambda: self.vars["padrao"].set(exportar.PADRAO_NOME)).pack(side="left")
         ttk.Label(nomes, text="Use {n} (número da lâmina), {n:02d} (01, 02...), {album}, {produto}, {total}.",
                   style="Fraco.TLabel").pack(anchor="w", pady=(4, 0))
-        self.rotulo_exemplo = ttk.Label(nomes, text="", wraplength=560, justify="left")
+        self.rotulo_exemplo = ttk.Label(nomes, text="", wraplength=580, justify="left")
         self.rotulo_exemplo.pack(anchor="w", pady=(2, 0))
         linha = ttk.Frame(nomes)
         linha.pack(fill="x", pady=(6, 0))
@@ -188,7 +266,7 @@ class JanelaExportar(tk.Toplevel):
 
         conferencia = ttk.LabelFrame(quadro, text="Antes de exportar", padding=8)
         conferencia.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
-        self.rotulo_conferencia = ttk.Label(conferencia, text="", wraplength=560, justify="left")
+        self.rotulo_conferencia = ttk.Label(conferencia, text="", wraplength=580, justify="left")
         self.rotulo_conferencia.pack(anchor="w")
 
         andamento = ttk.Frame(quadro)
@@ -219,6 +297,14 @@ class JanelaExportar(tk.Toplevel):
             op["qualidade"] = max(60, min(100, int(op["qualidade"])))
         except (tk.TclError, ValueError):
             op["qualidade"] = exportar.QUALIDADE_JPG
+        try:
+            op["dpi"] = 150 if int(op.get("dpi", 300)) == 150 else 300
+        except (tk.TclError, ValueError):
+            op["dpi"] = 300
+        if op.get("perfil_cor") not in ("sRGB", "AdobeRGB"):
+            op["perfil_cor"] = "sRGB"
+        op["marcas_registro"] = bool(op.get("marcas_registro"))
+        op["pdf_unico"] = bool(op.get("pdf_unico", True))
         op["pasta"] = op["pasta"].strip()
         return op
 
@@ -230,7 +316,7 @@ class JanelaExportar(tk.Toplevel):
     def atualizar(self):
         self._agendado = None
         try:
-            op = {chave: var.get() for chave, var in self.vars.items()}
+            op = self.opcoes()
         except tk.TclError:
             return
         projeto, produto = self.app.projeto, self.app.produto
@@ -238,11 +324,38 @@ class JanelaExportar(tk.Toplevel):
         atual = self.app.atual if isinstance(self.app.atual, int) else None
         self.radio_todas.configure(text="Todas (%s)" % total)
         self.radio_atual.configure(text="Só a aberta (lâmina %s)" % (atual + 1) if atual is not None else "Só a aberta")
-        icc = produto.get("icc")
-        nome_icc = Path(icc).name if icc and Path(icc).is_file() else "sRGB"
-        self.caixa_icc.configure(text="Incluir perfil de cor (%s)" % nome_icc)
+
+        perfil_escolhido = op.get("perfil_cor", "sRGB")
+        self.caixa_icc.configure(
+            text="Incluir perfil ICC (%s)" % ("Adobe RGB (1998)" if perfil_escolhido == "AdobeRGB" else "sRGB IEC61966-2.1")
+        )
         self.caixa_subpasta.configure(text="Criar subpasta com o nome do álbum (%s)" % (projeto.get("nome") or "album"))
         self.combo_existentes.set(dict(EXISTENTES).get(op["existentes"], EXISTENTES[0][1]))
+
+        if op["formato"] in ("pdf", "jpg_pdf"):
+            self.caixa_pdf_unico.state(["!disabled"])
+        else:
+            self.caixa_pdf_unico.state(["disabled"])
+
+        if produto:
+            w_mm, h_mm = lamina_mm(produto)
+            if op["marcas_registro"]:
+                w_mm += 2 * exportar.MARGEM_REGISTRO_MM
+                h_mm += 2 * exportar.MARGEM_REGISTRO_MM
+            w_px, h_px = exportar.tamanho_final_px(produto, op["dpi"], op["marcas_registro"])
+            self.rotulo_especificacoes.configure(
+                text="Saída: %dx%d mm (%dx%d px @ %d DPI · %s%s)"
+                % (
+                    int(round(w_mm)),
+                    int(round(h_mm)),
+                    w_px,
+                    h_px,
+                    op["dpi"],
+                    perfil_escolhido,
+                    " · Corte Industrial" if op["marcas_registro"] else "",
+                )
+            )
+
         problemas = []
         try:
             indices = indices_escolhidos(op, projeto, atual)
@@ -253,18 +366,17 @@ class JanelaExportar(tk.Toplevel):
             problemas.append(str(e))
         try:
             itens = exportar.itens_exportacao(projeto, indices, op["padrao"], produto)
-            extensoes = {"jpg": [".jpg"], "psd": [".psd"], "ambos": [".jpg", ".psd"]}[op["formato"]]
-            nomes = [nome + extensoes[0] for nome, _i in itens]
+            nomes = arquivos_previstos(op, projeto, produto, itens)
             exemplo = ", ".join(nomes[:3]) + (" … " + nomes[-1] if len(nomes) > 3 else "")
             self.rotulo_exemplo.configure(text="Exemplo: " + (exemplo or "(nenhuma lâmina)"), foreground=tema.TEXTO)
         except ValueError as e:
-            itens, extensoes = [], [".jpg"]
+            itens, nomes = [], []
             self.rotulo_exemplo.configure(text=str(e), foreground=tema.ERRO)
             problemas.append(str(e))
         if op["pasta"].strip():
             destino = pasta_final(op, projeto)
             livre = espaco_livre(destino)
-            existentes = sum(1 for nome, _i in itens for ext in extensoes if (destino / (nome + ext)).exists())
+            existentes = sum(1 for arq in nomes if (destino / arq).exists())
             texto = "Vai para: %s" % destino
             if livre is not None:
                 texto += "   ·   livre no disco: %.1f GB" % (livre / 1024.0 ** 3)
