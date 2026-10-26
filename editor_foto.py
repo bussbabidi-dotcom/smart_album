@@ -77,6 +77,12 @@ class EditorFoto(tk.Toplevel):
     # ------------------------------------------------------------
 
     def _montar(self):
+        tema.criar_cabecalho_janela(
+            self,
+            "Camera Raw & Enquadramento de Foto · Photoshop CC",
+            "Arraste para enquadrar · Roda do mouse para zoom · Duplo clique nos controles para restaurar",
+            icone="📷",
+        )
         corpo = ttk.Frame(self, style="Fundo.TFrame")
         corpo.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(corpo, bg=tema.FUNDO, highlightthickness=0, cursor="fleur")
@@ -87,14 +93,14 @@ class EditorFoto(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._soltou)
         self.canvas.bind("<MouseWheel>", self._roda)
 
-        # Painel lateral direito com rolagem suave para caber todos os controles Lightroom
-        container_lado = ttk.Frame(corpo, width=348)
+        # Painel lateral direito com rolagem suave para caber todos os controles Lightroom / Camera Raw
+        container_lado = tk.Frame(corpo, width=356, bg=tema.PAINEL, highlightthickness=1, highlightbackground=tema.BORDA)
         container_lado.pack(side="right", fill="y")
         container_lado.pack_propagate(False)
 
         barra_rol = ttk.Scrollbar(container_lado, orient="vertical")
         barra_rol.pack(side="right", fill="y")
-        self.canvas_lado = tk.Canvas(container_lado, bg=tema.PAINEL, highlightthickness=0, width=330,
+        self.canvas_lado = tk.Canvas(container_lado, bg=tema.PAINEL, highlightthickness=0, width=338,
                                      yscrollcommand=barra_rol.set)
         self.canvas_lado.pack(side="left", fill="both", expand=True)
         barra_rol.configure(command=self.canvas_lado.yview)
@@ -107,14 +113,15 @@ class EditorFoto(tk.Toplevel):
         nav = ttk.Frame(lado)
         nav.pack(fill="x", pady=(0, 6))
         ttk.Button(nav, text="◀ Anterior", style="Compacto.TButton", command=lambda: self.navegar(-1)).pack(side="left")
-        ttk.Button(nav, text="Fechar", style="Compacto.TButton", command=self.fechar).pack(side="left", expand=True, padx=4)
+        ttk.Button(nav, text="Concluir (OK)", style="PrimarioCompacto.TButton", command=self.fechar).pack(side="left", expand=True, padx=4)
         ttk.Button(nav, text="Próxima ▶", style="Compacto.TButton", command=lambda: self.navegar(1)).pack(side="right")
 
         self.rotulo_nome = ttk.Label(lado, text="", style="Titulo.TLabel", wraplength=300)
         self.rotulo_nome.pack(anchor="w")
         self.rotulo_lugar = ttk.Label(lado, text="", style="Fraco.TLabel")
         self.rotulo_lugar.pack(anchor="w", pady=(0, 4))
-        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=160, bg=tema.PAINEL_2, highlightthickness=0)
+        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=160, bg=tema.FUNDO,
+                                highlightthickness=1, highlightbackground=tema.BORDA)
         self.previa.pack(pady=(0, 6))
 
         corte = ttk.LabelFrame(lado, text="Corte e Enquadramento", padding=6)
@@ -142,10 +149,10 @@ class EditorFoto(tk.Toplevel):
         self.angulo = tk.DoubleVar(value=0)
         self._linha_escala(giro, "Endireitar", self.angulo, -15, 15, "angulo", "Gira suavemente em graus (duplo clique zera)")
 
-        # Grupos estilo Lightroom: Luz, Cor e Efeitos
+        # Grupos estilo Lightroom / Camera Raw: Luz, Cor e Efeitos
         quadros_lr = {}
         for nome_grupo, titulo_grupo in (
-            ("Luz", "Luz (Lightroom)"),
+            ("Luz", "Luz (Camera Raw / Lightroom)"),
             ("Cor", "Cor e Balanço de Branco"),
             ("Efeitos", "Nitidez e Vinheta"),
         ):
@@ -168,19 +175,19 @@ class EditorFoto(tk.Toplevel):
         ttk.Button(linha_zerar, text="↺ Zerar todos os ajustes de luz e cor", style="Compacto.TButton",
                    command=self.zerar_ajustes).pack(fill="x")
 
-        tratar = ttk.LabelFrame(lado, text="Tratar arquivo original externo", padding=6)
+        tratar = ttk.LabelFrame(lado, text="Tratar Arquivo Original Externo", padding=6)
         tratar.pack(fill="x", pady=3)
         linha = ttk.Frame(tratar)
         linha.pack(fill="x")
-        ttk.Button(linha, text="Photoshop", style="Compacto.TButton", command=self._photoshop).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(linha, text="Lightroom", style="Compacto.TButton", command=self._lightroom).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        ttk.Button(linha, text="Ps  Photoshop", style="Compacto.TButton", command=self._photoshop).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(linha, text="Lr  Lightroom", style="Compacto.TButton", command=self._lightroom).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
     def _linha_escala(self, pai, texto, variavel, de, ate, chave, dica_txt=None):
         linha = ttk.Frame(pai)
         linha.pack(fill="x", pady=1)
         rot = ttk.Label(linha, text=texto, width=11)
         rot.pack(side="left")
-        valor = ttk.Label(linha, text="0", width=4, anchor="e", style="Fraco.TLabel")
+        valor = ttk.Label(linha, text="0", width=4, anchor="e", style="Fraco.TLabel", font=tema.FONTE_MONO)
         valor.pack(side="right")
         escala = ttk.Scale(linha, from_=de, to=ate, variable=variavel,
                            command=lambda v, c=chave, r=valor: self._mudou_escala(c, v, r))

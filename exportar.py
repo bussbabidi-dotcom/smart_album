@@ -27,9 +27,12 @@ MARGEM_REGISTRO_MM = 10.0
 
 
 def opcoes_padrao():
-    """Como a exportação funciona sem escolher nada: compatível com o jeito antigo + opções de PDF industrial."""
+    """Como a exportação funciona sem escolher nada: escolha múltipla entre JPG, PSD e PDF."""
     return {
         "formato": "jpg",
+        "exportar_jpg": True,
+        "exportar_psd": False,
+        "exportar_pdf": False,
         "qualidade": QUALIDADE_JPG,
         "icc": True,
         "dpi": 300,
@@ -37,12 +40,55 @@ def opcoes_padrao():
         "marcas_registro": False,
         "pdf_unico": True,
         "pasta": "",
-        "subpasta": False,
+        "subpasta": True,
         "laminas": "todas",
         "intervalo": "",
         "padrao": PADRAO_NOME,
         "existentes": "substituir",
     }
+
+
+def formatos_ativos(opcoes):
+    """Lista ordenada de formatos marcados ('jpg', 'psd', 'pdf'), mantendo compatibilidade com projetos antigos."""
+    op = opcoes or {}
+    if any(k in op for k in ("exportar_jpg", "exportar_psd", "exportar_pdf")):
+        ativos = []
+        if op.get("exportar_jpg"):
+            ativos.append("jpg")
+        if op.get("exportar_psd"):
+            ativos.append("psd")
+        if op.get("exportar_pdf"):
+            ativos.append("pdf")
+        return ativos
+    fmt = str(op.get("formato") or "jpg").lower()
+    ativos = []
+    if fmt in ("jpg", "ambos", "jpg_pdf", "todos"):
+        ativos.append("jpg")
+    if fmt in ("psd", "ambos", "psd_pdf", "todos"):
+        ativos.append("psd")
+    if fmt in ("pdf", "jpg_pdf", "psd_pdf", "todos"):
+        ativos.append("pdf")
+    return ativos
+
+
+def tamanho_produto_texto(produto):
+    """Extrai o tamanho do produto em cm (ex.: '30X20', '30X30') para nomear a pasta do álbum."""
+    if not produto:
+        return "30X20"
+    nome = str(produto.get("nome") or "").strip()
+    achado = re.search(r"(\d+(?:[.,]\d+)?\s*[xX]\s*\d+(?:[.,]\d+)?)", nome)
+    if achado:
+        return re.sub(r"\s+", "", achado.group(1)).upper().replace(",", ".")
+    pw, ph = produto.get("pagina_mm", (300, 200))
+    cw = int(round(pw / 10.0)) if abs(pw / 10.0 - round(pw / 10.0)) < 0.05 else round(pw / 10.0, 1)
+    ch = int(round(ph / 10.0)) if abs(ph / 10.0 - round(ph / 10.0)) < 0.05 else round(ph / 10.0, 1)
+    return "%sX%s" % (cw, ch)
+
+
+def nome_pasta_album(produto):
+    """Nome da pasta principal de exportação: 'Album <TAMANHO>' (ex.: 'Album 30X20')."""
+    return "Album %s" % tamanho_produto_texto(produto)
+
 
 
 def produto_com_dpi(produto, dpi=None):

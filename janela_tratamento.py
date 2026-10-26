@@ -26,10 +26,10 @@ class JanelaTratamento(tk.Toplevel):
     def __init__(self, app, fotos=None):
         super().__init__(app.root)
         self.app = app
-        self.title("Tratamento de fotos")
+        self.title("Tratamento de Fotos · Photoshop & Lightroom Classic")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.minsize(600, 400)
+        self.minsize(660, 480)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.fotos_escolhidas = [f for f in (fotos or []) if f]
@@ -52,18 +52,25 @@ class JanelaTratamento(tk.Toplevel):
         self.atualizar_lightroom()
         self.update_idletasks()
         x = app.root.winfo_rootx() + max(0, (app.root.winfo_width() - self.winfo_reqwidth()) // 2)
-        self.geometry("+%d+%d" % (x, app.root.winfo_rooty() + 30))
+        self.geometry("+%d+%d" % (x, app.root.winfo_rooty() + 26))
 
     # ---------------- montagem ----------------
 
     def _montar(self):
+        tema.criar_cabecalho_janela(
+            self,
+            "Automação de Tratamento Externo (Photoshop Actions & Lightroom)",
+            "Edite arquivos diretamente no Adobe Photoshop ou aplique Ações/Presets em lote",
+            icone="⚡",
+        )
+
         quadro = ttk.Frame(self, padding=12)
         quadro.pack(fill="both", expand=True)
         quadro.columnconfigure(0, weight=1)
         quadro.columnconfigure(1, weight=1)
 
-        quais = ttk.LabelFrame(quadro, text="Quais fotos", padding=8)
-        quais.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
+        quais = ttk.LabelFrame(quadro, text="Escopo de Fotos Selecionadas", padding=8)
+        quais.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
         linha = ttk.Frame(quais)
         linha.pack(fill="x")
         self.radios = {}
@@ -75,63 +82,66 @@ class JanelaTratamento(tk.Toplevel):
             radio.pack(side="left", padx=(0, 10))
             self.radios[valor] = radio
         self.rotulo_fotos = ttk.Label(quais, text="", style="Fraco.TLabel")
-        self.rotulo_fotos.pack(anchor="w", pady=(4, 2))
-        self.faixa = tk.Canvas(quais, height=ALTURA_MINIATURA + 6, bg=tema.PAINEL_2, highlightthickness=0)
+        self.rotulo_fotos.pack(anchor="w", pady=(4, 4))
+        self.faixa = tk.Canvas(
+            quais, height=ALTURA_MINIATURA + 8, bg=tema.FUNDO,
+            highlightthickness=1, highlightbackground=tema.BORDA
+        )
         self.faixa.pack(fill="x")
 
-        ps = ttk.LabelFrame(quadro, text="Photoshop", padding=8)
-        ps.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
-        botao = ttk.Button(ps, text="Abrir no Photoshop para editar", style="Compacto.TButton", command=self.editar_no_photoshop)
+        ps = ttk.LabelFrame(quadro, text="Adobe Photoshop CC (Edição & Actions)", padding=10)
+        ps.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
+        botao = ttk.Button(ps, text="Ps  Abrir no Photoshop para editar", style="Compacto.TButton", command=self.editar_no_photoshop)
         botao.pack(fill="x")
         tema.dica(botao, "Abre as próprias fotos. Edite e salve com Ctrl+S: o álbum atualiza sozinho.")
-        ttk.Label(ps, text="Conjunto da Ação", style="Fraco.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(ps, text="Conjunto da Ação (Action Set)", style="Fraco.TLabel").pack(anchor="w", pady=(8, 2))
         self.combo_conjunto = ttk.Combobox(ps, textvariable=self.conjunto)
         self.combo_conjunto.pack(fill="x")
-        ttk.Label(ps, text="Ação", style="Fraco.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(ps, text="Ação (Action)", style="Fraco.TLabel").pack(anchor="w", pady=(6, 2))
         self.combo_acao = ttk.Combobox(ps, textvariable=self.acao)
         self.combo_acao.pack(fill="x")
         linha = ttk.Frame(ps)
-        linha.pack(fill="x", pady=(6, 0))
-        self.botao_carregar = ttk.Button(linha, text="Carregar ações do Photoshop", style="Compacto.TButton",
+        linha.pack(fill="x", pady=(8, 0))
+        self.botao_carregar = ttk.Button(linha, text="↻ Ler Ações do Photoshop", style="Compacto.TButton",
                                          command=self.carregar_acoes)
-        self.botao_carregar.pack(side="left")
-        self.botao_acao = ttk.Button(ps, text="Rodar Ação nas fotos", style="PrimarioCompacto.TButton", command=self.rodar_acao)
+        self.botao_carregar.pack(side="left", fill="x", expand=True)
+        self.botao_acao = ttk.Button(ps, text="▶ Rodar Ação nas Fotos", style="PrimarioCompacto.TButton", command=self.rodar_acao)
         self.botao_acao.pack(fill="x", pady=(8, 0))
 
-        lr = ttk.LabelFrame(quadro, text="Lightroom Classic", padding=8)
-        lr.grid(row=1, column=1, sticky="nsew", pady=(0, 6))
-        self.rotulo_lr = ttk.Label(lr, text="", style="Fraco.TLabel", wraplength=260, justify="left")
+        lr = ttk.LabelFrame(quadro, text="Adobe Lightroom Classic (Plugin Ponte)", padding=10)
+        lr.grid(row=1, column=1, sticky="nsew", pady=(0, 8))
+        self.rotulo_lr = ttk.Label(lr, text="", style="Fraco.TLabel", wraplength=280, justify="left")
         self.rotulo_lr.pack(anchor="w")
-        ttk.Label(lr, text="Preset de revelação", style="Fraco.TLabel").pack(anchor="w", pady=(6, 0))
+        ttk.Label(lr, text="Preset de Revelação", style="Fraco.TLabel").pack(anchor="w", pady=(8, 2))
         self.combo_preset = ttk.Combobox(lr, textvariable=self.preset, state="readonly")
         self.combo_preset.pack(fill="x")
         linha = ttk.Frame(lr)
-        linha.pack(fill="x", pady=(6, 0))
-        ttk.Button(linha, text="Atualizar presets", style="Compacto.TButton", command=self.atualizar_presets).pack(
-            side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(linha, text="Pasta do plugin", style="Compacto.TButton", command=self.abrir_pasta_plugin).pack(
+        linha.pack(fill="x", pady=(8, 0))
+        ttk.Button(linha, text="↻ Atualizar Presets", style="Compacto.TButton", command=self.atualizar_presets).pack(
+            side="left", fill="x", expand=True, padx=(0, 3))
+        ttk.Button(linha, text="📂 Pasta do Plugin", style="Compacto.TButton", command=self.abrir_pasta_plugin).pack(
             side="left", fill="x", expand=True)
         ttk.Label(lr, text="Instalar: no Lightroom Classic, Arquivo > Gerenciador de plug-ins > Adicionar, e escolha "
-                  "a pasta AlbumPonte.lrplugin.", style="Fraco.TLabel", wraplength=260, justify="left").pack(anchor="w", pady=(6, 0))
-        self.botao_lr = ttk.Button(lr, text="Tratar no Lightroom", style="PrimarioCompacto.TButton", command=self.tratar_lightroom)
+                  "a pasta AlbumPonte.lrplugin.", style="Fraco.TLabel", wraplength=280, justify="left").pack(anchor="w", pady=(6, 0))
+        self.botao_lr = ttk.Button(lr, text="▶ Tratar no Lightroom", style="PrimarioCompacto.TButton", command=self.tratar_lightroom)
         self.botao_lr.pack(fill="x", pady=(8, 0))
 
-        aviso = ttk.LabelFrame(quadro, text="Atenção", padding=8)
-        aviso.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
+        aviso = ttk.LabelFrame(quadro, text="Confirmação de Substituição de Originais", padding=8)
+        aviso.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
         ttk.Label(aviso, text="Rodar a Ação ou o Lightroom SUBSTITUI as fotos originais pelas tratadas, no mesmo lugar e "
-                  "com o mesmo nome, sem cópia. Não dá para voltar pelo programa.", foreground=tema.ALERTA,
-                  wraplength=560, justify="left").pack(anchor="w")
-        ttk.Checkbutton(aviso, text="Entendi: pode substituir as originais", variable=self.entendi).pack(anchor="w", pady=(4, 0))
+                  "com o mesmo nome, sem cópia. Não dá para desfazer pelo programa.", foreground=tema.ALERTA,
+                  wraplength=600, justify="left").pack(anchor="w")
+        ttk.Checkbutton(aviso, text="Entendi: autorizo substituir os arquivos originais no disco", variable=self.entendi).pack(anchor="w", pady=(4, 0))
 
         andamento = ttk.Frame(quadro)
         andamento.grid(row=3, column=0, columnspan=2, sticky="nsew")
         quadro.rowconfigure(3, weight=1)
         self.barra = ttk.Progressbar(andamento, mode="determinate")
         self.barra.pack(fill="x")
-        self.registro = tk.Text(andamento, height=6, bg=tema.PAINEL_2, fg=tema.TEXTO, relief="flat",
-                                insertbackground=tema.TEXTO, font=tema.FONTE_PEQUENA, state="disabled")
+        self.registro = tk.Text(andamento, height=5, bg=tema.FUNDO, fg=tema.TEXTO, relief="solid", bd=1,
+                                insertbackground=tema.TEXTO, font=tema.FONTE_MONO, state="disabled")
         self.registro.pack(fill="both", expand=True, pady=(4, 0))
-        self.rotulo_resumo = ttk.Label(andamento, text="", wraplength=560, justify="left")
+        self.rotulo_resumo = ttk.Label(andamento, text="", wraplength=600, justify="left")
         self.rotulo_resumo.pack(anchor="w", pady=(4, 0))
 
         botoes = ttk.Frame(quadro)

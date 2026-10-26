@@ -239,6 +239,8 @@ class Aplicativo:
         self.info = {}
         self.historico = proj.Historico()
         self.atual = 0
+        self.laminas_sel = {0}
+        self.ultima_lamina_clicada = 0
         self.espaco_sel = None
         self.espacos_sel = set()
         self._ancora_espaco = None
@@ -1063,8 +1065,9 @@ class Aplicativo:
         topo.pack(side="top", fill="x")
         self.rotulo_fundo = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_fundo.pack(side="left")
-        self._botao(topo, "Cor...", self.escolher_fundo, "Cor de fundo do alvo selecionado (Lâmina, Página Esquerda ou Direita)").pack(side="right")
-        self.amostra_fundo = tk.Label(topo, width=3, bg="#ffffff", relief="flat", cursor="hand2")
+        self._botao(topo, "🎯", self.capturar_cor_fundo_tela, "Capturar cor de fundo de qualquer pixel da tela (conta-gotas)", "Compacto.TButton").pack(side="right", padx=(2, 0))
+        self._botao(topo, "Cor...", self.escolher_fundo, "Cor de fundo do alvo selecionado (Seletor Photoshop HSB/RGB/Hex)", "Compacto.TButton").pack(side="right")
+        self.amostra_fundo = tk.Label(topo, width=3, bg="#ffffff", relief="solid", bd=1, cursor="hand2")
         self.amostra_fundo.pack(side="right", padx=4)
         self.amostra_fundo.bind("<Button-1>", lambda e: self.escolher_fundo())
 
@@ -1139,13 +1142,30 @@ class Aplicativo:
             self._rotulos_fundo[texto] = rotulo
         linha = ttk.Frame(imagem)
         linha.pack(fill="x", pady=(4, 0))
-        ajustar = self._botao(linha, "Ajustar cor...", lambda: self.abrir_editor_fundo(),
-                              "Brilho, contraste, saturação, matiz e tingir com uma cor\n(também: duplo clique numa imagem da galeria)")
+        ajustar = self._botao(linha, "🎨 Ajustar cor / Tingir...", lambda: self.abrir_editor_fundo(),
+                              "Brilho, contraste, saturação, matiz e tingir com conta-gotas da tela\n(também: duplo clique numa imagem da galeria)")
         ajustar.pack(side="left", fill="x", expand=True, padx=(0, 2))
         tirar = self._botao(linha, "Tirar imagem", self.tirar_imagem_fundo, "Remove a imagem do alvo selecionado (Lâmina, Pág. Esq. ou Pág. Dir.)")
         tirar.pack(side="left", fill="x", expand=True)
         self._controles_fundo += [ajustar, tirar]
-        self._botao(quadro, "Aplicar este fundo em todas as lâminas", self.fundo_em_todas).pack(side="top", fill="x", pady=(2, 4))
+
+        linha_aplicar = ttk.Frame(quadro)
+        linha_aplicar.pack(side="top", fill="x", pady=(3, 4))
+        self.botao_fundo_selecionadas = self._botao(
+            linha_aplicar,
+            "Aplicar nas selecionadas (1)",
+            self.fundo_em_selecionadas,
+            "Aplica este fundo e todas as suas configurações nas lâminas selecionadas na linha do tempo (use Ctrl+Clique ou Shift+Clique nas miniaturas das lâminas)",
+            "PrimarioCompacto.TButton",
+        )
+        self.botao_fundo_selecionadas.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_aplicar,
+            "Aplicar em todas",
+            self.fundo_em_todas,
+            "Aplica este fundo e todas as suas configurações em todas as lâminas do álbum",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
         pasta = ttk.LabelFrame(quadro, text="Pasta de fundos", padding=6)
         pasta.pack(side="top", fill="both", expand=True, pady=(2, 0))
@@ -1309,7 +1329,7 @@ class Aplicativo:
         self._atualizar_depois_da_moldura()
 
     def _escolher_cor_moldura(self):
-        cor = colorchooser.askcolor(self.moldura_cor.get(), parent=self.root, title="Cor da moldura")[1]
+        cor = tema.escolher_cor_photoshop(self.root, cor_inicial=self.moldura_cor.get(), titulo="Cor da Moldura · Photoshop")
         if cor:
             if not self.moldura_ativa.get():
                 self.moldura_ativa.set(True)
@@ -1994,6 +2014,8 @@ class Aplicativo:
         self._definir_produto(projeto.get("produto") or self.produto["nome"])
         self.historico.limpar()
         self.atual = 0
+        self.laminas_sel = {0}
+        self.ultima_lamina_clicada = 0
         self.espaco_sel = None
         self.fotos_sel.clear()
         self._tl_pil.clear()
@@ -2494,19 +2516,21 @@ class Aplicativo:
         paginas = max(1, int(self.produto["paginas_por_lamina"]))
 
         janela = tk.Toplevel(self.root)
-        janela.title("Diagramação Automática — Motor Elástico e Cenários")
+        janela.title("Diagramação Automática · Motor Elástico & Cenários (Photoshop CC)")
+        janela.configure(bg=tema.PAINEL)
         janela.transient(self.root)
         janela.resizable(False, False)
         janela.grab_set()
 
-        quadro = ttk.Frame(janela, padding=16)
+        tema.criar_cabecalho_janela(
+            janela,
+            "Diagramação Automática — Motor Elástico e Cenários",
+            "Configure o escopo, separação por pastas/cenários, limite de corte elástico e layouts 60/40 e 70/30",
+            icone="❖",
+        )
+
+        quadro = ttk.Frame(janela, padding=14)
         quadro.pack(fill="both", expand=True)
-        ttk.Label(quadro, text="Diagramação automática", style="Titulo.TLabel").pack(anchor="w")
-        ttk.Label(
-            quadro,
-            text="Configure o escopo, separação por pastas/cenários, limite de corte elástico e layouts 60/40 e 70/30.",
-            style="Fraco.TLabel",
-        ).pack(anchor="w", pady=(2, 10))
 
         # --- 1. Escopo da Diagramação ---
         quadro_escopo = ttk.LabelFrame(quadro, text="1. O que você deseja diagramar?", padding=10)
@@ -3517,9 +3541,15 @@ class Aplicativo:
     def _itens_timeline(self):
         return list(range(len(self.projeto["laminas"])))
 
-    def selecionar_lamina(self, item):
+    def selecionar_lamina(self, item, manter_selecao=False):
         self._cancelar_animacao_layout()
         self.atual = item
+        if isinstance(item, int):
+            if not manter_selecao:
+                self.laminas_sel = {item}
+            else:
+                self.laminas_sel.add(item)
+            self.ultima_lamina_clicada = item
         self._definir_selecao_espacos(set())
         self._ancora_espaco = None
         self.molde_sel = None
@@ -3559,6 +3589,10 @@ class Aplicativo:
         itens = self._itens_timeline()
         if self.atual not in itens:
             self.atual = itens[0] if itens else 0
+        itens_set = set(itens)
+        self.laminas_sel = {i for i in getattr(self, "laminas_sel", set()) if i in itens_set}
+        if isinstance(self.atual, int) and self.atual in itens_set and not self.laminas_sel:
+            self.laminas_sel = {self.atual}
         lamina = self._lamina()
         if lamina is None or self.espaco_sel is None or self.espaco_sel >= len(lamina["espacos"]):
             self._definir_selecao_espacos(set())
@@ -6013,7 +6047,14 @@ class Aplicativo:
         c.delete("all")
         itens = self._itens_timeline()
         self._tl_itens = itens
-        self.rotulo_timeline.configure(text="Lâminas  %s" % len(self.projeto["laminas"]))
+        selecionadas = {i for i in getattr(self, "laminas_sel", set()) if i in itens}
+        if isinstance(self.atual, int) and self.atual in itens and not selecionadas:
+            selecionadas = {self.atual}
+            self.laminas_sel = selecionadas
+        if len(selecionadas) > 1:
+            self.rotulo_timeline.configure(text="Lâminas  %s  (%d sel.)" % (len(self.projeto["laminas"]), len(selecionadas)))
+        else:
+            self.rotulo_timeline.configure(text="Lâminas  %s" % len(self.projeto["laminas"]))
         vertical = bool(self._tl_vertical)
         larg, alt, altura = self._medidas_timeline()
         self._tl_larg, self._tl_alt, self._tl_altura = larg, alt, altura
@@ -6035,12 +6076,15 @@ class Aplicativo:
             w = int(h * w_mm / h_mm) if h == alt else larg
             xi = x + (larg - w) // 2
             yi = y + (alt - h) // 2
-            selecionado = item == self.atual
-            if selecionado:
+            ativa = item == self.atual
+            em_multi = item in selecionadas
+            if ativa or em_multi:
+                cor_fundo_sel = tema.DESTAQUE_ESCURO if ativa else tema.MULTI_SEL_ESCURO
+                cor_borda_sel = tema.DESTAQUE if ativa else tema.MULTI_SEL
                 if vertical:
-                    c.create_rectangle(3, y - 4, largura - 3, y + passo - 7, fill=tema.DESTAQUE_ESCURO, outline="")
+                    c.create_rectangle(3, y - 4, largura - 3, y + passo - 7, fill=cor_fundo_sel, outline=cor_borda_sel, width=2 if ativa else 1)
                 else:
-                    c.create_rectangle(x - 4, 2, x + larg + 4, altura - 2, fill=tema.DESTAQUE_ESCURO, outline="")
+                    c.create_rectangle(x - 4, 2, x + larg + 4, altura - 2, fill=cor_fundo_sel, outline=cor_borda_sel, width=2 if ativa else 1)
             chave = self._chave_timeline(item)
             assinatura = "%s:%d" % (self._assinatura(item), w)
             pronta = self._tl_pil.get(chave)
@@ -6056,8 +6100,12 @@ class Aplicativo:
                 self._pedir_timeline(item, chave, assinatura, w)
             if self.produto["paginas_por_lamina"] > 1:
                 c.create_line(xi + w // 2, yi, xi + w // 2, yi + h, fill="#999999")
+            if len(selecionadas) > 1 and em_multi:
+                c.create_rectangle(xi + 2, yi + 2, xi + 16, yi + 15, fill=tema.DESTAQUE if ativa else tema.MULTI_SEL, outline="#ffffff", width=1)
+                c.create_text(xi + 9, yi + 8, text="✓", fill="#ffffff", font=("Segoe UI", 7, "bold"))
             rotulo = str(item + 1)
-            c.create_text(x + larg // 2, y + alt + 10, text=rotulo, fill=tema.TEXTO if selecionado else tema.TEXTO_FRACO,
+            c.create_text(x + larg // 2, y + alt + 10, text=rotulo,
+                          fill="#ffffff" if (ativa or em_multi) else tema.TEXTO_FRACO,
                           font=tema.FONTE_PEQUENA)
         self._desenhar_insercao()
 
@@ -6123,20 +6171,69 @@ class Aplicativo:
         item = self._timeline_em(self._eixo_tl(evento.x, evento.y))
         if item is None:
             return
-        self.selecionar_lamina(item)
+        ctrl = bool(evento.state & 0x0004)
+        shift = bool(evento.state & 0x0001)
         if isinstance(item, int):
+            if ctrl:
+                if item in self.laminas_sel and len(self.laminas_sel) > 1:
+                    self.laminas_sel.discard(item)
+                    if self.atual == item:
+                        self.atual = sorted(self.laminas_sel)[0]
+                else:
+                    self.laminas_sel.add(item)
+                    self.atual = item
+                self.ultima_lamina_clicada = item
+                self.selecionar_lamina(self.atual, manter_selecao=True)
+            elif shift:
+                ancora = self.ultima_lamina_clicada if isinstance(self.ultima_lamina_clicada, int) else (self.atual if isinstance(self.atual, int) else item)
+                a, b = sorted((ancora, item))
+                self.laminas_sel.update(range(a, b + 1))
+                self.selecionar_lamina(item, manter_selecao=True)
+            else:
+                self.laminas_sel = {item}
+                self.ultima_lamina_clicada = item
+                self.selecionar_lamina(item, manter_selecao=False)
             self._arrasto = {"tipo": "lamina", "item": item, "x": evento.x_root, "y": evento.y_root, "ativo": False}
+        else:
+            self.selecionar_lamina(item)
+
+    def selecionar_todas_laminas(self):
+        total = len(self.projeto.get("laminas", []))
+        if total > 0:
+            self.laminas_sel = set(range(total))
+            self.desenhar_timeline()
+            self._atualizar_fundo_ui()
+
+    def limpar_selecao_laminas(self):
+        if isinstance(self.atual, int):
+            self.laminas_sel = {self.atual}
+        else:
+            self.laminas_sel.clear()
+        self.desenhar_timeline()
+        self._atualizar_fundo_ui()
 
     def _timeline_menu(self, evento):
         item = self._timeline_em(self._eixo_tl(evento.x, evento.y))
         if not isinstance(item, int):
             return
-        self.selecionar_lamina(item)
+        if item not in getattr(self, "laminas_sel", set()):
+            self.selecionar_lamina(item, manter_selecao=False)
+        else:
+            self.selecionar_lamina(item, manter_selecao=True)
         n = len(self.projeto["laminas"])
+        qtd_sel = len(self.laminas_sel)
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Nova lâmina depois desta", command=self.adicionar_lamina)
         menu.add_command(label="Duplicar lâmina", command=lambda: self.duplicar_lamina(item))
         menu.add_command(label="Diagramar de novo", command=self.rediagramar_lamina)
+        menu.add_separator()
+        menu.add_command(
+            label="Aplicar fundo atual nas %d lâmina(s) selecionada(s)" % max(1, qtd_sel),
+            command=self.fundo_em_selecionadas,
+        )
+        menu.add_command(label="Selecionar todas as lâminas (%d)" % n, command=self.selecionar_todas_laminas)
+        if qtd_sel > 1:
+            menu.add_command(label="Manter apenas esta lâmina selecionada", command=self.limpar_selecao_laminas)
         menu.add_separator()
 
         def estado(ok):
@@ -6452,15 +6549,31 @@ class Aplicativo:
         if dono is None:
             return
         cor_atual = cor_hex(self._cor_fundo_ativa(dono))
-        cor = colorchooser.askcolor(color=cor_atual, parent=self.root)[1]
+        cor = tema.escolher_cor_photoshop(
+            self.root,
+            cor_inicial=cor_atual,
+            titulo="Cor de Fundo · Seletor Photoshop",
+        )
         if cor:
-            self.marcar_historico()
-            ch_cor, _ch_img = self._chaves_fundo_alvo()
-            dono[ch_cor] = cor
-            if ch_cor == "fundo":
-                self.projeto.setdefault("config", {})["fundo"] = cor
-            self._atualizar_fundo_ui()
-            self.atualizar_lamina_atual()
+            self.definir_cor_fundo(cor)
+
+    def capturar_cor_fundo_tela(self):
+        dono = self._dono_do_fundo()
+        if dono is None:
+            return
+        tema.ContaGotasTela(self.root, lambda c: self.definir_cor_fundo(c) if c else None)
+
+    def definir_cor_fundo(self, cor):
+        dono = self._dono_do_fundo()
+        if dono is None or not cor:
+            return
+        self.marcar_historico()
+        ch_cor, _ch_img = self._chaves_fundo_alvo()
+        dono[ch_cor] = cor_hex(cor)
+        if ch_cor == "fundo":
+            self.projeto.setdefault("config", {})["fundo"] = cor_hex(cor)
+        self._atualizar_fundo_ui()
+        self.atualizar_lamina_atual()
 
     def _mudou_fusao_fundo(self, marcar=False):
         if self._carregando_fundo:
@@ -6475,6 +6588,34 @@ class Aplicativo:
             return
         dono["fundo_fusao"] = valor
         self.fundo_ajustado(final=marcar)
+
+    def _indices_laminas_selecionadas(self):
+        total = len(self.projeto.get("laminas", []))
+        sel = sorted(i for i in getattr(self, "laminas_sel", set()) if isinstance(i, int) and 0 <= i < total)
+        if not sel and isinstance(self.atual, int) and 0 <= self.atual < total:
+            sel = [self.atual]
+        return sel
+
+    def fundo_em_selecionadas(self):
+        """Aplica o fundo e todas as suas configurações da lâmina aberta nas lâminas selecionadas (Ctrl/Shift+Clique)."""
+        dono = self._dono_do_fundo()
+        alvos = self._indices_laminas_selecionadas()
+        if dono is None or not alvos:
+            return
+        self.marcar_historico()
+        chaves_copiar = ("fundo", "fundo_esquerda", "fundo_direita", "fundo_fusao",
+                         "fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita")
+        for idx in alvos:
+            outra = self.projeto["laminas"][idx]
+            if outra is dono:
+                continue
+            for ch in chaves_copiar:
+                if dono.get(ch) is not None:
+                    outra[ch] = proj.copia(dono[ch])
+                else:
+                    outra.pop(ch, None)
+        self.atualizar_tudo()
+        self.registrar("Fundo e configurações aplicados nas %s lâmina(s) selecionada(s)." % len(alvos))
 
     def fundo_em_todas(self):
         dono = self._dono_do_fundo()
@@ -6514,8 +6655,8 @@ class Aplicativo:
 
     def aplicar_fundo_em(self, caminho, item=None, alvo=None):
         """
-        Põe a imagem como fundo do alvo selecionado (lâmina inteira, página esquerda ou página direita),
-        mantendo modo, opacidade, desfoque, P&B e os ajustes de cor que já tinha.
+        Põe a imagem como fundo do alvo selecionado (lâmina inteira, página esquerda ou página direita)
+        com ajustes zerados exclusivos para este fundo (não herda ajustes de outros fundos).
         """
         item = self.atual if item is None else item
         dono = self._lamina(item)
@@ -6528,10 +6669,8 @@ class Aplicativo:
             return False
         self.marcar_historico()
         dados = fundo_imagem_padrao()
-        dados.update(proj.copia(dono.get(ch_img) or dono.get("fundo_imagem") or {}))
         dados["caminho"] = str(Path(caminho))
         dono[ch_img] = dados
-        # Se aplicou em uma página (esquerda/direita) e ainda não tinha fusão configurada, mantém suave se o outro lado existir
         self._fundos_avisados.discard(normalizar_caminho(caminho))
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
@@ -6541,6 +6680,20 @@ class Aplicativo:
         self.registrar("Fundo da %s: %s" % (nome_alvo, Path(caminho).name))
         return True
 
+    def aplicar_fundo_em_selecionadas(self, caminho):
+        alvos = self._indices_laminas_selecionadas()
+        if not alvos:
+            return
+        self.marcar_historico()
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        for idx in alvos:
+            lamina = self.projeto["laminas"][idx]
+            dados = fundo_imagem_padrao()
+            dados["caminho"] = str(Path(caminho))
+            lamina[ch_img] = dados
+        self.atualizar_tudo()
+        self.registrar("Fundo %s aplicado em %s lâmina(s) selecionada(s)." % (Path(caminho).name, len(alvos)))
+
     def aplicar_fundo_em_todas(self, caminho):
         if not self.projeto["laminas"]:
             return
@@ -6548,7 +6701,6 @@ class Aplicativo:
         _ch_cor, ch_img = self._chaves_fundo_alvo()
         for lamina in self.projeto["laminas"]:
             dados = fundo_imagem_padrao()
-            dados.update(proj.copia(lamina.get(ch_img) or lamina.get("fundo_imagem") or {}))
             dados["caminho"] = str(Path(caminho))
             lamina[ch_img] = dados
         self.atualizar_tudo()
@@ -6645,14 +6797,16 @@ class Aplicativo:
                 self.aplicar_fundo_em(a["caminho"], item)
 
     def _galeria_menu(self, caminho, evento):
+        qtd_sel = len(self._indices_laminas_selecionadas())
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Aplicar no alvo atual (%s)" % self.fundo_alvo.get(), command=lambda: self.aplicar_fundo_em(caminho))
         menu.add_command(label="Aplicar na Lâmina inteira", command=lambda: (self.fundo_alvo.set("lamina"), self.aplicar_fundo_em(caminho, alvo="lamina")))
         menu.add_command(label="Aplicar na Página Esquerda", command=lambda: (self.fundo_alvo.set("esquerda"), self.aplicar_fundo_em(caminho, alvo="esquerda")))
         menu.add_command(label="Aplicar na Página Direita", command=lambda: (self.fundo_alvo.set("direita"), self.aplicar_fundo_em(caminho, alvo="direita")))
         menu.add_separator()
+        menu.add_command(label="Aplicar nas %d lâmina(s) selecionada(s)" % max(1, qtd_sel), command=lambda: self.aplicar_fundo_em_selecionadas(caminho))
         menu.add_command(label="Aplicar em todas as lâminas", command=lambda: self.aplicar_fundo_em_todas(caminho))
-        menu.add_command(label="Ajustar cor...", command=lambda: self.abrir_editor_fundo(caminho))
+        menu.add_command(label="Ajustar cor / Tingir...", command=lambda: self.abrir_editor_fundo(caminho))
         menu.add_separator()
         menu.add_command(label="Abrir pasta", command=lambda: os.startfile(str(Path(caminho).parent)))
         menu.tk_popup(evento.x_root, evento.y_root)
@@ -6816,6 +6970,9 @@ class Aplicativo:
                     self.rotulo_fundo_imagem.configure(text="Sem imagem: só a cor.")
             for controle in self._controles_fundo:
                 controle.state(["!disabled"] if (dados and dados.get("caminho")) else ["disabled"])
+            if hasattr(self, "botao_fundo_selecionadas"):
+                qtd_sel = len(self._indices_laminas_selecionadas())
+                self.botao_fundo_selecionadas.configure(text="Aplicar nas selecionadas (%d)" % max(1, qtd_sel))
         finally:
             self._carregando_fundo = False
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
@@ -7003,9 +7160,17 @@ class Aplicativo:
         return self.janela_exportar
 
     def executar_exportacao(self, op, janela=None):
-        """Exporta com as opções da janela. Devolve False se não começou."""
+        """
+        Exporta com as opções da janela:
+        - Cria a pasta principal 'Album <TAMANHO>' (ex.: 'Album 30X20')
+        - Dentro dela cria APENAS as subpastas dos formatos marcados ('JPG', 'PSD', 'PDF').
+        """
         if self.tarefa is not None:
             messagebox.showinfo("Aguarde", "Ainda estou terminando: %s" % self.tarefa[0], parent=janela or self.root)
+            return False
+        ativos = exportar.formatos_ativos(op)
+        if not ativos:
+            messagebox.showwarning("Exportar", "Marque pelo menos um formato de saída (JPG, PSD ou PDF).", parent=janela or self.root)
             return False
         try:
             indices = janela_exportar.indices_escolhidos(op, self.projeto, self.atual)
@@ -7016,14 +7181,14 @@ class Aplicativo:
         if not op.get("pasta"):
             messagebox.showwarning("Exportar", "Escolha a pasta de saída.", parent=janela or self.root)
             return False
-        pasta = janela_exportar.pasta_final(op, self.projeto)
+        pasta_album = janela_exportar.pasta_final(op, self.projeto, self.produto)
         previstos = janela_exportar.arquivos_previstos(op, self.projeto, self.produto, itens)
-        existentes = [arq for arq in previstos if (pasta / arq).exists()]
+        existentes = [arq for arq in previstos if (pasta_album / arq).exists()]
         modo = op["existentes"]
         if modo == "perguntar" and existentes:
             resposta = messagebox.askyesnocancel(
                 "Exportar", "%s arquivo(s) já existem em\n%s\n\nSim: substituir   ·   Não: pular os que existem"
-                % (len(existentes), pasta), parent=janela or self.root)
+                % (len(existentes), pasta_album), parent=janela or self.root)
             if resposta is None:
                 return False
             modo = "substituir" if resposta else "pular"
@@ -7033,17 +7198,24 @@ class Aplicativo:
         janela_exportar.lembrar_pasta(self.arquivo_exportacao(), op["pasta"])
         opcoes = dict(op, indices=indices, existentes=modo)
         copia = json.loads(json.dumps(self.projeto))
-        produto, info, formato = self.produto, dict(self.info), op["formato"]
+        produto, info = self.produto, dict(self.info)
 
         def trabalho(t):
             gravados = []
-            if formato in ("jpg", "ambos", "jpg_pdf"):
-                gravados += exportar.exportar_jpg(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)
-            if formato in ("pdf", "jpg_pdf") and not t.parar():
-                gravados += exportar.exportar_pdf(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)
-            if formato in ("psd", "ambos") and not t.parar():
+            pasta_album.mkdir(parents=True, exist_ok=True)
+            if "jpg" in ativos and not t.parar():
+                pasta_jpg = janela_exportar.pasta_do_formato(pasta_album, "jpg")
+                pasta_jpg.mkdir(parents=True, exist_ok=True)
+                gravados += exportar.exportar_jpg(copia, produto, info, pasta_jpg, t.aviso, t.parar, t.progresso, opcoes)
+            if "psd" in ativos and not t.parar():
                 import exportar_psd
-                gravados += exportar_psd.exportar_psd(copia, produto, info, pasta, t.aviso, t.parar, t.progresso, opcoes)
+                pasta_psd = janela_exportar.pasta_do_formato(pasta_album, "psd")
+                pasta_psd.mkdir(parents=True, exist_ok=True)
+                gravados += exportar_psd.exportar_psd(copia, produto, info, pasta_psd, t.aviso, t.parar, t.progresso, opcoes)
+            if "pdf" in ativos and not t.parar():
+                pasta_pdf = janela_exportar.pasta_do_formato(pasta_album, "pdf")
+                pasta_pdf.mkdir(parents=True, exist_ok=True)
+                gravados += exportar.exportar_pdf(copia, produto, info, pasta_pdf, t.aviso, t.parar, t.progresso, opcoes)
             return gravados
 
         def fim(gravados, erro):
@@ -7052,8 +7224,8 @@ class Aplicativo:
             elif erro:
                 messagebox.showerror("Exportar", str(erro), parent=self.root)
             elif gravados and messagebox.askyesno("Exportar", "%s arquivo(s) gravados em\n%s\n\nAbrir a pasta?" % (
-                    len(gravados), pasta), parent=self.root):
-                os.startfile(str(pasta))
+                    len(gravados), pasta_album), parent=self.root):
+                os.startfile(str(pasta_album))
 
         return self.executar("Exportando", trabalho, fim, janela=janela)
 
@@ -7064,7 +7236,13 @@ class Aplicativo:
         if not self.projeto["laminas"]:
             self.registrar("Não há lâminas para exportar.")
             return False
-        op = dict(self.opcoes_exportacao(), formato=tipo)
+        op = dict(
+            self.opcoes_exportacao(),
+            formato=tipo,
+            exportar_jpg=(tipo in ("jpg", "ambos", "jpg_pdf")),
+            exportar_psd=(tipo in ("psd", "ambos")),
+            exportar_pdf=(tipo in ("pdf", "jpg_pdf")),
+        )
         avisos = janela_exportar.conferir(self.projeto, janela_exportar.indices_escolhidos(op, self.projeto, self.atual))
         if avisos and not messagebox.askyesno("Exportar", "\n".join(avisos) + "\n\nExportar mesmo assim?", parent=self.root):
             return False
