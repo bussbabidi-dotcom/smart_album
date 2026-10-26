@@ -8,16 +8,21 @@ Fotos e pastas podem ser arrastadas do Explorer, coladas com Ctrl+V ou
 passadas ao abrir o programa (arrastar a pasta em cima do iniciar.bat).
 """
 
+import atexit
 import hashlib
 import json
 import math
 import os
 import queue
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
+import urllib.request
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
@@ -66,6 +71,43 @@ ARQUIVO_JANELA = pasta_dados() / "janela.json"
 ARQUIVO_FUNDOS = pasta_dados() / "fundos.json"
 ARQUIVO_CAPA = pasta_dados() / "capa_programa.json"
 ARQUIVO_EXPORTACAO = pasta_dados() / "exportacao.json"
+ARQUIVO_ATALHOS = pasta_dados() / "atalhos.json"
+
+DEFINICOES_ATALHOS = (
+    ("novo_projeto", "Novo projeto", "Ctrl+N"),
+    ("abrir_projeto", "Abrir projeto", "Ctrl+O"),
+    ("salvar_projeto", "Salvar projeto", "Ctrl+S"),
+    ("escolher_pasta", "Carregar pasta", "Ctrl+P"),
+    ("importar_link_drive", "Colar link do Drive", "Ctrl+G"),
+    ("escolher_fotos", "Carregar fotos", "Ctrl+I"),
+    ("abrir_exportar", "Exportar álbum", "Ctrl+E"),
+    ("desfazer", "Desfazer", "Ctrl+Z"),
+    ("refazer", "Refazer", "Ctrl+Y"),
+    ("abrir_diagramacao", "Diagramar álbum", "F5"),
+    ("rediagramar_lamina", "Outro layout na lâmina", "R"),
+    ("rediagramar_todas", "Aplicar margens em todas", "Ctrl+R"),
+    ("distribuir_nao_usadas", "Distribuir fotos livres", "Ctrl+L"),
+    ("lamina_anterior", "Lâmina anterior", "Prior"),
+    ("proxima_lamina", "Próxima lâmina", "Next"),
+    ("adicionar_lamina", "Nova lâmina", "Insert"),
+    ("duplicar_lamina", "Duplicar lâmina", "Ctrl+J"),
+    ("remover_lamina", "Apagar lâmina", "Shift+Delete"),
+    ("alternar_modo_layout", "Modo mover/transformar", "L"),
+    ("editar_foto_selecionada", "Editor de cor", "Return"),
+    ("girar_foto", "Girar foto 90°", "G"),
+    ("preencher_pagina", "Preencher página 100%", "F"),
+    ("proporcao_original", "Proporção original", "O"),
+    ("igualar_tamanhos", "Igualar tamanhos", "I"),
+    ("adicionar_espaco", "Novo espaço", "N"),
+    ("duplicar_espaco", "Duplicar espaço", "Ctrl+D"),
+    ("ordem_frente", "Trazer para frente", "U"),
+    ("ordem_tras", "Mandar para trás", "J"),
+    ("apagar_foto_espaco", "Tirar foto / espaço", "Delete"),
+    ("alternar_guias", "Mostrar/ocultar guias", "H"),
+    ("abrir_aba_degrade", "Aba Degradê", "M"),
+    ("abrir_tratamento", "Photoshop / Lightroom", "T"),
+    ("abrir_capa", "Programa de capas", "K"),
+)
 VERSAO_ARRANJO = 3
 ARRANJO_PADRAO = {
     "versao": VERSAO_ARRANJO,
@@ -265,6 +307,12 @@ class Aplicativo:
         self._previa_fundo_agendada = None
         self.tempos_previa_fundo = []
         self._celula = (100, 96, 84)
+        self._pastas_temp_drive = []
+        atexit.register(self._limpar_pastas_temp_drive)
+        self.atalhos_mapa = self._carregar_atalhos()
+        self._gravando_atalho_acao = None
+        self._botoes_atalhos_ui = {}
+        self._teclas_vinculadas = []
 
         self._montar()
         self._atalhos()
@@ -356,8 +404,7 @@ class Aplicativo:
         selo = tk.Label(topo, text="Sa", bg="#001e36", fg="#31a8ff",
                         font=tema.FONTE_FORTE, bd=1, relief="solid", padx=5, pady=1)
         selo.pack(side="left", padx=(2, 6))
-        tema.dica(selo, "Smart Album CC · Motor Elástico Proporcional (Corte Máx ≤ 22%)")
-        ttk.Label(topo, text="Smart Album CC", style="Logo.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Label(topo, text="Smart Album", style="Logo.TLabel").pack(side="left", padx=(0, 8))
 
         arquivo = ttk.Menubutton(topo, text="Arquivo", style="Compacto.TMenubutton")
         menu = tk.Menu(arquivo, tearoff=0)
@@ -369,20 +416,9 @@ class Aplicativo:
         menu.add_command(label="Salvar", accelerator="Ctrl+S", command=self.salvar_projeto)
         menu.add_command(label="Salvar como...", accelerator="Ctrl+Shift+S", command=lambda: self.salvar_projeto(como=True))
         menu.add_separator()
-        menu.add_command(label="Adicionar fotos...", command=self.escolher_fotos)
-        menu.add_command(label="Adicionar pasta...", command=self.escolher_pasta)
         menu.add_command(label="Colar fotos do Explorer", accelerator="Ctrl+V", command=self.colar)
-        menu.add_command(label="Procurar fotos que mudaram de lugar...", command=self.consertar_caminhos)
-        menu.add_command(label="Remover selecionadas do projeto", command=self.remover_fotos_selecionadas)
-        menu.add_separator()
-        menu.add_command(label="Exportar...", accelerator="Ctrl+E", command=self.abrir_exportar)
-        menu.add_command(label="Tratar fotos (Photoshop / Lightroom)...", command=self.abrir_tratamento)
-        menu.add_separator()
-        menu.add_command(label="Abrir o programa de capas", command=self.abrir_programa_capa)
-        menu.add_command(label="Abrir a automação de capas (AUTOMAÇAO-PASTA --ui)", command=self.abrir_automacao_capa)
-        menu.add_command(label="Escolher o programa de capas...", command=self.escolher_programa_capa)
-        menu.add_separator()
-        menu.add_command(label="Informações do produto", command=self.mostrar_info_produto)
+        menu.add_command(label="Relocalizar fotos movidas...", command=self.consertar_caminhos)
+        menu.add_command(label="Escolher programa de capas...", command=self.escolher_programa_capa)
         menu.add_command(label='Criar atalho em "Enviar para"', command=self.criar_enviar_para)
         menu.add_separator()
         menu.add_command(label="Sair", command=self.sair)
@@ -397,34 +433,38 @@ class Aplicativo:
         exibir.pack(side="left", padx=1)
         self.botao_exibir = exibir
 
-        ttk.Frame(topo, width=10).pack(side="left")
+        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
+        self._botao(topo, "📁 Pasta", self.escolher_pasta,
+                    "Carregar pasta de fotos do computador", "Compacto.TButton").pack(side="left", padx=2)
+        self._botao(topo, "☁ Link Drive", self.importar_link_drive,
+                    "Colar link do Google Drive e baixar fotos em pasta temporária (apagada ao fechar)",
+                    "Compacto.TButton").pack(side="left", padx=2)
+        self._botao(topo, "🖼 Fotos", self.escolher_fotos,
+                    "Carregar fotos avulsas do computador", "Compacto.TButton").pack(side="left", padx=2)
+
+        ttk.Frame(topo, width=8).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_nome.pack(side="left", padx=(0, 8))
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
-                                          "Exportar lâminas: formato, pasta e nomes dos arquivos (Ctrl+E)",
-                                          "Compacto.TButton")
+                                          "Exportar álbum", "Compacto.TButton")
         self.botao_exportar.pack(side="right", padx=(3, 0))
         self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
-                                        "Tratar fotos no Photoshop (editar/Ação) ou Lightroom (preset)",
-                                        "Compacto.TButton")
+                                        "Photoshop / Lightroom", "Compacto.TButton")
         self.botao_tratar.pack(side="right", padx=2)
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
-                                      "Abrir o programa de capas externo\n"
-                                      "(Arquivo > Escolher o programa de capas... para trocar)",
-                                      "Compacto.TButton")
+                                      "Abrir programa de capas", "Compacto.TButton")
         self.botao_capa.pack(side="right", padx=2)
 
         ttk.Frame(topo, width=6).pack(side="right")
-        self._botao(topo, "↷", self.refazer, "Refazer última alteração (Ctrl+Y)", "Icone.TButton", width=3).pack(side="right", padx=1)
-        self._botao(topo, "↶", self.desfazer, "Desfazer última alteração (Ctrl+Z)", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(topo, "↷", self.refazer, "Refazer", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(topo, "↶", self.desfazer, "Desfazer", "Icone.TButton", width=3).pack(side="right", padx=1)
         ttk.Frame(topo, width=6).pack(side="right")
         self._botao(topo, "✦ Diagramar", self.abrir_diagramacao,
-                    "Diagramar o álbum inteiro automaticamente (preenchendo a página sem distorcer fotos > 22%)",
-                    "PrimarioCompacto.TButton").pack(side="right", padx=2)
+                    "Diagramação automática", "PrimarioCompacto.TButton").pack(side="right", padx=2)
 
     def _montar_barra_opcoes(self, barra):
-        """Barra de opções estilo Adobe Photoshop CC (idêntica à demonstração): Álbum, M:, E:, F/L: e ícones rápidos."""
+        """Barra de opções enxuta: apenas Produto, Margem, Espaçamento, Fotos/Lâmina, Aplicar em Todas e Guias."""
         rot_alb = ttk.Label(barra, text="Álbum:", style="Fraco.TLabel")
         rot_alb.pack(side="left", padx=(2, 4))
         self.produto_var = tk.StringVar(value=self.produto["nome"] if self.produto else "")
@@ -432,7 +472,6 @@ class Aplicativo:
                                           values=[p["nome"] for p in self.produtos])
         self.combo_produto.pack(side="left", padx=(0, 4))
         self.combo_produto.bind("<<ComboboxSelected>>", self._trocou_produto)
-        tema.dica(self.combo_produto, "Produto (formato e dimensões do álbum)")
         self.rotulo_produto = ttk.Label(barra, text="", style="Fraco.TLabel")
         self.rotulo_produto.pack(side="left", padx=(0, 6))
         self.dica_produto = tema.Dica(self.rotulo_produto, "")
@@ -440,9 +479,9 @@ class Aplicativo:
         tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
 
         for rot_txt, dica_txt, var, de, ate, passo, sufixo in (
-            ("⬚ M:", "Margem externa de segurança da página (mm)", self.margem_var, 0, 60, 1, "mm"),
-            ("⇔ E:", "Espaçamento entre as fotos (mm)", self.espacamento_var, 0, 40, 0.5, "mm"),
-            ("⊞ F/L:", "Quantidade alvo de fotos por lâmina", self.fotos_lamina_var, 1, 12, 1, ""),
+            ("M:", "Margem externa (mm)", self.margem_var, 0, 60, 1, "mm"),
+            ("E:", "Espaçamento (mm)", self.espacamento_var, 0, 40, 0.5, "mm"),
+            ("F/L:", "Fotos por lâmina", self.fotos_lamina_var, 1, 12, 1, ""),
         ):
             r = ttk.Label(barra, text=rot_txt, style="Fraco.TLabel")
             r.pack(side="left", padx=(4, 2))
@@ -456,101 +495,44 @@ class Aplicativo:
 
         tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
 
-        self._botao(barra, "⟳", self.rediagramar_lamina,
-                    "Diagramar Esta Lâmina de Novo\nAlterna entre variações proporcionais sem cortar além de 22%",
-                    "Icone.TButton", width=3).pack(side="left", padx=1)
         self._botao(barra, "⊞", self.rediagramar_todas,
-                    "Aplicar Geometria em Todas as Lâminas\nRecalcula todas as lâminas do álbum com a margem e espaçamento atuais",
+                    "Aplicar margem e espaçamento em todas as lâminas",
                     "Icone.TButton", width=3).pack(side="left", padx=1)
         guias = ttk.Checkbutton(barra, text="⌗", variable=self.guias, command=self.desenhar_lamina,
                                 style="Alternar.Toolbutton")
         guias.pack(side="left", padx=1)
-        tema.dica(guias, "Mostrar/Ocultar Guias\nExibe sangria, margem de segurança e linha de dobra central")
-        layout = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout, style="Alternar.Toolbutton",
-                                 command=self._mudou_modo_layout)
-        layout.pack(side="left", padx=1)
-        tema.dica(layout, "Modo Layout (Tecla L ou Duplo Clique)\nMover e redimensionar espaços e moldes. Esc sai.")
-        self._botao(barra, "📁+", self.escolher_pasta,
-                    "Carregar Pasta de Fotos do PC\nAdiciona todas as imagens de uma pasta ao projeto",
-                    "Icone.TButton", width=4).pack(side="left", padx=1)
-        self._botao(barra, "🖼+", self.escolher_fotos,
-                    "Carregar Fotos do PC\nSeleciona imagens avulsas do computador para o projeto",
-                    "Icone.TButton", width=4).pack(side="left", padx=1)
+        tema.dica(guias, "Mostrar/ocultar guias ciano (Safe Zone e Sangria)")
 
-        # Telemetria da lâmina aberta alinhada à direita na barra de opções (igual à demonstração)
         self.rotulo_lamina = ttk.Label(barra, text="", style="Fraco.TLabel", anchor="e")
         self.rotulo_lamina.pack(side="right", padx=(8, 4))
 
     def _montar_ferramentas_esquerda(self, barra):
-        """Dock vertical esquerdo de ferramentas estilo Adobe Photoshop CC com ícones autoexplicativos e dicas no mouse."""
-        def sep():
-            tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=2, pady=5)
-
-        self._botao(barra, "✦", self.abrir_diagramacao,
-                    "Diagramar Álbum Automaticamente (Por Cenário e Pasta)\nMonta as lâminas agrupando fotos de mesmo cenário sem misturar pastas",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "⟳", self.rediagramar_lamina,
-                    "Diagramar Esta Lâmina de Novo\nTesta o próximo arranjo elástico (incluindo 60/40 e 70/30 que passam do meio)",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "⊞", self.rediagramar_todas,
-                    "Aplicar em Todas as Lâminas\nAplica margem e espaçamento atuais em todo o álbum",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "⇉", self.distribuir_nao_usadas,
-                    "Distribuir Fotos Livres\nCria novas lâminas automaticamente com as fotos ainda não usadas",
-                    "Icone.TButton", width=3).pack(pady=1)
-
-        sep()
-
+        """Barra vertical esquerda com apenas 1 botão por ferramenta de edição de foto/espaço."""
         bt_mover = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout,
                                    style="Alternar.Toolbutton", command=self._mudou_modo_layout, width=3)
         bt_mover.pack(pady=1)
-        tema.dica(bt_mover, "Mover / Transformar Espaços (Tecla L)\nPadrão mantém proporção; segure Shift para Proporção Livre.\nCtrl+clique ou arraste seleciona várias fotos.")
+        tema.dica(bt_mover, "Mover / redimensionar espaços")
 
-        self._botao(barra, "◐", self.abrir_aba_degrade,
-                    "Degradê de Opacidade (Estilo Photoshop)\nAplica máscara de transparência gradual nas fotos selecionadas e/ou nos fundos",
-                    "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "✂", self.editar_foto_selecionada,
-                    "Recortar / Enquadrar Foto (Enter)\nAbre o editor de enquadramento, zoom e cor da foto selecionada",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Editor de cor e luz", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "↻", self.girar_foto_selecionada,
-                    "Girar Foto 90°\nGira a foto do espaço selecionado e reajusta os quadros da página automaticamente",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Girar foto 90°", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "＝", lambda: self.alinhar_espaco("igualar"),
-                    "Igualar Tamanho das Fotos Selecionadas\nDeixa todas as fotos selecionadas (ou da página) com exatamente o mesmo tamanho",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Igualar tamanho das fotos selecionadas", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "⊡", lambda: self.alinhar_espaco("proporcao_foto"),
-                    "Usar Proporção Padrão da Foto\nAjusta o quadro exatamente para a proporção nativa da foto (0% de corte)",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Proporção original da foto (0% corte)", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "⇕", lambda: self.alinhar_espaco("pagina_util"),
-                    "Preencher Página Inteira (100% até a sangria)\nPassa pelas linhas da Safe Zone e preenche a página toda ignorando o limite de 22%",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Preencher página 100% até a sangria", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "＋", self.adicionar_espaco,
-                    "Novo Espaço na Lâmina\nAdiciona um quadro de foto extra na página",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Novo espaço na página", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "❐", self.duplicar_espaco,
-                    "Duplicar Espaço Selecionado\nCria uma cópia com as mesmas medidas do espaço atual",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Duplicar espaço selecionado", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "↑", lambda: self.ordem_espaco(True),
-                    "Trazer para a Frente\nColoca o espaço selecionado acima dos demais",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Trazer para a frente", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "↓", lambda: self.ordem_espaco(False),
-                    "Mandar para Trás\nColoca o espaço selecionado atrás dos demais",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "🗑", self.apagar_espaco_selecionado,
-                    "Apagar Espaço Selecionado (Del)\nRemove o quadro e expande as demais fotos para ocupar a página",
-                    "Icone.TButton", width=3).pack(pady=1)
-
-        sep()
-
-        self._botao(barra, "✦", self.abrir_tratamento,
-                    "Tratar Fotos (Photoshop / Lightroom)\nAbre no Photoshop, roda Ação ou aplica preset do Lightroom",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "◧", self.abrir_programa_capa,
-                    "Programa de Capas\nEnvia e abre a capa no programa de capas configurado",
-                    "Icone.TButton", width=3).pack(pady=1)
-        self._botao(barra, "⤓", self.abrir_exportar,
-                    "Exportar Álbum (Ctrl+E)\nExporta as lâminas prontas em alta resolução (JPG/PNG/PDF)",
-                    "Icone.TButton", width=3).pack(pady=1)
+                    "Mandar para trás", "Icone.TButton", width=3).pack(pady=1)
+        self._botao(barra, "🗑", self._tecla_apagar,
+                    "Tirar foto / apagar espaço selecionado", "Icone.TButton", width=3).pack(pady=1)
 
     def _montar_menu_exibir(self, menu):
         a = self.arranjo
@@ -609,13 +591,11 @@ class Aplicativo:
                              values=["nome", "data", "cenario"])
         combo.pack(side="left", padx=(4, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.ordenar_fotos())
-        tema.dica(combo, "Ordenar as fotos dentro de cada pasta por nome, data EXIF ou agrupar por cenário visual")
-        self._botao(cabeca, "📁+", self.escolher_pasta, "Adicionar nova pasta de fotos (mantém separada das pastas anteriores)", "Icone.TButton", width=4).pack(side="right", padx=1)
-        self._botao(cabeca, "🖼+", self.escolher_fotos, "Adicionar fotos avulsas ao projeto", "Icone.TButton", width=4).pack(side="right", padx=1)
+        tema.dica(combo, "Ordenar fotos por nome, data ou cenário")
         self._botao(cabeca, "🗑", self.remover_fotos_selecionadas,
-                    "Remover fotos selecionadas do projeto (não apaga do disco)", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
+                    "Remover fotos selecionadas do projeto", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
         self._botao(cabeca, "⇉", self.distribuir_nao_usadas,
-                    "Distribuir fotos não usadas em lâminas novas automaticamente", "Icone.TButton", width=3).pack(side="right", padx=3)
+                    "Distribuir fotos livres em novas lâminas", "Icone.TButton", width=3).pack(side="right", padx=3)
         barra = ttk.Scrollbar(caixa, orient="horizontal", command=self._rolar_fotos)
         barra.pack(side="bottom", fill="x")
         self.canvas_fotos = tk.Canvas(caixa, height=100, bg=tema.PAINEL, highlightthickness=0)
@@ -810,7 +790,8 @@ class Aplicativo:
         self.abas = abas
         self.quadros_abas = {}
         for titulo, montar in (("Layouts", self._aba_layouts), ("Fundo", self._aba_fundo),
-                               ("Degradê", self._aba_degrade), ("Moldura", self._aba_moldura)):
+                               ("Degradê", self._aba_degrade), ("Moldura", self._aba_moldura),
+                               ("⌨ Atalhos", self._aba_atalhos)):
             quadro = ttk.Frame(abas, padding=8)
             abas.add(quadro, text=titulo)
             self.quadros_abas[titulo] = quadro
@@ -821,6 +802,10 @@ class Aplicativo:
         if "Degradê" in self.quadros_abas:
             self.abas.select(self.quadros_abas["Degradê"])
             self._atualizar_degrade_ui()
+
+    def abrir_aba_atalhos(self):
+        if "⌨ Atalhos" in self.quadros_abas:
+            self.abas.select(self.quadros_abas["⌨ Atalhos"])
 
     def _aba_mudou(self, _evento=None):
         selecionada = self.abas.select()
@@ -837,9 +822,9 @@ class Aplicativo:
         seletor = ttk.Frame(quadro)
         seletor.pack(side="top", fill="x", pady=(0, 6))
         self.secoes_layouts = {}
-        for valor, texto, dica in (("sugestoes", "Sugestões", "Layouts prontos para as fotos desta lâmina"),
-                                   ("modelos", "Modelos", "Biblioteca de modelos e moldes PNG"),
-                                   ("editar", "Editar", "Mover e redimensionar os espaços (duplo clique na lâmina)")):
+        for valor, texto, dica in (("sugestoes", "Sugestões", "Layouts para a lâmina inteira"),
+                                   ("modelos", "Modelos", "Layouts de página única (Esquerda ou Direita)"),
+                                   ("editar", "Editar", "Medidas e enquadramento da foto")):
             botao = ttk.Radiobutton(seletor, text=texto, value=valor, variable=self.secao_layouts,
                                     style="Filtro.TRadiobutton", command=self._mostrar_secao_layouts)
             botao.pack(side="left", fill="x", expand=True, padx=1)
@@ -866,43 +851,25 @@ class Aplicativo:
     def _secao_sugestoes(self, quadro):
         cab = ttk.Frame(quadro)
         cab.pack(side="top", fill="x")
-        ttk.Label(cab, text="SUGESTÕES DE LAYOUT", style="Fraco.TLabel").pack(side="left")
+        ttk.Label(cab, text="Sugestões", style="Fraco.TLabel").pack(side="left")
         self._botao(cab, "💾", self.salvar_modelo,
-                    "Salvar o layout atual desta lâmina como predefinição", "Icone.TButton", width=3).pack(side="right", padx=1)
+                    "Salvar layout atual como modelo", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(cab, "⟳", self.rediagramar_lamina,
-                    "Diagramar esta lâmina de novo (alterna composição mantendo proporções)", "Icone.TButton", width=3).pack(side="right", padx=1)
-        espacos = ttk.LabelFrame(quadro, text="Geometria (mm)", padding=6)
-        espacos.pack(side="bottom", fill="x", pady=4)
+                    "Alternar layout desta lâmina", "Icone.TButton", width=3).pack(side="right", padx=1)
         self.canvas_sugestoes = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=130)
-        self.canvas_sugestoes.pack(side="top", fill="both", expand=True, pady=(4, 6))
+        self.canvas_sugestoes.pack(side="top", fill="both", expand=True, pady=(4, 2))
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
         self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
-        for texto, dica_txt, var, de, ate, passo in (
-            ("⬚ Margem", "Margem externa da página em milímetros", self.margem_var, 0, 60, 1),
-            ("⇔ Espaço", "Distância entre as fotos em milímetros", self.espacamento_var, 0, 40, 0.5),
-            ("⊞ Fotos/Lâm.", "Quantidade padrão de fotos por lâmina na diagramação", self.fotos_lamina_var, 1, 12, 1)
-        ):
-            linha = ttk.Frame(espacos)
-            linha.pack(fill="x", pady=1)
-            rot = ttk.Label(linha, text=texto)
-            rot.pack(side="left")
-            tema.dica(rot, dica_txt)
-            sp = ttk.Spinbox(linha, from_=de, to=ate, increment=passo, textvariable=var, width=6,
-                             command=self._mudou_config)
-            sp.pack(side="right")
-            tema.dica(sp, dica_txt)
         for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var):
             var.trace_add("write", lambda *a: self.agendar("config", 500, self._mudou_config))
-        self._botao(espacos, "⟳ Aplicar em todas as lâminas", self.rediagramar_todas,
-                    "Recalcular todas as lâminas com esta margem, espaçamento e motor elástico").pack(fill="x", pady=(6, 0))
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
         self.pagina_modelo = tk.IntVar(value=0)
         self._opcoes_pagina_modelos = []
 
-        topo_pag = ttk.LabelFrame(quadro, text="Modelos de Página Única (Não altera a outra página)", padding=6)
+        topo_pag = ttk.LabelFrame(quadro, text="Página Única", padding=6)
         topo_pag.pack(side="top", fill="x", pady=(0, 4))
 
         linha_lado = ttk.Frame(topo_pag)
@@ -1623,16 +1590,188 @@ class Aplicativo:
         self._atualizar_rotulos_degrade()
         self._alterar_degrade(marcar=True, final=True)
 
+    # ---------------- Aba de Atalhos Personalizáveis ----------------
+
+    def _carregar_atalhos(self):
+        padrao = {ch: tec for ch, _rot, tec in DEFINICOES_ATALHOS}
+        salvos = ler_json(ARQUIVO_ATALHOS, {})
+        if isinstance(salvos, dict):
+            for ch, val in salvos.items():
+                if ch in padrao and isinstance(val, str) and val.strip():
+                    padrao[ch] = val.strip()
+        return padrao
+
+    def _salvar_atalhos(self):
+        try:
+            gravar_json(ARQUIVO_ATALHOS, self.atalhos_mapa)
+        except OSError:
+            pass
+
+    def _aba_atalhos(self, quadro):
+        topo = ttk.Frame(quadro)
+        topo.pack(side="top", fill="x", pady=(0, 6))
+        ttk.Label(topo, text="Atalhos (clique p/ alterar)", style="Titulo.TLabel").pack(side="left")
+        self._botao(topo, "Restaurar", self._restaurar_atalhos_padrao,
+                    "Voltar todos os atalhos para o padrão", "Compacto.TButton").pack(side="right")
+
+        container = ttk.Frame(quadro)
+        container.pack(side="top", fill="both", expand=True)
+        canvas_at = tk.Canvas(container, bg=tema.PAINEL, highlightthickness=0)
+        barra_at = ttk.Scrollbar(container, orient="vertical", command=canvas_at.yview)
+        canvas_at.configure(yscrollcommand=barra_at.set)
+        barra_at.pack(side="right", fill="y")
+        canvas_at.pack(side="left", fill="both", expand=True)
+
+        interno = ttk.Frame(canvas_at)
+        id_win = canvas_at.create_window((0, 0), window=interno, anchor="nw")
+        interno.bind("<Configure>", lambda _e: canvas_at.configure(scrollregion=canvas_at.bbox("all")))
+        canvas_at.bind("<Configure>", lambda e: canvas_at.itemconfigure(id_win, width=e.width))
+        canvas_at.bind("<MouseWheel>", lambda e: canvas_at.yview_scroll(-int(e.delta / 120), "units"))
+
+        self._botoes_atalhos_ui = {}
+        for ch_acao, rotulo_acao, _tec_pad in DEFINICOES_ATALHOS:
+            linha = ttk.Frame(interno)
+            linha.pack(fill="x", pady=2, padx=2)
+            ttk.Label(linha, text=rotulo_acao).pack(side="left")
+            bt = tk.Button(
+                linha,
+                text=self.atalhos_mapa.get(ch_acao, ""),
+                width=13,
+                bg=tema.PAINEL_2,
+                fg=tema.TEXTO,
+                activebackground=tema.DESTAQUE,
+                activeforeground="#ffffff",
+                relief="solid",
+                bd=1,
+                cursor="hand2",
+                command=lambda c=ch_acao: self._iniciar_gravacao_atalho(c),
+            )
+            bt.pack(side="right")
+            self._botoes_atalhos_ui[ch_acao] = bt
+
+    def _iniciar_gravacao_atalho(self, ch_acao):
+        self._gravando_atalho_acao = ch_acao
+        for k, bt in self._botoes_atalhos_ui.items():
+            if k == ch_acao:
+                bt.configure(text="Aperte a tecla...", bg="#00365c", fg="#00e5ff")
+            else:
+                bt.configure(text=self.atalhos_mapa.get(k, ""), bg=tema.PAINEL_2, fg=tema.TEXTO)
+        self.root.focus_set()
+
+    def _restaurar_atalhos_padrao(self):
+        self._gravando_atalho_acao = None
+        self.atalhos_mapa = {ch: tec for ch, _rot, tec in DEFINICOES_ATALHOS}
+        self._salvar_atalhos()
+        for ch, bt in self._botoes_atalhos_ui.items():
+            bt.configure(text=self.atalhos_mapa.get(ch, ""), bg=tema.PAINEL_2, fg=tema.TEXTO)
+        self._atalhos()
+        self.registrar("Atalhos restaurados para o padrão.")
+
+    def _executar_acao_atalho(self, ch_acao):
+        acoes = {
+            "novo_projeto": self.novo_projeto,
+            "abrir_projeto": self.abrir_projeto,
+            "salvar_projeto": self.salvar_projeto,
+            "escolher_pasta": self.escolher_pasta,
+            "importar_link_drive": self.importar_link_drive,
+            "escolher_fotos": self.escolher_fotos,
+            "abrir_exportar": self.abrir_exportar,
+            "desfazer": self.desfazer,
+            "refazer": self.refazer,
+            "abrir_diagramacao": self.abrir_diagramacao,
+            "rediagramar_lamina": self.rediagramar_lamina,
+            "rediagramar_todas": self.rediagramar_todas,
+            "distribuir_nao_usadas": self.distribuir_nao_usadas,
+            "lamina_anterior": lambda: self.passar_lamina(-1),
+            "proxima_lamina": lambda: self.passar_lamina(1),
+            "adicionar_lamina": self.adicionar_lamina,
+            "duplicar_lamina": self.duplicar_lamina,
+            "remover_lamina": self.remover_lamina,
+            "alternar_modo_layout": self.alternar_modo_layout,
+            "editar_foto_selecionada": self.editar_foto_selecionada,
+            "girar_foto": self.girar_foto_selecionada,
+            "preencher_pagina": lambda: self.alinhar_espaco("pagina_util"),
+            "proporcao_original": lambda: self.alinhar_espaco("proporcao_foto"),
+            "igualar_tamanhos": lambda: self.alinhar_espaco("igualar"),
+            "adicionar_espaco": self.adicionar_espaco,
+            "duplicar_espaco": self.duplicar_espaco,
+            "ordem_frente": lambda: self.ordem_espaco(True),
+            "ordem_tras": lambda: self.ordem_espaco(False),
+            "apagar_foto_espaco": self._tecla_apagar,
+            "alternar_guias": lambda: (self.guias.set(not self.guias.get()), self.desenhar_lamina()),
+            "abrir_aba_degrade": self.abrir_aba_degrade,
+            "abrir_tratamento": self.abrir_tratamento,
+            "abrir_capa": self.abrir_programa_capa,
+        }
+        fn = acoes.get(ch_acao)
+        if fn:
+            fn()
+
+    @staticmethod
+    def _converter_atalho_tk(texto_atalho):
+        if not texto_atalho:
+            return []
+        partes = [p.strip() for p in str(texto_atalho).split("+") if p.strip()]
+        if not partes:
+            return []
+        mods = []
+        tecla = partes[-1]
+        for m in partes[:-1]:
+            ml = m.lower()
+            if ml in ("ctrl", "control"):
+                mods.append("Control")
+            elif ml == "shift":
+                mods.append("Shift")
+            elif ml == "alt":
+                mods.append("Alt")
+        prefixo = "-".join(mods) + "-" if mods else ""
+        if len(tecla) == 1 and tecla.isalpha():
+            return ["<%s%s>" % (prefixo, tecla.lower()), "<%s%s>" % (prefixo, tecla.upper())]
+        return ["<%s%s>" % (prefixo, tecla)]
+
+    def _capturar_tecla_atalho(self, evento):
+        if not self._gravando_atalho_acao:
+            return None
+        ks = evento.keysym
+        if ks in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Win_L", "Win_R"):
+            return "break"
+        ch_acao = self._gravando_atalho_acao
+        self._gravando_atalho_acao = None
+        if ks == "Escape":
+            bt = self._botoes_atalhos_ui.get(ch_acao)
+            if bt:
+                bt.configure(text=self.atalhos_mapa.get(ch_acao, ""), bg=tema.PAINEL_2, fg=tema.TEXTO)
+            return "break"
+        estado = getattr(evento, "state", 0)
+        partes = []
+        if estado & CONTROL:
+            partes.append("Ctrl")
+        if estado & SHIFT and len(ks) > 1:
+            partes.append("Shift")
+        if estado & ALT:
+            partes.append("Alt")
+        nome_tecla = ks.upper() if len(ks) == 1 else ks
+        novo_atalho = "+".join(partes + [nome_tecla])
+        self.atalhos_mapa[ch_acao] = novo_atalho
+        self._salvar_atalhos()
+        for k, bt in self._botoes_atalhos_ui.items():
+            bt.configure(text=self.atalhos_mapa.get(k, ""), bg=tema.PAINEL_2, fg=tema.TEXTO)
+        self._atalhos()
+        self.registrar("Atalho atualizado: %s" % novo_atalho)
+        return "break"
+
     def _atalhos(self):
         r = self.root
-        r.bind("<Control-z>", lambda e: self._se_nao_digitando(e, self.desfazer))
-        r.bind("<Control-y>", lambda e: self._se_nao_digitando(e, self.refazer))
-        r.bind("<Control-s>", lambda e: self.salvar_projeto())
+        for seq in getattr(self, "_teclas_vinculadas", []):
+            try:
+                r.unbind(seq)
+            except tk.TclError:
+                pass
+        self._teclas_vinculadas = []
+
+        r.bind("<KeyPress>", self._capturar_tecla_atalho, add="+")
         r.bind("<Control-S>", lambda e: self.salvar_projeto(como=True))
-        r.bind("<Control-o>", lambda e: self.abrir_projeto())
-        r.bind("<Control-n>", lambda e: self.novo_projeto())
         r.bind("<Control-v>", lambda e: self._se_nao_digitando(e, self.colar))
-        r.bind("<Control-e>", lambda e: self.abrir_exportar())
         for tecla, dx, dy in (("Left", -1, 0), ("Right", 1, 0), ("Up", 0, -1), ("Down", 0, 1)):
             r.bind("<%s>" % tecla, lambda e, dx=dx, dy=dy: self._se_nao_digitando(e, lambda: self._seta(dx, dy, SETA_MM)))
             r.bind("<Shift-%s>" % tecla, lambda e, dx=dx, dy=dy: self._se_nao_digitando(e, lambda: self._seta(dx, dy, SETA_GRANDE_MM)))
@@ -1640,14 +1779,21 @@ class Aplicativo:
         r.bind("<Control-Right>", lambda e: self._se_nao_digitando(e, lambda: self.mover_lamina_passo(1)))
         r.bind("<Control-Up>", lambda e: self._se_nao_digitando(e, lambda: self.mover_lamina_passo(-1)))
         r.bind("<Control-Down>", lambda e: self._se_nao_digitando(e, lambda: self.mover_lamina_passo(1)))
-        r.bind("<Delete>", lambda e: self._se_nao_digitando(e, self._tecla_apagar))
-        r.bind("<Control-d>", lambda e: self._se_nao_digitando(e, self.duplicar_espaco))
-        r.bind("<Return>", lambda e: self._se_nao_digitando(e, self.editar_foto_selecionada))
         r.bind("<Escape>", lambda e: self._se_nao_digitando(e, lambda: self.alternar_modo_layout(False)))
-        for tecla in ("<Key-l>", "<Key-L>"):
-            r.bind(tecla, lambda e: self._se_nao_digitando(e, self.alternar_modo_layout))
+        r.bind("<BackSpace>", lambda e: self._se_nao_digitando(e, self._tecla_apagar))
+
+        for ch_acao, _rot, _pad in DEFINICOES_ATALHOS:
+            txt_at = self.atalhos_mapa.get(ch_acao, "")
+            for seq in self._converter_atalho_tk(txt_at):
+                try:
+                    r.bind(seq, lambda e, c=ch_acao: self._se_nao_digitando(e, lambda: self._executar_acao_atalho(c)))
+                    self._teclas_vinculadas.append(seq)
+                except tk.TclError:
+                    pass
 
     def _se_nao_digitando(self, evento, funcao):
+        if self._gravando_atalho_acao:
+            return None
         if isinstance(evento.widget, (tk.Entry, ttk.Entry, ttk.Spinbox, ttk.Combobox, ttk.Scale, tk.Text)):
             return None
         funcao()
@@ -1955,21 +2101,32 @@ class Aplicativo:
             if messagebox.askyesno("Produto", "Diagramar o álbum de novo para o tamanho %s?" % nome, parent=self.root):
                 self.diagramar_tudo(False)
 
+    def _limpar_pastas_temp_drive(self):
+        for p in list(getattr(self, "_pastas_temp_drive", [])):
+            try:
+                if p and Path(p).is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+        if hasattr(self, "_pastas_temp_drive"):
+            self._pastas_temp_drive.clear()
+
     def sair(self):
         if not self._confirmar_descartar():
             return
         self.gravar_arranjo()
         self.observador.parar()
         analise.gravar_cache()
+        self._limpar_pastas_temp_drive()
         self.root.destroy()
 
     # ==================================================================
     # Fotos: entrada
     # ==================================================================
 
-    def adicionar_caminhos(self, caminhos, destino=None):
+    def adicionar_caminhos(self, caminhos, destino=None, perguntar_diagramar=False):
         """
-        Fotos, pastas ou projetos vindos do Explorer, do Ctrl+V ou da linha de comando.
+        Fotos, pastas ou projetos vindos do Explorer, do Ctrl+V, do Link do Drive ou da linha de comando.
         destino: ("espaco", lamina, espaco) ou ("lamina", lamina) para já colocar as fotos.
         """
         fotos, projetos = entrada.expandir(caminhos)
@@ -1977,22 +2134,20 @@ class Aplicativo:
             self.abrir_projeto(str(projetos[0]))
             return
         if not fotos:
-            self.registrar("Nenhuma foto (JPG, PNG ou TIF) encontrada no que foi solto.")
+            self.registrar("Nenhuma foto (JPG, PNG ou TIF) encontrada.")
             return
         novo = not self.projeto["fotos"] and not self.projeto["laminas"]
+        pasta_origem = entrada.pasta_comum(fotos)
         if novo:
-            pasta = entrada.pasta_comum(fotos)
-            produto = entrada.adivinhar_produto(pasta, fotos)
+            produto = entrada.adivinhar_produto(pasta_origem, fotos)
             if produto:
                 self._definir_produto(produto)
-            self.projeto["nome"] = pasta.name if pasta else "Novo álbum"
-            self.projeto["pasta_fotos"] = str(pasta) if pasta else ""
-            self.projeto["pasta_saida"] = entrada.sugerir_saida(pasta)
-            if pasta:
-                entrada.adicionar_recente("pasta", pasta)
+            self.projeto["nome"] = pasta_origem.name if pasta_origem else "Novo álbum"
+            self.projeto["pasta_fotos"] = str(pasta_origem) if pasta_origem else ""
+            self.projeto["pasta_saida"] = entrada.sugerir_saida(pasta_origem)
+            if pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
+                entrada.adicionar_recente("pasta", pasta_origem)
             self._carregar_ui_do_projeto()
-            if produto:
-                self.registrar("Produto %s reconhecido pelo nome da pasta." % produto)
         self.marcar_historico()
         novas = proj.adicionar_fotos(self.projeto, fotos)
         self.atualizar_fotos()
@@ -2016,6 +2171,16 @@ class Aplicativo:
             self.registrar("%s foto(s) adicionada(s)." % len(info))
             if destino:
                 self._colocar_no_destino(novas, destino)
+            elif perguntar_diagramar:
+                if messagebox.askyesno(
+                    "Google Drive",
+                    "%d foto(s) baixada(s) na pasta temporária.\nDeseja diagramar essas fotos agora?" % len(info),
+                    parent=self.root,
+                ):
+                    if novo:
+                        self.diagramar_tudo(False)
+                    else:
+                        self.diagramar_tudo(False, escopo="pasta", pasta_alvo=str(pasta_origem) if pasta_origem else None)
             elif novo:
                 self.diagramar_tudo(False)
             self.atualizar_tudo()
@@ -2045,6 +2210,168 @@ class Aplicativo:
         pasta = filedialog.askdirectory(parent=self.root, title="Adicionar pasta de fotos")
         if pasta:
             self.adicionar_caminhos([pasta])
+
+    @staticmethod
+    def _extrair_id_drive(url):
+        url = str(url or "").strip()
+        m_pasta = re.search(r"/folders/([a-zA-Z0-9_-]{10,})", url)
+        if m_pasta:
+            return "pasta", m_pasta.group(1)
+        m_arq = re.search(r"/file/d/([a-zA-Z0-9_-]{10,})", url)
+        if m_arq:
+            return "arquivo", m_arq.group(1)
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "id" in qs and qs["id"]:
+            return "pasta", qs["id"][0]
+        return None, None
+
+    @staticmethod
+    def _baixar_item_drive(file_id, destino_arq):
+        url_dl = "https://drive.google.com/uc?export=download&id=%s" % file_id
+        req = urllib.request.Request(url_dl, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            conteudo = resp.read()
+        if b"confirm=" in conteudo[:4096] and b"<html" in conteudo[:512].lower():
+            m_conf = re.search(rb"confirm=([0-9A-Za-z_-]+)", conteudo)
+            if m_conf:
+                token = m_conf.group(1).decode("utf-8", errors="ignore")
+                url_conf = "%s&confirm=%s" % (url_dl, token)
+                req2 = urllib.request.Request(url_conf, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req2, timeout=30) as resp2:
+                    conteudo = resp2.read()
+        with open(destino_arq, "wb") as f:
+            f.write(conteudo)
+
+    def importar_link_drive(self):
+        janela = tk.Toplevel(self.root)
+        janela.title("Importar Fotos do Google Drive")
+        janela.transient(self.root)
+        janela.resizable(False, False)
+        janela.grab_set()
+
+        quadro = ttk.Frame(janela, padding=14)
+        quadro.pack(fill="both", expand=True)
+        ttk.Label(quadro, text="Cole o link público da pasta ou foto do Google Drive:", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(quadro, text="As fotos serão baixadas em uma pasta temporária e apagadas ao fechar o programa.",
+                  style="Fraco.TLabel").pack(anchor="w", pady=(2, 8))
+
+        linha = ttk.Frame(quadro)
+        linha.pack(fill="x", pady=(0, 10))
+        link_var = tk.StringVar()
+        try:
+            clip = self.root.clipboard_get().strip()
+            if "drive.google.com" in clip:
+                link_var.set(clip)
+        except tk.TclError:
+            pass
+
+        campo = ttk.Entry(linha, textvariable=link_var, width=54)
+        campo.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        campo.focus_set()
+
+        def colar_clip():
+            try:
+                link_var.set(self.root.clipboard_get().strip())
+            except tk.TclError:
+                pass
+
+        ttk.Button(linha, text="Colar", command=colar_clip).pack(side="right")
+
+        botoes = ttk.Frame(quadro)
+        botoes.pack(fill="x")
+
+        def confirmar():
+            url = link_var.get().strip()
+            if not url:
+                return
+            janela.grab_release()
+            janela.destroy()
+            self._executar_download_drive(url)
+
+        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right")
+        ttk.Button(botoes, text="Baixar Fotos", style="Primario.TButton", command=confirmar).pack(side="right", padx=(0, 6))
+        janela.bind("<Return>", lambda _e: confirmar())
+        janela.bind("<Escape>", lambda _e: janela.destroy())
+        janela.update_idletasks()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - janela.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - janela.winfo_height()) // 2)
+        janela.geometry("+%d+%d" % (x, y))
+
+    def _executar_download_drive(self, url):
+        tipo_id, drive_id = self._extrair_id_drive(url)
+        if not drive_id:
+            messagebox.showwarning("Google Drive", "Link inválido. Cole um link de pasta ou arquivo do Google Drive.", parent=self.root)
+            return
+
+        pasta_base = tempfile.mkdtemp(prefix="SmartAlbum_Drive_")
+        self._pastas_temp_drive.append(pasta_base)
+        pasta_destino = Path(pasta_base) / ("Drive_%s" % drive_id[:6])
+        pasta_destino.mkdir(parents=True, exist_ok=True)
+
+        def trabalho(t):
+            baixados = []
+            # 1. Tenta usar gdown se estiver instalado no Python do usuário
+            try:
+                import gdown
+                if tipo_id == "pasta":
+                    arqs = gdown.download_folder(id=drive_id, output=str(pasta_destino), quiet=True, use_cookies=False) or []
+                    baixados = [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES]
+                else:
+                    arq_out = gdown.download(id=drive_id, output=str(pasta_destino) + os.sep, quiet=True)
+                    if arq_out and Path(arq_out).is_file():
+                        baixados = [Path(arq_out)]
+                if baixados:
+                    return baixados
+            except Exception:
+                pass
+
+            # 2. Fallback nativo sem pacotes externos (lê embeddedfolderview da pasta pública do Drive)
+            if tipo_id == "arquivo":
+                dest = pasta_destino / ("foto_%s.jpg" % drive_id[:8])
+                self._baixar_item_drive(drive_id, dest)
+                if dest.is_file() and dest.stat().st_size > 256:
+                    baixados.append(dest)
+                return baixados
+
+            url_lista = "https://drive.google.com/embeddedfolderview?id=%s#list" % drive_id
+            req = urllib.request.Request(url_lista, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+
+            achados = re.findall(r'id="entry-([a-zA-Z0-9_-]{10,})".*?class="flip-entry-title">([^<]+)<', html, re.S)
+            if not achados:
+                ids_brutos = list(dict.fromkeys(re.findall(r"/file/d/([a-zA-Z0-9_-]{15,})", html)))
+                achados = [(fid, "foto_%03d.jpg" % (idx + 1)) for idx, fid in enumerate(ids_brutos)]
+
+            total = max(1, len(achados))
+            for idx, (fid, nome_arq) in enumerate(achados, start=1):
+                if t.parar():
+                    break
+                nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", nome_arq.strip())
+                if Path(nome_limpo).suffix.lower() not in EXTENSOES:
+                    nome_limpo += ".jpg"
+                dest = pasta_destino / nome_limpo
+                try:
+                    self._baixar_item_drive(fid, dest)
+                    if dest.is_file() and dest.stat().st_size > 256:
+                        baixados.append(dest)
+                except Exception:
+                    pass
+                t.progresso(idx, total)
+            return baixados
+
+        def fim(baixados, erro):
+            if erro or not baixados:
+                messagebox.showwarning(
+                    "Google Drive",
+                    "Não foi possível baixar fotos desse link.\nVerifique se a pasta do Google Drive está com acesso 'Qualquer pessoa com o link'.",
+                    parent=self.root,
+                )
+                return
+            self.adicionar_caminhos([str(pasta_destino)], perguntar_diagramar=True)
+
+        self.executar("Baixando fotos do Google Drive", trabalho, fim)
 
     def colar(self):
         caminhos = entrada.caminhos_da_area_de_transferencia(self.root)
@@ -2897,32 +3224,47 @@ class Aplicativo:
             self._animar_transicao_layout(antes, lb.get("espacos", []))
 
     def tirar_foto(self, li, ei, marcar=True):
+        """Remove a foto da lâmina `li` e reajusta as fotos restantes na mesma lâmina sem mudar de lâmina."""
         lamina = self._lamina(li)
         if lamina is None or not (0 <= ei < len(lamina["espacos"])):
             return
+        lamina_aberta = self.atual
+        antes = [dict(e) for e in lamina.get("espacos", [])] if li == lamina_aberta else None
         if marcar:
             self.marcar_historico()
-        lamina["espacos"][ei]["foto"] = None
-        lamina["espacos"][ei]["edicao"] = {}
+        if len(lamina["espacos"]) > 1 and not self.editar_layout.get():
+            del lamina["espacos"][ei]
+            lamina["modelo"] = None
+            diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+        else:
+            lamina["espacos"][ei]["foto"] = None
+            lamina["espacos"][ei]["edicao"] = {}
+        self.atual = lamina_aberta
+        self.espaco_sel = None
         self.atualizar_lamina_atual()
+        if antes is not None and lamina.get("espacos"):
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def tirar_foto_selecionada(self):
         if isinstance(self.atual, int) and self.espaco_sel is not None:
             self.tirar_foto(self.atual, self.espaco_sel)
 
     def apagar_espaco(self, li, ei):
+        """Remove o quadro `ei` da lâmina `li`, reajusta as fotos restantes e permanece na mesma lâmina."""
         lamina = self._lamina(li)
-        if lamina is None:
+        if lamina is None or not (0 <= ei < len(lamina["espacos"])):
             return
-        antes = [dict(e) for e in lamina.get("espacos", [])] if li == self.atual else None
+        lamina_aberta = self.atual
+        antes = [dict(e) for e in lamina.get("espacos", [])] if li == lamina_aberta else None
         self.marcar_historico()
         del lamina["espacos"][ei]
         lamina["modelo"] = None
-        if not self.editar_layout.get() and lamina["espacos"]:
+        if lamina["espacos"]:
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+        self.atual = lamina_aberta
         self.espaco_sel = None
         self.atualizar_lamina_atual()
-        if antes is not None:
+        if antes is not None and lamina.get("espacos"):
             self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def adicionar_lamina(self):
@@ -3524,11 +3866,8 @@ class Aplicativo:
         lamina = self._lamina()
         n_fotos = sum(1 for e in lamina["espacos"] if e.get("foto")) if lamina else 0
         vazios = sum(1 for e in lamina["espacos"] if not e.get("foto")) if lamina else 0
-        texto = "Lâmina %s de %s · %s foto(s)%s" % (self.atual + 1, len(self.projeto["laminas"]), n_fotos,
-                                                     (" · %s espaço(s) vazio(s)" % vazios) if vazios else "")
-        if lamina is not None:
-            texto += ("   ·   Editando layout (Photoshop): alça redimensiona na proporção · Shift = Proporção Livre · Ctrl+clique = várias fotos"
-                      if self.editar_layout.get() else "   ·   Duplo clique ou tecla L para editar o layout")
+        texto = "Lâmina %s/%s · %s foto(s)%s" % (self.atual + 1, len(self.projeto["laminas"]), n_fotos,
+                                                 (" · %s vazio(s)" % vazios) if vazios else "")
         self.rotulo_lamina.configure(text=texto)
 
     def _desenhar_vazio(self):
