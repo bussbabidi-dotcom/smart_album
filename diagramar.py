@@ -1388,6 +1388,139 @@ def espacos_com_modelo(modelo, fotos, produto, pagina=None, cfg=None):
     return saida, sobre, livres
 
 
+def espaco_inclui_na_pagina(espaco, produto, pagina):
+    """
+    Determina se um espaço da lâmina deve ser incluído ao aplicar um layout de página única
+    na página `pagina` (0 = Esquerda, 1 = Direita):
+    - Se a foto atravessa o vinco central (ex.: layouts 60/40, 70/30 ou panorâmicos onde x < 0.5 < x + w),
+      ela é incluída na página que está sendo editada (para ser diagramada dentro dela).
+    - Caso contrário, verifica em qual página está o centro do espaço.
+    """
+    if produto.get("paginas_por_lamina", 1) < 2:
+        return True
+    x0 = float(espaco.get("x", 0.0))
+    x1 = x0 + float(espaco.get("w", 0.0))
+    # Se atravessa o meio (com margem de tolerância de 0.5%), inclui na página editada
+    if x0 < 0.495 and x1 > 0.505:
+        return True
+    centro = (x0 + x1) / 2.0
+    return (centro < 0.5) if pagina == 0 else (centro >= 0.5)
+
+
+def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14):
+    """
+    Gera opções de layout exclusivas para uma única página (0 = Esquerda, 1 = Direita)
+    sem tocar na outra página da lâmina.
+    Inclui variações:
+    - Safe Zone Elástico (respeita as linhas da Safe Zone e limite de corte de 22%)
+    - Sangria Total da Página (preenche a página até a sangria ignorando as linhas da Safe Zone)
+    - Proporção Original Sem Corte (0% corte dentro da Safe Zone)
+    """
+    cfg = cfg or configuracao(produto)
+    margem = float(cfg.get("margem_mm", produto["margem_mm"]))
+    intervalo = max(0.0, float(cfg.get("espacamento_mm", produto["espacamento_mm"])))
+    corte_max = _limite_corte_cfg(cfg)
+    corte_sangria = max(corte_max, 1.38)
+
+    lista_fotos = list(fotos) if fotos else [{"caminho": None, "proporcao": 1.5}]
+    n = len(lista_fotos)
+    proporcoes = [max(0.15, float(f.get("proporcao") or 1.5)) for f in lista_fotos]
+    area_safe = area_util_pagina_mm(produto, pagina, margem, respeitar_seguranca=True)
+    area_sang = area_pagina_mm(produto, pagina)
+
+    opcoes_brutas = []
+
+    def montar_espacos(quadros, ordem):
+        espacos = []
+        for quadro, idx_f in zip(quadros, ordem):
+            f_item = lista_fotos[idx_f]
+            ed = dict(f_item.get("edicao") or {})
+            ed.pop("corte", None)
+            espacos.append(_espaco(produto, quadro, f_item.get("caminho"), ed))
+        return espacos
+
+    # 1. Variações dentro da Safe Zone (Elástico até 22% corte)
+    ops_safe = layouts_pagina(
+        proporcoes, area_safe, intervalo, (), produto=produto, pagina=pagina, maximo=8, corte_max=corte_max
+    )
+    for idx_op, (custo, quadros, marcador, ordem) in enumerate(ops_safe):
+        if not quadros:
+            continue
+        eh_sem_corte = marcador == "__sem_corte__"
+        estilo = "sem_corte" if eh_sem_corte else "safe_zone"
+        if eh_sem_corte:
+            nome = "Sem Corte · Proporção Original"
+        elif n == 1:
+            nome = "Safe Zone · Página Inteira"
+        elif idx_op == 0:
+            nome = "Safe Zone · Equilibrado (%d fotos)" % n
+        else:
+            nome = "Safe Zone · Variação %d (%d fotos)" % (idx_op + 1, n)
+        opcoes_brutas.append({
+            "custo": custo + (0.05 if eh_sem_corte else 0.0),
+            "espacos": montar_espacos(quadros, ordem),
+            "nome": nome,
+            "estilo": estilo,
+            "pagina": pagina,
+        })
+
+    # 2. Variações de Sangria Total da Página (ultrapassa a Safe Zone e preenche a página até a sangria)
+    if n == 1:
+        opcoes_brutas.append({
+            "custo": 0.12,
+            "espacos": montar_espacos([area_sang], [0]),
+            "nome": "Sangria Total · Página 100% Cheia",
+            "estilo": "sangria_pagina",
+            "pagina": pagina,
+        })
+    else:
+        ops_sang = layouts_pagina(
+            proporcoes, area_sang, intervalo, (), produto=produto, pagina=pagina, maximo=6, corte_max=corte_sangria
+        )
+        for idx_s, (custo_s, quadros_s, marcador_s, ordem_s) in enumerate(ops_sang):
+            if not quadros_s or marcador_s == "__sem_corte__":
+                continue
+            opcoes_brutas.append({
+                "custo": 0.18 + custo_s * 0.55 + idx_s * 0.03,
+                "espacos": montar_espacos(quadros_s, ordem_s),
+                "nome": "Sangria Total · Preenchimento %d" % (idx_s + 1),
+                "estilo": "sangria_pagina",
+                "pagina": pagina,
+            })
+
+    # 3. Garante variações Sem Corte adicionais dentro da Safe Zone
+    ops_nc = _layouts_sem_corte(proporcoes, area_safe, intervalo, priorizar=True)
+    for idx_nc, (custo_nc, quadros_nc, _m_nc, ordem_nc) in enumerate(ops_nc[:3]):
+        if not quadros_nc:
+            continue
+        opcoes_brutas.append({
+            "custo": 0.30 + idx_nc * 0.04,
+            "espacos": montar_espacos(quadros_nc, ordem_nc),
+            "nome": "Sem Corte · Nativo %d" % (idx_nc + 1),
+            "estilo": "sem_corte",
+            "pagina": pagina,
+        })
+
+    # Deduplicação geométrica preservando pelo menos cada estilo
+    unicas = []
+    for op in opcoes_brutas:
+        parecida = next(
+            (
+                u for u in unicas
+                if u.get("estilo") == op.get("estilo")
+                and _geometrias_parecidas(op["espacos"], u["espacos"], produto)
+            ),
+            None,
+        )
+        if parecida is not None:
+            continue
+        unicas.append(op)
+        if len(unicas) >= maximo:
+            break
+
+    return unicas
+
+
 # ------------------------------------------------------------
 # Reconhecimento de Cenário e Divisão Estrita por Pastas e Cenários
 # ------------------------------------------------------------

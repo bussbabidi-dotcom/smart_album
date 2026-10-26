@@ -206,7 +206,7 @@ class Aplicativo:
         self.pasta_filtro = tk.StringVar(value="Todas as pastas")
         self.pastas_recolhidas = set()
         self._itens_painel_fotos = []
-        self.igualar_no_grupo = tk.BooleanVar(value=True)
+        self.igualar_no_grupo = tk.BooleanVar(value=False)
         self.guias = tk.BooleanVar(value=True)
         self.zoom = 1.0
         self._zoom_destino = 1.0
@@ -860,6 +860,8 @@ class Aplicativo:
                 quadro.pack_forget()
         if self.secao_layouts.get() == "modelos":
             self.desenhar_modelos()
+        elif self.secao_layouts.get() == "editar":
+            self._atualizar_enquadramento_inline()
 
     def _secao_sugestoes(self, quadro):
         cab = ttk.Frame(quadro)
@@ -897,18 +899,61 @@ class Aplicativo:
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
-        ttk.Checkbutton(quadro, text="Só os que cabem as fotos desta lâmina", variable=self.so_compativeis,
-                        command=self.desenhar_modelos).pack(side="top", anchor="w")
-        lado = ttk.Frame(quadro)
-        lado.pack(side="top", fill="x", pady=(4, 0))
-        ttk.Label(lado, text="Modelo de página vai na:").pack(side="left")
         self.pagina_modelo = tk.IntVar(value=0)
-        ttk.Radiobutton(lado, text="Esquerda", value=0, variable=self.pagina_modelo).pack(side="left", padx=4)
-        ttk.Radiobutton(lado, text="Direita", value=1, variable=self.pagina_modelo).pack(side="left")
+        self._opcoes_pagina_modelos = []
+
+        topo_pag = ttk.LabelFrame(quadro, text="Modelos de Página Única (Não altera a outra página)", padding=6)
+        topo_pag.pack(side="top", fill="x", pady=(0, 4))
+
+        linha_lado = ttk.Frame(topo_pag)
+        linha_lado.pack(fill="x", pady=(0, 4))
+        for val_p, txt_p, dica_p in (
+            (0, "◧ Página Esquerda", "Gera e aplica layouts apenas na Página Esquerda sem mexer na Página Direita"),
+            (1, "◨ Página Direita", "Gera e aplica layouts apenas na Página Direita sem mexer na Página Esquerda"),
+        ):
+            rb_p = ttk.Radiobutton(
+                linha_lado,
+                text=txt_p,
+                value=val_p,
+                variable=self.pagina_modelo,
+                style="Filtro.TRadiobutton",
+                command=self.desenhar_modelos,
+            )
+            rb_p.pack(side="left", fill="x", expand=True, padx=1)
+            tema.dica(rb_p, dica_p)
+
+        linha_qtd = ttk.Frame(topo_pag)
+        linha_qtd.pack(fill="x")
+        self.rotulo_info_pagina_modelo = ttk.Label(linha_qtd, text="Página Esquerda", style="Fraco.TLabel")
+        self.rotulo_info_pagina_modelo.pack(side="left")
+        self._botao(
+            linha_qtd,
+            "−1 Espaço",
+            lambda: self._mudar_qtd_fotos_pagina(-1),
+            "Remover 1 espaço desta página (sem mexer na outra página)",
+            "Icone.TButton",
+            width=9,
+        ).pack(side="right", padx=(2, 0))
+        self._botao(
+            linha_qtd,
+            "+1 Espaço",
+            lambda: self._mudar_qtd_fotos_pagina(1),
+            "Adicionar 1 espaço nesta página (sem mexer na outra página)",
+            "Icone.TButton",
+            width=9,
+        ).pack(side="right", padx=1)
+
+        ttk.Checkbutton(
+            topo_pag,
+            text="Incluir foto que atravessa o meio (60/40 ou 70/30) na página editada",
+            variable=self.so_compativeis,
+            command=self.desenhar_modelos,
+        ).pack(side="top", anchor="w", pady=(4, 0))
+
         linha = ttk.Frame(quadro)
         linha.pack(side="bottom", fill="x", pady=(2, 0))
-        self._botao(linha, "✓ Aplicar", self.aplicar_modelo_selecionado,
-                    "Aplicar modelo selecionado na lâmina (ajustando proporções sem distorcer)",
+        self._botao(linha, "✓ Aplicar na Página", self.aplicar_modelo_selecionado,
+                    "Aplicar o layout selecionado apenas na página escolhida (Esquerda ou Direita)",
                     "PrimarioCompacto.TButton").pack(side="left", fill="x", expand=True, padx=(0, 2))
         self._botao(linha, "💾", self.salvar_modelo,
                     "Salvar o layout atual desta lâmina como modelo", "Icone.TButton", width=3).pack(side="left", padx=1)
@@ -917,9 +962,9 @@ class Aplicativo:
         self._botao(linha, "📁+", self.importar_pasta_png,
                     "Importar todos os moldes PNG de uma pasta", "Icone.TButton", width=4).pack(side="left", padx=1)
         self._botao(linha, "🗑", self.apagar_modelo,
-                    "Apagar o modelo selecionado", "Icone.TButton", width=3).pack(side="left", padx=(1, 0))
-        self.canvas_modelos = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=120)
-        self.canvas_modelos.pack(side="top", fill="both", expand=True, pady=6)
+                    "Apagar o modelo salvo selecionado", "Icone.TButton", width=3).pack(side="left", padx=(1, 0))
+        self.canvas_modelos = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=140)
+        self.canvas_modelos.pack(side="top", fill="both", expand=True, pady=4)
         self.canvas_modelos.bind("<ButtonPress-1>", self._modelo_clicado)
         self.canvas_modelos.bind("<Double-Button-1>", lambda e: self.aplicar_modelo_selecionado())
         self.canvas_modelos.bind("<MouseWheel>", lambda e: self.canvas_modelos.yview_scroll(-int(e.delta / 120), "units"))
@@ -938,9 +983,10 @@ class Aplicativo:
         chk_igual = ttk.Checkbutton(barra_ic, text="＝", variable=self.igualar_no_grupo,
                                     style="Alternar.Toolbutton")
         chk_igual.pack(side="left", padx=1)
-        tema.dica(chk_igual, "Ao redimensionar várias fotos selecionadas juntas, iguala os tamanhos automaticamente")
+        tema.dica(chk_igual, "Opcional: quando ligado, iguala os tamanhos ao redimensionar várias fotos.\n"
+                             "Desligado (padrão): cada foto redimensiona na sua própria proporção individual.")
         self._botao(barra_ic, "✂", self.editar_foto_selecionada,
-                    "Recortar / Enquadrar foto dentro do espaço selecionado (Enter)",
+                    "Abrir editor ampliado da foto (Enter)",
                     "Icone.TButton", width=3).pack(side="left", padx=1)
         self._botao(barra_ic, "＋", self.adicionar_espaco,
                     "Adicionar novo espaço de foto na lâmina",
@@ -970,7 +1016,7 @@ class Aplicativo:
             menu.add_command(label=texto, command=lambda a=acao: self.alinhar_espaco(a))
         posicao["menu"] = menu
         posicao.pack(side="right", padx=(2, 0))
-        ttk.Label(caixa, text="Dica: Redimensione pela alça mantendo proporção; segure Shift para Proporção Livre.",
+        ttk.Label(caixa, text="Dica: Com 1 ou várias fotos, puxe a alça mantendo a proporção individual (Shift = Livre).",
                   style="Fraco.TLabel", wraplength=290).pack(anchor="w", pady=(0, 3))
         numeros = ttk.Frame(caixa)
         numeros.pack(fill="x", pady=(2, 0))
@@ -988,6 +1034,62 @@ class Aplicativo:
             self.num_vars[chave] = var
             self._num_campos.append(campo)
         ttk.Label(numeros, text="mm", style="Fraco.TLabel").grid(row=1, column=4, padx=(2, 0))
+
+        # Painel de Enquadramento Direto da Foto Selecionada (Sem precisar de Duplo Clique)
+        enq = ttk.LabelFrame(quadro, text="Enquadramento da Foto (Sem Duplo Clique)", padding=6)
+        enq.pack(side="top", fill="both", expand=True, pady=(2, 0))
+        barra_enq = ttk.Frame(enq)
+        barra_enq.pack(fill="x", pady=(0, 4))
+        self.rotulo_enq_status = ttk.Label(barra_enq, text="Clique em uma foto na lâmina", style="Fraco.TLabel")
+        self.rotulo_enq_status.pack(side="left")
+        self._botao(barra_enq, "⊡ 1.0x", self._resetar_enquadramento_inline,
+                    "Centralizar foto e restaurar zoom 1.0x", "Icone.TButton", width=6).pack(side="right", padx=(2, 0))
+        self._botao(barra_enq, "↻", lambda: self.girar_foto_selecionada(90),
+                    "Girar foto 90° no sentido horário", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(barra_enq, "↺", lambda: self.girar_foto_selecionada(-90),
+                    "Girar foto 90° no sentido anti-horário", "Icone.TButton", width=3).pack(side="right", padx=1)
+
+        self.canvas_enquadramento = tk.Canvas(
+            enq, bg="#18181b", highlightthickness=1, highlightbackground=tema.BORDA, height=130, cursor="fleur"
+        )
+        self.canvas_enquadramento.pack(fill="both", expand=True, pady=(0, 4))
+        self.canvas_enquadramento.bind("<ButtonPress-1>", self._enquadramento_inicio)
+        self.canvas_enquadramento.bind("<B1-Motion>", self._enquadramento_arrastar)
+        self.canvas_enquadramento.bind("<ButtonRelease-1>", self._enquadramento_soltar)
+        self.canvas_enquadramento.bind("<MouseWheel>", self._enquadramento_roda)
+        self.canvas_enquadramento.bind("<Double-Button-1>", lambda e: self._resetar_enquadramento_inline())
+        self.canvas_enquadramento.bind("<Configure>", lambda e: self._atualizar_enquadramento_inline())
+
+        self._carregando_enq = False
+        self.enq_zoom_var = tk.DoubleVar(value=1.0)
+        self.enq_cx_var = tk.DoubleVar(value=50.0)
+        self.enq_cy_var = tk.DoubleVar(value=50.0)
+        self.rotulos_enq = {}
+        self.escalas_enq = {}
+
+        for chave, titulo, de, ate in (
+            ("zoom", "Zoom", 1.0, 3.0),
+            ("cx", "Posição H", 0.0, 100.0),
+            ("cy", "Posição V", 0.0, 100.0),
+        ):
+            var_e = getattr(self, "enq_%s_var" % chave)
+            linha_e = ttk.Frame(enq)
+            linha_e.pack(fill="x", pady=1)
+            ttk.Label(linha_e, text=titulo, width=9).pack(side="left")
+            rot_val = ttk.Label(linha_e, text="", style="Fraco.TLabel", width=5, anchor="e")
+            rot_val.pack(side="right")
+            self.rotulos_enq[chave] = rot_val
+            esc = ttk.Scale(
+                linha_e,
+                from_=de,
+                to=ate,
+                variable=var_e,
+                command=lambda _v, ch=chave: self._mudou_enquadramento_slider(ch, final=False),
+            )
+            esc.pack(side="right", fill="x", expand=True, padx=4)
+            esc.bind("<ButtonPress-1>", lambda e: self.marcar_historico())
+            esc.bind("<ButtonRelease-1>", lambda e, ch=chave: self._mudou_enquadramento_slider(ch, final=True))
+            self.escalas_enq[chave] = esc
 
     def _aba_fundo(self, quadro):
         topo = ttk.Frame(quadro)
@@ -2785,10 +2887,10 @@ class Aplicativo:
         eda.pop("corte", None)
         edb.pop("corte", None)
         ea["edicao"], eb["edicao"] = edb, eda
-        if not self.editar_layout.get():
+        # Não recalcula o layout da lâmina ao trocar duas fotos da mesma lâmina (mantém os quadros intactos)
+        if not self.editar_layout.get() and lb is not la:
             diagramar.ajustar_espacos_lamina(la, self._mapa_proporcoes(la), self.produto, self._cfg())
-            if lb is not la:
-                diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
+            diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
         self.atual, self.espaco_sel = lj, b
         self.atualizar_tudo()
         if antes is not None:
@@ -2901,21 +3003,117 @@ class Aplicativo:
                 return pagina
         return 0
 
-    def aplicar_modelo_selecionado(self):
+    def _particionar_espacos_pagina(self, lamina, pagina):
+        """
+        Divide os espaços da lâmina entre:
+        - `saem`: espaços que pertencem à `pagina` (0 = Esquerda, 1 = Direita) OU que atravessam o meio (60/40, 70/30)
+          quando `self.so_compativeis` (incluir foto que atravessa o meio) está ativo.
+        - `ficam`: espaços exclusivos da outra página (`1 - pagina`), que permanecem 100% intactos.
+        """
+        if self.produto.get("paginas_por_lamina", 1) < 2:
+            return list(lamina.get("espacos", [])), []
+        incluir_atravessadas = bool(self.so_compativeis.get()) if hasattr(self, "so_compativeis") else True
+        saem, ficam = [], []
+        for e in lamina.get("espacos", []):
+            x0 = float(e.get("x", 0.0))
+            x1 = x0 + float(e.get("w", 0.0))
+            atravessa = x0 < 0.495 and x1 > 0.505
+            if atravessa:
+                if incluir_atravessadas:
+                    saem.append(e)
+                else:
+                    # Se desmarcado, mantém se o centro estiver na outra página
+                    if self._pagina_do_espaco(e) == pagina:
+                        saem.append(e)
+                    else:
+                        ficam.append(e)
+            elif self._pagina_do_espaco(e) == pagina:
+                saem.append(e)
+            else:
+                ficam.append(e)
+        return saem, ficam
+
+    def _mudar_qtd_fotos_pagina(self, delta):
+        """Adiciona ou remove 1 espaço na página selecionada (Esquerda ou Direita) sem alterar a outra página."""
         lamina = self._lamina()
-        modelo = modelos_lamina.carregar_modelo(self._modelo_sel) if self._modelo_sel else None
-        if lamina is None or modelo is None:
-            self.registrar("Escolha uma lâmina e um modelo.")
+        if lamina is None:
+            return
+        pagina = self.pagina_modelo.get() if self.produto.get("paginas_por_lamina", 1) > 1 else 0
+        saem, ficam = self._particionar_espacos_pagina(lamina, pagina)
+        if delta < 0 and len(saem) <= 1:
+            self.registrar("A página precisa ter pelo menos 1 espaço.")
             return
         antes = [dict(e) for e in lamina.get("espacos", [])]
         self.marcar_historico()
+        fotos_atuais = []
+        for e in saem:
+            if e.get("foto"):
+                infos = self._fotos_info([e["foto"]], lamina)
+                if infos:
+                    fotos_atuais.append(infos[0])
+                    continue
+            lw, lh = lamina_mm(self.produto)
+            prop = max(0.2, (e["w"] * lw) / max(1.0, e["h"] * lh))
+            fotos_atuais.append({"caminho": None, "proporcao": prop, "edicao": e.get("edicao") or {}})
+
+        if delta > 0:
+            fotos_atuais.append({"caminho": None, "proporcao": 1.5, "edicao": {}})
+        else:
+            # Remove preferencialmente um espaço vazio; se todos tiverem foto, remove o último
+            idx_rem = next((idx for idx in range(len(fotos_atuais) - 1, -1, -1) if not fotos_atuais[idx].get("caminho")), len(fotos_atuais) - 1)
+            fotos_atuais.pop(idx_rem)
+
+        opcoes = diagramar.opcoes_pagina_unica(fotos_atuais, self.produto, pagina, self._cfg(), maximo=1)
+        if opcoes:
+            novos = opcoes[0]["espacos"]
+            lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
+            lamina["modelo"] = None
+            self.espaco_sel = None
+            self.atualizar_lamina_atual()
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
+            self.desenhar_modelos()
+
+    def aplicar_modelo_selecionado(self):
+        lamina = self._lamina()
+        if lamina is None or not self._modelo_sel:
+            self.registrar("Escolha uma lâmina e um modelo de página.")
+            return
+        antes = [dict(e) for e in lamina.get("espacos", [])]
+        pagina = self.pagina_modelo.get() if self.produto.get("paginas_por_lamina", 1) > 1 else 0
+
+        # 1. Modelo dinâmico de página única (Safe Zone, Sangria Total da Página ou Sem Corte)
+        if isinstance(self._modelo_sel, str) and self._modelo_sel.startswith("__pagina__:"):
+            try:
+                idx_op = int(self._modelo_sel.split(":")[1])
+            except (IndexError, ValueError):
+                return
+            opcoes_pag = getattr(self, "_opcoes_pagina_modelos", [])
+            if not (0 <= idx_op < len(opcoes_pag)):
+                return
+            opcao = opcoes_pag[idx_op]
+            _saem, ficam = self._particionar_espacos_pagina(lamina, pagina)
+            self.marcar_historico()
+            novos = [proj.copia(e) for e in opcao["espacos"]]
+            lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
+            lamina["modelo"] = None
+            self.espaco_sel = None
+            self.atualizar_lamina_atual()
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
+            nome_lado = "Página Esquerda" if pagina == 0 else "Página Direita"
+            self.registrar("Layout '%s' aplicado na %s (a outra página foi mantida intacta)." % (opcao.get("nome", "Página"), nome_lado))
+            return
+
+        # 2. Modelo salvo ou molde PNG
+        modelo = modelos_lamina.carregar_modelo(self._modelo_sel) if self._modelo_sel else None
+        if modelo is None:
+            self.registrar("Escolha uma lâmina e um modelo.")
+            return
+        self.marcar_historico()
         if modelo.get("escopo") == "pagina" and self.produto["paginas_por_lamina"] > 1:
-            pagina = self.pagina_modelo.get()
-            ficam = [e for e in lamina["espacos"] if self._pagina_do_espaco(e) != pagina]
-            saem = [e for e in lamina["espacos"] if self._pagina_do_espaco(e) == pagina]
+            saem, ficam = self._particionar_espacos_pagina(lamina, pagina)
             fotos = self._fotos_info([e["foto"] for e in saem if e.get("foto")], lamina)
             novos, sobre, sobras = diagramar.espacos_com_modelo(modelo, fotos, self.produto, pagina, self._cfg())
-            lamina["espacos"] = ficam + novos
+            lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
             outras = [s for s in lamina.get("sobreposicoes", [])
                       if abs(s["x"] - modelos_lamina.area_do_modelo(self.produto, "pagina", pagina)[0]) > 1e-6]
             lamina["sobreposicoes"] = outras + ([sobre] if sobre else [])
@@ -3384,7 +3582,7 @@ class Aplicativo:
                 if ("molde", i) == alvo:
                     c.create_rectangle(x0, y0, x1, y1, outline=tema.ALERTA, width=2, tags="espaco")
         for i, e in enumerate(lamina["espacos"]):
-            if ("espaco", i) == ocultar:
+            if ("espaco", i) == ocultar or (isinstance(ocultar, tuple) and ocultar[0] == "grupo" and i in ocultar[1]):
                 continue
             x0, y0 = ox + e["x"] * dw, oy + e["y"] * dh
             x1, y1 = x0 + e["w"] * dw, y0 + e["h"] * dh
@@ -3396,7 +3594,7 @@ class Aplicativo:
             if i in selecionados or (not editando and i == self.espaco_sel):
                 c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff" if editando else tema.DESTAQUE,
                                    width=2 if i == self.espaco_sel else 1, tags="espaco")
-        if editando and len(selecionados) > 1:
+        if editando and len(selecionados) > 1 and not (isinstance(ocultar, tuple) and ocultar[0] == "grupo"):
             grupo = self._caixa_selecao_espacos(selecionados)
             x0, y0 = ox + grupo["x"] * dw, oy + grupo["y"] * dh
             x1, y1 = x0 + grupo["w"] * dw, y0 + grupo["h"] * dh
@@ -3410,6 +3608,7 @@ class Aplicativo:
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
                                    outline=cor, width=1, tags="espaco")
         self._atualizar_numeros()
+        self._atualizar_enquadramento_inline()
         self._atualizar_moldura_ui()
         self._atualizar_degrade_ui()
 
@@ -4082,11 +4281,14 @@ class Aplicativo:
 
     def _layout_mover_grupo(self, evento, arrasto):
         """
-        Movimentação e redimensionamento de várias fotos selecionadas ao mesmo tempo (Estilo Photoshop):
-        - Por padrão mantém a proporção do grupo; segurando Shift permite Proporção Livre (sx e sy independentes).
-        - Quando 'Igualar no grupo' (self.igualar_no_grupo) está ativo, todas as fotos selecionadas
-          recebem exatamente o mesmo tamanho ao redimensionar, evitando tamanhos desiguais!
+        Movimentação e redimensionamento de várias fotos selecionadas ao mesmo tempo:
+        - Comporta-se exatamente como o redimensionamento de uma única foto:
+          cada foto selecionada é redimensionada na sua própria proporção individual (w0 / h0)
+          ancorada pelo canto/borda oposto da alça puxada.
+        - Segurando Shift libera Proporção Livre (sx e sy independentes).
+        - Se o botão opcional '＝' (igualar_no_grupo) estiver ligado, iguala os tamanhos.
         """
+        inicio_t = time.perf_counter()
         lamina = self._lamina(arrasto["lamina"])
         if lamina is None or arrasto["lamina"] != self.atual or self._geo is None:
             return
@@ -4096,6 +4298,8 @@ class Aplicativo:
             arrasto["ativo"] = True
             self.marcar_historico()
             lamina["modelo"] = None
+            self.tempo_inicio_arrasto = inicio_t
+            self._iniciar_previa_grupo(arrasto, lamina)
         lw, lh = self._mm()
         dw, dh = self._geo[0], self._geo[1]
         dx = (evento.x - arrasto["x"]) * lw / float(dw)
@@ -4138,7 +4342,6 @@ class Aplicativo:
                 elif alca in ("n", "s"):
                     sx = 1.0
 
-            # Tamanho médio base caso igualar_no_grupo esteja ativo
             igualar = bool(getattr(self, "igualar_no_grupo", None) and self.igualar_no_grupo.get())
             w_medio = sum(w for _x, _y, w, _h in geometrias.values()) / float(len(geometrias))
             h_medio = sum(h for _x, _y, _w, h in geometrias.values()) / float(len(geometrias))
@@ -4155,17 +4358,36 @@ class Aplicativo:
             ancora_y = y1 if "n" in alca else (y0 if "s" in alca else (y0 + y1) / 2.0)
 
             for i, (x, y, w, h) in geometrias.items():
-                cx_i = x + w / 2.0
-                cy_i = y + h / 2.0
-                ncx = ancora_x + (cx_i - ancora_x) * sx
-                ncy = ancora_y + (cy_i - ancora_y) * sy
-                base_w = w_medio if igualar else w
-                base_h = h_medio if igualar else h
-                nw = min(lw, max(LADO_MINIMO_MM, base_w * sx))
-                nh = min(lh, max(LADO_MINIMO_MM, base_h * sy))
-                nx = ncx - nw / 2.0
-                ny = ncy - nh / 2.0
-                novas[i] = (nx, ny, nw, nh)
+                if not igualar:
+                    # Redimensiona cada foto na sua própria proporção individual a partir da âncora (como 1 foto)
+                    nx0 = ancora_x + (x - ancora_x) * sx
+                    ny0 = ancora_y + (y - ancora_y) * sy
+                    nw = max(LADO_MINIMO_MM, w * sx)
+                    nh = max(LADO_MINIMO_MM, h * sy)
+                    if not proporcao_livre:
+                        razao_i = w / max(0.1, float(h))
+                        if nw > lw:
+                            nw = lw
+                            nh = nw / razao_i
+                        if nh > lh:
+                            nh = lh
+                            nw = nh * razao_i
+                    else:
+                        nw = min(lw, nw)
+                        nh = min(lh, nh)
+                    if "w" in alca:
+                        nx0 = ancora_x + ((x + w) - ancora_x) * sx - nw
+                    if "n" in alca:
+                        ny0 = ancora_y + ((y + h) - ancora_y) * sy - nh
+                    novas[i] = (nx0, ny0, nw, nh)
+                else:
+                    cx_i = x + w / 2.0
+                    cy_i = y + h / 2.0
+                    ncx = ancora_x + (cx_i - ancora_x) * sx
+                    ncy = ancora_y + (cy_i - ancora_y) * sy
+                    nw = min(lw, max(LADO_MINIMO_MM, w_medio * sx))
+                    nh = min(lh, max(LADO_MINIMO_MM, h_medio * sy))
+                    novas[i] = (ncx - nw / 2.0, ncy - nh / 2.0, nw, nh)
 
             min_x = min(v[0] for v in novas.values())
             min_y = min(v[1] for v in novas.values())
@@ -4184,11 +4406,55 @@ class Aplicativo:
             }
         for i, caixa in novas.items():
             self._definir_espaco_mm(lamina["espacos"][i], *caixa)
-        self._marcar_modificado()
-        self._desenhar_espacos()
-        if self._geo:
-            dw, dh = self._geo[0], self._geo[1]
-            self.agendar("render_layout", 35, lambda: self._pedir_render(dw, dh))
+        self._pedir_previa()
+        self.tempos_arrasto.append(time.perf_counter() - inicio_t)
+        del self.tempos_arrasto[:-2000]
+
+    def _iniciar_previa_grupo(self, a, lamina):
+        """Prepara a imagem base limpa e as fotos pré-carregadas para redimensionar várias fotos a 60fps."""
+        c = self.canvas
+        dw, dh, ox, oy = self._geo
+        lado = max(dw, dh)
+        c.delete("arrasto")
+        a["base_limpa_tk"] = None
+        a["previas_grupo"] = {}
+        a["tks_grupo"] = []
+        indices_grupo = set(a.get("grupo", {}).keys())
+        try:
+            lamina_sem = dict(lamina)
+            lamina_sem["espacos"] = [e for idx, e in enumerate(lamina.get("espacos", [])) if idx not in indices_grupo]
+            img_limpa = exportar.renderizar_lamina(
+                lamina_sem, self.produto, self.info, largura=dw, guias=self.guias.get(), rapido=True
+            )
+            a["base_limpa_tk"] = ImageTk.PhotoImage(img_limpa)
+            c.delete("img")
+            c.create_image(ox, oy, image=a["base_limpa_tk"], anchor="nw", tags="img")
+        except Exception:
+            pass
+        px_mm = dw / float(lamina_mm(self.produto)[0])
+        fundo_rgb = cor_rgb(lamina.get("fundo"))
+        for idx in indices_grupo:
+            item = lamina["espacos"][idx]
+            foto = item.get("foto")
+            if not foto:
+                continue
+            try:
+                ed = item.get("edicao") or {}
+                img = recorte.transformar(analise.imagem_para(foto, lado), ed)
+                if max(img.size) > lado:
+                    escala = lado / float(max(img.size))
+                    img = img.resize((max(1, round(img.width * escala)), max(1, round(img.height * escala))), Image.BILINEAR)
+                a["previas_grupo"][idx] = {
+                    "img": recorte.aplicar_ajustes(img, ed),
+                    "edicao": ed,
+                    "rosto_t": recorte.rosto_transformado(rosto_de(self.info, foto), ed),
+                    "moldura": ed.get("moldura"),
+                    "px_mm": px_mm,
+                    "fundo": fundo_rgb,
+                }
+            except (OSError, ValueError):
+                pass
+        self._desenhar_espacos(ocultar=("grupo", tuple(sorted(indices_grupo))))
 
     def _iniciar_previa(self, a, lamina, item):
         """
@@ -4270,16 +4536,61 @@ class Aplicativo:
         a = self._arrasto
         if not a or a.get("tipo") != "layout" or not a["ativo"] or self._geo is None:
             return
-        item = self._item_layout(a["alvo"], self._lamina(a["lamina"]))
-        if item is None:
+        lamina = self._lamina(a["lamina"])
+        if lamina is None:
             return
         c = self.canvas
         c.delete("arrasto_item")
         dw, dh, ox, oy = self._geo
+        etiqueta = ("arrasto", "arrasto_item")
+
+        if a.get("grupo") is not None:
+            tks_grupo = []
+            previas_g = a.get("previas_grupo") or {}
+            indices_g = sorted(a["grupo"].keys())
+            for idx in indices_g:
+                if not (0 <= idx < len(lamina["espacos"])):
+                    continue
+                item = lamina["espacos"][idx]
+                x0, y0 = int(round(ox + item["x"] * dw)), int(round(oy + item["y"] * dh))
+                x1, y1 = int(round(ox + (item["x"] + item["w"]) * dw)), int(round(oy + (item["y"] + item["h"]) * dh))
+                pw, ph = max(1, x1 - x0), max(1, y1 - y0)
+                previa = previas_g.get(idx)
+                if previa:
+                    img = previa["img"]
+                    W, H = img.size
+                    aspecto = pw / float(ph)
+                    dobra_x = None
+                    if item["x"] < 0.5 < item["x"] + item["w"] and item["w"] > 0.05:
+                        dobra_x = (0.5 - item["x"]) / float(item["w"])
+                    corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto_t"],
+                                                    rosto_ja_transformado=True, dobra_x=dobra_x)
+                    pronta = recorte.recortar(img, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), previa["fundo"], rapido=True)
+                    if previa.get("moldura"):
+                        aplicar_moldura(pronta, previa["moldura"], previa.get("px_mm"))
+                    tk_img = ImageTk.PhotoImage(pronta)
+                    tks_grupo.append(tk_img)
+                    c.create_image(x0, y0, image=tk_img, anchor="nw", tags=etiqueta)
+                else:
+                    c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, tags=etiqueta)
+                c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff", width=2 if idx == self.espaco_sel else 1, tags=etiqueta)
+            a["tks_grupo"] = tks_grupo
+            caixa_g = self._caixa_selecao_espacos(set(indices_g))
+            if caixa_g:
+                gx0, gy0 = ox + caixa_g["x"] * dw, oy + caixa_g["y"] * dh
+                gx1, gy1 = gx0 + caixa_g["w"] * dw, gy0 + caixa_g["h"] * dh
+                c.create_rectangle(gx0, gy0, gx1, gy1, outline="#00e5ff", width=1, tags=etiqueta)
+                for hx, hy in self._alcas(caixa_g).values():
+                    c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff", outline=tema.DESTAQUE, tags=etiqueta)
+            self._atualizar_numeros()
+            return
+
+        item = self._item_layout(a["alvo"], lamina)
+        if item is None:
+            return
         x0, y0 = int(round(ox + item["x"] * dw)), int(round(oy + item["y"] * dh))
         x1, y1 = int(round(ox + (item["x"] + item["w"]) * dw)), int(round(oy + (item["y"] + item["h"]) * dh))
         pw, ph = max(1, x1 - x0), max(1, y1 - y0)
-        etiqueta = ("arrasto", "arrasto_item")
         previa = a.get("previa")
         if a["alvo"][0] == "espaco":
             cor = tema.DESTAQUE
@@ -4298,7 +4609,7 @@ class Aplicativo:
                 a["tk"] = ImageTk.PhotoImage(pronta)
                 c.create_image(x0, y0, image=a["tk"], anchor="nw", tags=etiqueta)
             else:
-                c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, dash=(4, 3), tags=etiqueta)
+                c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, tags=etiqueta)
         else:
             cor = tema.ALERTA
             if previa:
@@ -4618,6 +4929,207 @@ class Aplicativo:
             return
         self._num_alvo = None
         self._mudar_espacos(lambda l: self._definir_espaco_mm(e, x, y, w, h))
+
+    # ---------------- enquadramento direto na aba Editar (sem duplo clique) ----------------
+
+    def _espaco_enquadramento_ativo(self):
+        lamina = self._lamina()
+        if lamina is None or not lamina.get("espacos"):
+            return None, None
+        idx = self.espaco_sel
+        if idx is None or not (0 <= idx < len(lamina["espacos"])):
+            return None, None
+        return idx, lamina["espacos"][idx]
+
+    def _corte_atual_espaco(self, espaco):
+        foto = espaco.get("foto")
+        if not foto:
+            return {"cx": 0.5, "cy": 0.5, "zoom": 1.0}, None, 1.0
+        ed = espaco.get("edicao") or {}
+        lw, lh = self._mm()
+        aspecto = max(0.1, (espaco["w"] * lw) / max(1.0, espaco["h"] * lh))
+        try:
+            img_base = analise.miniatura(foto).copy()
+            img_t = recorte.transformar(img_base, ed)
+            W, H = img_t.size
+        except Exception:
+            return {"cx": 0.5, "cy": 0.5, "zoom": 1.0}, None, aspecto
+        dobra_x = None
+        if espaco["x"] < 0.5 < espaco["x"] + espaco["w"] and espaco["w"] > 0.05:
+            dobra_x = (0.5 - espaco["x"]) / float(espaco["w"])
+        rosto_t = recorte.rosto_transformado(rosto_de(self.info, foto), ed)
+        corte = recorte.corte_do_espaco(W, H, aspecto, ed, rosto_t, rosto_ja_transformado=True, dobra_x=dobra_x)
+        return dict(corte), img_t, aspecto
+
+    def _atualizar_enquadramento_inline(self):
+        if not hasattr(self, "canvas_enquadramento"):
+            return
+        c = self.canvas_enquadramento
+        c.delete("all")
+        cw = max(120, c.winfo_width())
+        ch = max(90, c.winfo_height())
+        idx, esp = self._espaco_enquadramento_ativo()
+        if esp is None or not esp.get("foto"):
+            self._carregando_enq = True
+            self.enq_zoom_var.set(1.0)
+            self.enq_cx_var.set(50.0)
+            self.enq_cy_var.set(50.0)
+            for ch_k, rot in getattr(self, "rotulos_enq", {}).items():
+                rot.configure(text="1.0x" if ch_k == "zoom" else "50%")
+            for esc in getattr(self, "escalas_enq", {}).values():
+                esc.configure(state="disabled")
+            self._carregando_enq = False
+            if hasattr(self, "rotulo_enq_status"):
+                self.rotulo_enq_status.configure(
+                    text="Selecione uma foto na lâmina" if esp is None else "Espaço vazio (sem foto)"
+                )
+            c.create_text(
+                cw // 2,
+                ch // 2,
+                text="Clique em qualquer foto na lâmina\npara ajustar o enquadramento aqui\n(arraste a imagem ou use o zoom)",
+                fill=tema.TEXTO_FRACO,
+                font=tema.FONTE_PEQUENA,
+                justify="center",
+            )
+            return
+
+        for esc in getattr(self, "escalas_enq", {}).values():
+            esc.configure(state="normal")
+
+        corte, img_t, aspecto = self._corte_atual_espaco(esp)
+        zoom = max(1.0, min(3.0, float(corte.get("zoom", 1.0))))
+        cx = max(0.0, min(1.0, float(corte.get("cx", 0.5))))
+        cy = max(0.0, min(1.0, float(corte.get("cy", 0.5))))
+
+        self._carregando_enq = True
+        self.enq_zoom_var.set(zoom)
+        self.enq_cx_var.set(cx * 100.0)
+        self.enq_cy_var.set(cy * 100.0)
+        if "zoom" in self.rotulos_enq:
+            self.rotulos_enq["zoom"].configure(text="%.2fx" % zoom)
+        if "cx" in self.rotulos_enq:
+            self.rotulos_enq["cx"].configure(text="%d%%" % int(round(cx * 100)))
+        if "cy" in self.rotulos_enq:
+            self.rotulos_enq["cy"].configure(text="%d%%" % int(round(cy * 100)))
+        self._carregando_enq = False
+
+        nome_arq = Path(esp["foto"]).name
+        if hasattr(self, "rotulo_enq_status"):
+            self.rotulo_enq_status.configure(
+                text="Foto #%d: %s" % (idx + 1, nome_arq if len(nome_arq) <= 18 else nome_arq[:16] + "…")
+            )
+
+        if img_t is None:
+            return
+
+        # Desenha a janela proporcional do espaço no centro do canvas_enquadramento
+        margem_c = 10
+        disp_w = max(40, cw - 2 * margem_c)
+        disp_h = max(40, ch - 2 * margem_c)
+        if disp_w / float(disp_h) > aspecto:
+            qh = disp_h
+            qw = max(24, int(round(qh * aspecto)))
+        else:
+            qw = disp_w
+            qh = max(24, int(round(qw / aspecto)))
+        qx0 = (cw - qw) // 2
+        qy0 = (ch - qh) // 2
+
+        W, H = img_t.size
+        caixa_c = recorte.caixa_corte(W, H, aspecto, {"cx": cx, "cy": cy, "zoom": zoom})
+        rec = recorte.recortar(img_t, caixa_c, (qw, qh), (24, 24, 27), rapido=True)
+        self._tk_enq_inline = ImageTk.PhotoImage(rec)
+        c.create_image(qx0, qy0, image=self._tk_enq_inline, anchor="nw")
+        # Grade de terços discreta + contorno ciano
+        c.create_line(qx0 + qw / 3.0, qy0, qx0 + qw / 3.0, qy0 + qh, fill="#00e5ff", stipple="gray50")
+        c.create_line(qx0 + 2 * qw / 3.0, qy0, qx0 + 2 * qw / 3.0, qy0 + qh, fill="#00e5ff", stipple="gray50")
+        c.create_line(qx0, qy0 + qh / 3.0, qx0 + qw, qy0 + qh / 3.0, fill="#00e5ff", stipple="gray50")
+        c.create_line(qx0, qy0 + 2 * qh / 3.0, qx0 + qw, qy0 + 2 * qh / 3.0, fill="#00e5ff", stipple="gray50")
+        c.create_rectangle(qx0, qy0, qx0 + qw, qy0 + qh, outline="#00e5ff", width=2)
+        self._geo_enq_inline = (qx0, qy0, qw, qh)
+
+    def _aplicar_corte_inline(self, cx, cy, zoom, final=False):
+        _idx, esp = self._espaco_enquadramento_ativo()
+        if esp is None or not esp.get("foto"):
+            return
+        ed = dict(esp.get("edicao") or {})
+        ed["corte"] = {
+            "cx": max(0.0, min(1.0, float(cx))),
+            "cy": max(0.0, min(1.0, float(cy))),
+            "zoom": max(1.0, min(3.0, float(zoom))),
+        }
+        esp["edicao"] = ed
+        self._marcar_modificado()
+        self._atualizar_enquadramento_inline()
+        if final:
+            self.atualizar_lamina_atual(timeline=True)
+        elif self._geo:
+            dw, dh = self._geo[:2]
+            self.agendar("render_enq_inline", 30, lambda: self._pedir_render(dw, dh))
+
+    def _mudou_enquadramento_slider(self, _chave, final=False):
+        if getattr(self, "_carregando_enq", False):
+            return
+        zoom = float(self.enq_zoom_var.get())
+        cx = float(self.enq_cx_var.get()) / 100.0
+        cy = float(self.enq_cy_var.get()) / 100.0
+        self._aplicar_corte_inline(cx, cy, zoom, final=final)
+
+    def _enquadramento_inicio(self, evento):
+        _idx, esp = self._espaco_enquadramento_ativo()
+        if esp is None or not esp.get("foto"):
+            return
+        self.marcar_historico()
+        corte, _img_t, _asp = self._corte_atual_espaco(esp)
+        self._arrasto_enq = {
+            "x": evento.x,
+            "y": evento.y,
+            "cx": float(corte.get("cx", 0.5)),
+            "cy": float(corte.get("cy", 0.5)),
+            "zoom": float(corte.get("zoom", 1.0)),
+        }
+
+    def _enquadramento_arrastar(self, evento):
+        st = getattr(self, "_arrasto_enq", None)
+        if not st:
+            return
+        geo = getattr(self, "_geo_enq_inline", None)
+        qw = max(40, geo[2]) if geo else 120
+        qh = max(40, geo[3]) if geo else 90
+        zoom = max(1.0, st["zoom"])
+        # Arrastar a imagem para a direita move o centro do corte para a esquerda (estilo Photoshop/Lightroom)
+        sens = 1.0 / max(0.6, zoom * 0.85)
+        ncx = max(0.0, min(1.0, st["cx"] - ((evento.x - st["x"]) / float(qw)) * sens))
+        ncy = max(0.0, min(1.0, st["cy"] - ((evento.y - st["y"]) / float(qh)) * sens))
+        self._aplicar_corte_inline(ncx, ncy, zoom, final=False)
+
+    def _enquadramento_soltar(self, _evento):
+        if getattr(self, "_arrasto_enq", None) is not None:
+            self._arrasto_enq = None
+            self.atualizar_lamina_atual(timeline=True)
+
+    def _enquadramento_roda(self, evento):
+        _idx, esp = self._espaco_enquadramento_ativo()
+        if esp is None or not esp.get("foto"):
+            return "break"
+        self.marcar_historico()
+        corte, _img_t, _asp = self._corte_atual_espaco(esp)
+        fator = 1.08 if evento.delta > 0 else (1.0 / 1.08)
+        novo_zoom = max(1.0, min(3.0, float(corte.get("zoom", 1.0)) * fator))
+        self._aplicar_corte_inline(corte.get("cx", 0.5), corte.get("cy", 0.5), novo_zoom, final=True)
+        return "break"
+
+    def _resetar_enquadramento_inline(self):
+        _idx, esp = self._espaco_enquadramento_ativo()
+        if esp is None or not esp.get("foto"):
+            return
+        self.marcar_historico()
+        ed = dict(esp.get("edicao") or {})
+        ed.pop("corte", None)
+        esp["edicao"] = ed
+        self._atualizar_enquadramento_inline()
+        self.atualizar_lamina_atual(timeline=True)
+        self.registrar("Enquadramento da foto restaurado (centralizado em 1.0x).")
 
     # ---------------- arrastar entre painéis ----------------
 
@@ -5413,44 +5925,149 @@ class Aplicativo:
     def desenhar_modelos(self):
         c = self.canvas_modelos
         c.delete("all")
-        modelos = self._modelos()
         lamina = self._lamina()
-        n = sum(1 for e in lamina["espacos"] if e.get("foto")) if lamina else 0
-        if self.so_compativeis.get() and n:
-            modelos = [m for m in modelos if len(m["espacos"]) == n
-                       or (m.get("escopo") == "pagina" and len(m["espacos"]) <= n)]
+        pagina = self.pagina_modelo.get() if self.produto.get("paginas_por_lamina", 1) > 1 else 0
+        nome_lado = "Página Esquerda" if pagina == 0 else "Página Direita"
+
+        saem, ficam = ([], [])
+        atravessadas = 0
+        if lamina is not None:
+            for e in lamina.get("espacos", []):
+                if float(e.get("x", 0.0)) < 0.495 and (float(e.get("x", 0.0)) + float(e.get("w", 0.0))) > 0.505:
+                    atravessadas += 1
+            saem, ficam = self._particionar_espacos_pagina(lamina, pagina)
+
+        fotos_pag = []
+        lw, lh = lamina_mm(self.produto)
+        for e in saem:
+            if e.get("foto"):
+                infos = self._fotos_info([e["foto"]], lamina)
+                if infos:
+                    fotos_pag.append(dict(infos[0], edicao=e.get("edicao") or {}))
+                    continue
+            prop = max(0.2, (e["w"] * lw) / max(1.0, e["h"] * lh))
+            fotos_pag.append({"caminho": None, "proporcao": prop, "edicao": e.get("edicao") or {}})
+
+        if hasattr(self, "rotulo_info_pagina_modelo"):
+            txt_info = "%s: %d foto(s)" % (nome_lado, len(fotos_pag))
+            if atravessadas and self.so_compativeis.get():
+                txt_info += " (%d atravessa o meio)" % atravessadas
+            self.rotulo_info_pagina_modelo.configure(text=txt_info)
+
+        self._opcoes_pagina_modelos = (
+            diagramar.opcoes_pagina_unica(fotos_pag, self.produto, pagina, self._cfg(), maximo=14)
+            if lamina is not None
+            else []
+        )
+
         self._areas_modelos = []
-        largura = max(100, (c.winfo_width() - 18) // 2)
+        largura = max(105, (c.winfo_width() - 18) // 2)
         y = 4
-        for i, modelo in enumerate(modelos):
-            coluna = i % 2
+
+        # Cabeçalho 1: Layouts automáticos exclusivos para a página selecionada (Esquerda ou Direita)
+        c.create_text(
+            6,
+            y,
+            anchor="nw",
+            text="LAYOUTS PARA A %s (%d FOTO%s)" % (nome_lado.upper(), max(1, len(fotos_pag)), "S" if len(fotos_pag) != 1 else ""),
+            fill=tema.DESTAQUE,
+            font=tema.FONTE_PEQUENA,
+        )
+        y += 18
+
+        cores_estilo = {
+            "safe_zone": "#5b8cc4",
+            "sangria_pagina": "#d97706",
+            "sem_corte": "#10b981",
+        }
+
+        for idx_op, opcao in enumerate(self._opcoes_pagina_modelos):
+            coluna = idx_op % 2
             x = 4 + coluna * (largura + 10)
-            if modelo.get("escopo") == "pagina" and self.produto["paginas_por_lamina"] > 1:
-                espacos, _s = modelos_lamina.espacos_do_modelo(modelo, self.produto, 0)
-                espacos = [dict(e, x=e["x"] * 2, w=e["w"] * 2) for e in espacos]
-                lw, lh = lamina_mm(self.produto)
-                pw = largura / 2.0
-                ph = pw * lh / (lw / 2.0)
-                selecionado = modelo["id"] == self._modelo_sel
-                c.create_rectangle(x + pw / 2, y, x + pw * 1.5, y + ph, fill="#f4f4f4",
-                                   outline=tema.DESTAQUE if selecionado else tema.BORDA, width=2 if selecionado else 1)
-                for e in espacos:
-                    c.create_rectangle(x + pw / 2 + e["x"] * pw, y + e["y"] * ph, x + pw / 2 + (e["x"] + e["w"]) * pw,
-                                       y + (e["y"] + e["h"]) * ph, fill="#9aa3ad", outline="#f4f4f4")
-                h = ph
-            else:
-                espacos, _s = modelos_lamina.espacos_do_modelo(modelo, self.produto)
-                h = self._desenhar_esquema(c, x, y, largura, espacos, modelo["id"] == self._modelo_sel,
-                                           self.produto["paginas_por_lamina"])
-            nome = modelo.get("nome", modelo["id"])
-            c.create_text(x + largura / 2, y + h + 9, text=nome if len(nome) < 26 else nome[:24] + "…",
-                          fill=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
-            self._areas_modelos.append((x, y, x + largura, y + h + 16, modelo["id"]))
-            if coluna == 1 or i == len(modelos) - 1:
+            id_op = "__pagina__:%d" % idx_op
+            selecionado = self._modelo_sel == id_op
+            h = largura * lh / lw
+
+            # Desenha a lâmina inteira mostrando a página oposta preservada e a página escolhida destacada
+            c.create_rectangle(
+                x, y, x + largura, y + h,
+                fill="#f4f4f4",
+                outline=tema.DESTAQUE if selecionado else tema.BORDA,
+                width=2 if selecionado else 1,
+            )
+            if self.produto.get("paginas_por_lamina", 1) > 1:
+                px_ativa = x if pagina == 0 else x + largura / 2.0
+                c.create_rectangle(px_ativa + 1, y + 1, px_ativa + largura / 2.0 - 1, y + h - 1, fill="#e8f1fb", outline="")
+                c.create_line(x + largura / 2.0, y, x + largura / 2.0, y + h, fill="#999999")
+
+            # Quadros da outra página (intactos, em cinza suave)
+            for e_fixo in ficam:
+                c.create_rectangle(
+                    x + e_fixo["x"] * largura,
+                    y + e_fixo["y"] * h,
+                    x + (e_fixo["x"] + e_fixo["w"]) * largura,
+                    y + (e_fixo["y"] + e_fixo["h"]) * h,
+                    fill="#cbd5e1",
+                    outline="#f4f4f4",
+                )
+
+            # Quadros novos da página selecionada
+            cor_q = cores_estilo.get(opcao.get("estilo"), "#5b8cc4")
+            for e_novo in opcao["espacos"]:
+                c.create_rectangle(
+                    x + e_novo["x"] * largura,
+                    y + e_novo["y"] * h,
+                    x + (e_novo["x"] + e_novo["w"]) * largura,
+                    y + (e_novo["y"] + e_novo["h"]) * h,
+                    fill=cor_q,
+                    outline="#ffffff",
+                )
+
+            nome_op = opcao.get("nome", "Página")
+            c.create_text(
+                x + largura / 2.0,
+                y + h + 9,
+                text=nome_op if len(nome_op) < 26 else nome_op[:24] + "…",
+                fill=tema.TEXTO if selecionado else tema.TEXTO_FRACO,
+                font=tema.FONTE_PEQUENA,
+            )
+            self._areas_modelos.append((x, y, x + largura, y + h + 18, id_op))
+            if coluna == 1 or idx_op == len(self._opcoes_pagina_modelos) - 1:
                 y += h + 28
-        if not modelos:
-            c.create_text(10, 20, anchor="w", fill=tema.TEXTO_FRACO, text="Nenhum modelo com essa quantidade de fotos.")
-        c.configure(scrollregion=(0, 0, c.winfo_width(), y + 10))
+
+        # Cabeçalho 2: Modelos salvos pelo usuário e Moldes PNG
+        modelos = self._modelos()
+        if modelos:
+            y += 4
+            c.create_text(6, y, anchor="nw", text="MODELOS SALVOS E MOLDES PNG", fill=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+            y += 18
+            for i, modelo in enumerate(modelos):
+                coluna = i % 2
+                x = 4 + coluna * (largura + 10)
+                if modelo.get("escopo") == "pagina" and self.produto["paginas_por_lamina"] > 1:
+                    espacos, _s = modelos_lamina.espacos_do_modelo(modelo, self.produto, 0)
+                    espacos = [dict(e, x=e["x"] * 2, w=e["w"] * 2) for e in espacos]
+                    pw = largura / 2.0
+                    ph = pw * lh / (lw / 2.0)
+                    selecionado = modelo["id"] == self._modelo_sel
+                    c.create_rectangle(x + pw / 2, y, x + pw * 1.5, y + ph, fill="#f4f4f4",
+                                       outline=tema.DESTAQUE if selecionado else tema.BORDA, width=2 if selecionado else 1)
+                    for e in espacos:
+                        c.create_rectangle(x + pw / 2 + e["x"] * pw, y + e["y"] * ph, x + pw / 2 + (e["x"] + e["w"]) * pw,
+                                           y + (e["y"] + e["h"]) * ph, fill="#9aa3ad", outline="#f4f4f4")
+                    h = ph
+                else:
+                    espacos, _s = modelos_lamina.espacos_do_modelo(modelo, self.produto)
+                    h = self._desenhar_esquema(c, x, y, largura, espacos, modelo["id"] == self._modelo_sel,
+                                               self.produto["paginas_por_lamina"])
+                nome = modelo.get("nome", modelo["id"])
+                c.create_text(x + largura / 2, y + h + 9, text=nome if len(nome) < 26 else nome[:24] + "…",
+                              fill=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+                self._areas_modelos.append((x, y, x + largura, y + h + 16, modelo["id"]))
+                if coluna == 1 or i == len(modelos) - 1:
+                    y += h + 28
+
+        c.configure(scrollregion=(0, 0, c.winfo_width(), y + 16))
 
     def _modelo_clicado(self, evento):
         y = self.canvas_modelos.canvasy(evento.y)
@@ -5458,6 +6075,9 @@ class Aplicativo:
             if x0 <= evento.x <= x1 and y0 <= y <= y1:
                 self._modelo_sel = id_modelo
                 self.desenhar_modelos()
+                # Se for um modelo dinâmico de página única, aplica imediatamente ao clicar (como na aba Sugestões)
+                if isinstance(id_modelo, str) and id_modelo.startswith("__pagina__:"):
+                    self.aplicar_modelo_selecionado()
                 return
 
     # ---------------- fundo (lâmina inteira, por página e mistura no meio) ----------------
