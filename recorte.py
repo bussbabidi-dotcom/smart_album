@@ -108,7 +108,19 @@ def zoom_encaixar(W, H, aspecto):
     return min(bw / float(W), bh / float(H))
 
 
+CORTE_MAXIMO_AUTOMATICO = 1.22
+
+
 def corte_automatico(W, H, aspecto, rosto_t):
+    """
+    Se o quadro distorcer/cortar a foto além de CORTE_MAXIMO_AUTOMATICO (22%),
+    usa a proporção padrão da imagem (zoom_encaixar) sem mutilar a foto.
+    """
+    if W > 0 and H > 0 and aspecto > 0:
+        prop_foto = W / float(H)
+        diferenca = max(prop_foto / aspecto, aspecto / prop_foto)
+        if diferenca > CORTE_MAXIMO_AUTOMATICO:
+            return {"cx": 0.5, "cy": 0.5, "zoom": zoom_encaixar(W, H, aspecto)}
     bw, bh = caixa_base(W, H, aspecto)
     if rosto_t:
         cx = rosto_t[0] * W

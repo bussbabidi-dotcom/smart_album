@@ -763,7 +763,8 @@ class Aplicativo:
         menu = tk.Menu(posicao, tearoff=0)
         for texto, acao in (("Centralizar na horizontal (na página)", "centro_h"),
                             ("Centralizar na vertical", "centro_v"),
-                            ("Preencher a página (dentro da margem)", "pagina_util"),
+                            ("Preencher a página (respeitando proporção)", "pagina_util"),
+                            ("Usar proporção padrão da foto", "proporcao_foto"),
                             ("Página inteira (até a sangria)", "pagina"),
                             ("Lâmina inteira", "lamina"),
                             ("Igualar o tamanho dos outros a este", "igualar")):
@@ -1763,13 +1764,37 @@ class Aplicativo:
         self.registrar("%s lâmina(s) novas com as fotos que faltavam." % len(grupos))
         self.atualizar_tudo()
 
-    def _fotos_info(self, caminhos):
+    def _proporcao_efetiva(self, caminho, edicao=None):
+        dados = self.info.get(normalizar_caminho(caminho))
+        prop = proj.dados_proporcao(dados) if dados else 1.5
+        if edicao and int(edicao.get("rot", 0)) % 180 == 90:
+            prop = 1.0 / max(0.1, float(prop))
+        return max(0.1, float(prop))
+
+    def _mapa_proporcoes(self, lamina=None):
+        mapa = {}
+        for caminho, dados in self.info.items():
+            mapa[caminho] = proj.dados_proporcao(dados)
+        if lamina:
+            for e in lamina.get("espacos", []):
+                if e.get("foto"):
+                    mapa[e["foto"]] = self._proporcao_efetiva(e["foto"], e.get("edicao"))
+        return mapa
+
+    def _fotos_info(self, caminhos, lamina=None):
+        edicoes = {}
+        if lamina:
+            for e in lamina.get("espacos", []):
+                if e.get("foto"):
+                    edicoes[normalizar_caminho(e["foto"])] = e.get("edicao") or {}
         saida = []
         for caminho in caminhos:
-            dados = self.info.get(normalizar_caminho(caminho))
+            chave = normalizar_caminho(caminho)
+            dados = self.info.get(chave)
             if dados:
                 registro = proj.registro_foto(self.projeto, caminho) or {}
-                saida.append({"caminho": caminho, "proporcao": proj.dados_proporcao(dados),
+                prop = self._proporcao_efetiva(caminho, edicoes.get(chave))
+                saida.append({"caminho": caminho, "proporcao": prop,
                               "data": dados.get("data"), "destaque": bool(registro.get("destaque"))})
         return saida
 
@@ -1800,7 +1825,7 @@ class Aplicativo:
             fotos = [e["foto"] for e in lamina["espacos"] if e.get("foto")]
         if marcar:
             self.marcar_historico()
-        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos), self.produto, self._cfg(), self._modelos(), maximo=1)
+        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), self._modelos(), maximo=1)
         self._aplicar_opcao(lamina, opcoes[0])
 
     def rediagramar_lamina(self):
@@ -1859,6 +1884,8 @@ class Aplicativo:
         espaco = lamina["espacos"][ei]
         espaco["foto"] = str(caminho)
         espaco["edicao"] = {}
+        if not self.editar_layout.get():
+            diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
         self.atual, self.espaco_sel = li, ei
         self.atualizar_lamina_atual()
 
@@ -1882,6 +1909,10 @@ class Aplicativo:
         eda.pop("corte", None)
         edb.pop("corte", None)
         ea["edicao"], eb["edicao"] = edb, eda
+        if not self.editar_layout.get():
+            diagramar.ajustar_espacos_lamina(la, self._mapa_proporcoes(la), self.produto, self._cfg())
+            if lb is not la:
+                diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
         self.atual, self.espaco_sel = lj, b
         self.atualizar_tudo()
 
@@ -1906,6 +1937,8 @@ class Aplicativo:
         self.marcar_historico()
         del lamina["espacos"][ei]
         lamina["modelo"] = None
+        if not self.editar_layout.get() and lamina["espacos"]:
+            diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
         self.espaco_sel = None
         self.atualizar_lamina_atual()
 
@@ -1998,15 +2031,15 @@ class Aplicativo:
             pagina = self.pagina_modelo.get()
             ficam = [e for e in lamina["espacos"] if self._pagina_do_espaco(e) != pagina]
             saem = [e for e in lamina["espacos"] if self._pagina_do_espaco(e) == pagina]
-            fotos = self._fotos_info([e["foto"] for e in saem if e.get("foto")])
-            novos, sobre, sobras = diagramar.espacos_com_modelo(modelo, fotos, self.produto, pagina)
+            fotos = self._fotos_info([e["foto"] for e in saem if e.get("foto")], lamina)
+            novos, sobre, sobras = diagramar.espacos_com_modelo(modelo, fotos, self.produto, pagina, self._cfg())
             lamina["espacos"] = ficam + novos
             outras = [s for s in lamina.get("sobreposicoes", [])
                       if abs(s["x"] - modelos_lamina.area_do_modelo(self.produto, "pagina", pagina)[0]) > 1e-6]
             lamina["sobreposicoes"] = outras + ([sobre] if sobre else [])
         else:
-            fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")])
-            novos, sobre, sobras = diagramar.espacos_com_modelo(modelo, fotos, self.produto)
+            fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
+            novos, sobre, sobras = diagramar.espacos_com_modelo(modelo, fotos, self.produto, None, self._cfg())
             lamina["espacos"] = novos
             lamina["sobreposicoes"] = [sobre] if sobre else []
         lamina["modelo"] = modelo["id"]
@@ -3259,12 +3292,28 @@ class Aplicativo:
                 x = ux + (uw - w) / 2
             elif acao == "centro_v":
                 y = uy + (uh - h) / 2
+            elif acao == "proporcao_foto":
+                if e.get("foto"):
+                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
+                    x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (x, y, w, h))
             elif acao == "pagina_util":
                 x, y, w, h = ux, uy, uw, uh
+                if e.get("foto"):
+                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
+                    if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
+                        x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (ux, uy, uw, uh))
             elif acao == "pagina":
                 x, y, w, h = area_pagina_mm(self.produto, pagina)
+                if e.get("foto"):
+                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
+                    if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
+                        x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (x, y, w, h))
             elif acao == "lamina":
                 x, y, w, h = 0.0, 0.0, lw, lh
+                if e.get("foto"):
+                    prop = self._proporcao_efetiva(e["foto"], e.get("edicao"))
+                    if diagramar._corte_quadro(prop, (x, y, w, h)) > diagramar.CORTE_MAXIMO:
+                        x, y, w, h = diagramar.caixa_proporcao_padrao(prop, (0.0, 0.0, lw, lh))
             elif acao == "igualar":
                 for j, outro in enumerate(l["espacos"]):
                     if j != i:
@@ -3888,7 +3937,7 @@ class Aplicativo:
         lamina = self._lamina()
         self._sugestoes = []
         if lamina is not None:
-            fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")])
+            fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
             if fotos:
                 self._sugestoes = diagramar.opcoes_lamina(fotos, self.produto, self._cfg(), self._modelos(), maximo=10)
         self.desenhar_sugestoes()

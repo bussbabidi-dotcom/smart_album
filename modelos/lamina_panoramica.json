@@ -1,9 +1,0 @@
-{
-  "id": "lamina_panoramica",
-  "nome": "Panorâmica (lâmina inteira)",
-  "escopo": "lamina",
-  "espacos": [
-    {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-  ],
-  "molde_png": null
-}
