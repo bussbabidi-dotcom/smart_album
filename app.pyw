@@ -268,7 +268,9 @@ class Aplicativo:
     # ==================================================================
 
     def _montar(self):
-        # Variáveis compartilhadas com a Barra de Opções superior
+        self.margem_var = tk.DoubleVar()
+        self.espacamento_var = tk.DoubleVar()
+        self.fotos_lamina_var = tk.IntVar()
 
         topo = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 4))
         topo.pack(side="top", fill="x")
@@ -339,7 +341,7 @@ class Aplicativo:
 
     def _montar_topo(self, topo):
         selo = tk.Label(topo, text="Sa", bg="#001e36", fg="#31a8ff",
-                        font=(tema.FONTE, 9, "bold"), bd=1, relief="solid", padx=5, pady=1)
+                        font=tema.FONTE_FORTE, bd=1, relief="solid", padx=5, pady=1)
         selo.pack(side="left", padx=(2, 6))
         tema.dica(selo, "Smart Album CC · Motor Elástico Proporcional (Corte Máx ≤ 22%)")
         ttk.Label(topo, text="Smart Album CC", style="Logo.TLabel").pack(side="left", padx=(0, 10))
@@ -838,10 +840,6 @@ class Aplicativo:
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
         self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
-
-        self.margem_var = tk.DoubleVar()
-        self.espacamento_var = tk.DoubleVar()
-        self.fotos_lamina_var = tk.IntVar()
         for texto, dica_txt, var, de, ate, passo in (
             ("⬚ Margem", "Margem externa da página em milímetros", self.margem_var, 0, 60, 1),
             ("⇔ Espaço", "Distância entre as fotos em milímetros", self.espacamento_var, 0, 40, 0.5),
@@ -4818,10 +4816,17 @@ class Aplicativo:
 
 
 def main():
-    argumentos = [a for a in sys.argv[1:] if a]
-    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
-    Aplicativo(root, argumentos)
-    root.mainloop()
+    try:
+        argumentos = [a for a in sys.argv[1:] if a]
+        root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
+        Aplicativo(root, argumentos)
+        root.mainloop()
+    except Exception:
+        try:
+            messagebox.showerror("Erro ao iniciar Smart Album", traceback.format_exc())
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":
