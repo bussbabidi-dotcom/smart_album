@@ -291,6 +291,8 @@ class EditorFundo(tk.Toplevel):
 
     def _dados(self):
         dono = self.app._dono_do_fundo()
+        if hasattr(self.app, "_dados_fundo_imagem_ativo"):
+            return dono, self.app._dados_fundo_imagem_ativo(dono)
         return dono, (dono or {}).get("fundo_imagem")
 
     def mostrar(self):

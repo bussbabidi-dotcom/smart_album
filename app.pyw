@@ -41,7 +41,7 @@ from comum import EXTENSOES, cor_hex, cor_rgb, gravar_json, ler_json, normalizar
 import fundos
 import janela_exportar
 import janela_tratamento
-from composicao import MODOS_FUNDO, acabar_fundo, fundo_imagem_padrao, fundo_posicionado, rosto_de
+from composicao import MODOS_FUNDO, acabar_fundo, aplicar_moldura, compor_fundo_completo, fundo_imagem_padrao, fundo_posicionado, rosto_de
 from editor_foto import EditorFoto
 from observador import Observador
 from produtos import area_pagina_mm, area_util_pagina_mm, lamina_mm, lamina_px, listar_produtos
@@ -216,6 +216,9 @@ class Aplicativo:
         self._tk_lamina = None
         self._tk_lamina_zoom = None
         self._imagem_lamina = None
+        self._cache_laminas = OrderedDict()
+        self._anim_layout_id = None
+        self._anim_tks = []
         self._tk_miniaturas = OrderedDict()
         self._tl_pil = {}
         self._tl_tk = {}
@@ -233,6 +236,8 @@ class Aplicativo:
         self._ultimo_toque = 0.0
         self._num_alvo = None
         self._carregando_fundo = False
+        self.fundo_alvo = tk.StringVar(value="lamina")
+        self.fundo_fusao = tk.DoubleVar(value=0)
         self._tl_larg, self._tl_alt, self._tl_altura = 150, 64, 92
         self._tl_passo_v = 100
         self._tl_dim = None
@@ -257,7 +262,7 @@ class Aplicativo:
         self._atalhos()
         self._registrar_drop()
         self.root.protocol("WM_DELETE_WINDOW", self.sair)
-        self.root.after(100, self._ler_fila)
+        self.root.after(30, self._ler_fila)
         self._carregar_ui_do_projeto()
         self.atualizar_tudo()
         if argumentos:
@@ -952,13 +957,42 @@ class Aplicativo:
         topo.pack(side="top", fill="x")
         self.rotulo_fundo = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_fundo.pack(side="left")
-        self._botao(topo, "Cor...", self.escolher_fundo, "Cor de fundo da lâmina (ou da capa)").pack(side="right")
+        self._botao(topo, "Cor...", self.escolher_fundo, "Cor de fundo do alvo selecionado (Lâmina, Página Esquerda ou Direita)").pack(side="right")
         self.amostra_fundo = tk.Label(topo, width=3, bg="#ffffff", relief="flat", cursor="hand2")
         self.amostra_fundo.pack(side="right", padx=4)
         self.amostra_fundo.bind("<Button-1>", lambda e: self.escolher_fundo())
 
+        # Alvo do fundo (Lâmina inteira, Página Esquerda ou Página Direita) + Fusão suave no meio
+        div_quadro = ttk.LabelFrame(quadro, text="Preenchimento e Mistura de Páginas", padding=6)
+        div_quadro.pack(side="top", fill="x", pady=(6, 2))
+        linha_alvo = ttk.Frame(div_quadro)
+        linha_alvo.pack(fill="x", pady=(0, 4))
+        for val, txt, dica_txt in (
+            ("lamina", "▭ Lâmina inteira", "Edita o fundo da lâmina inteira"),
+            ("esquerda", "◧ Pág. Esq.", "Edita o fundo apenas da página esquerda (permite misturar 2 fundos)"),
+            ("direita", "◨ Pág. Dir.", "Edita o fundo apenas da página direita (permite misturar 2 fundos)"),
+        ):
+            rb = ttk.Radiobutton(linha_alvo, text=txt, value=val, variable=self.fundo_alvo,
+                                 style="Filtro.TRadiobutton", command=self._atualizar_fundo_ui)
+            rb.pack(side="left", fill="x", expand=True, padx=1)
+            tema.dica(rb, dica_txt)
+
+        linha_fusao = ttk.Frame(div_quadro)
+        linha_fusao.pack(fill="x", pady=(2, 0))
+        rot_fusao = ttk.Label(linha_fusao, text="Fusão no meio", width=12)
+        rot_fusao.pack(side="left")
+        tema.dica(rot_fusao, "Suaviza a transição na dobra central quando esquerda e direita têm fundos diferentes")
+        self.rotulo_fundo_fusao = ttk.Label(linha_fusao, text="0%", style="Fraco.TLabel", width=4, anchor="e")
+        self.rotulo_fundo_fusao.pack(side="right")
+        self.escala_fundo_fusao = ttk.Scale(linha_fusao, from_=0, to=100, variable=self.fundo_fusao,
+                                            command=lambda _v: self._mudou_fusao_fundo(marcar=False))
+        self.escala_fundo_fusao.pack(side="right", fill="x", expand=True, padx=6)
+        self.escala_fundo_fusao.bind("<ButtonPress-1>", lambda e: self.marcar_historico())
+        self.escala_fundo_fusao.bind("<ButtonRelease-1>", lambda e: self._mudou_fusao_fundo(marcar=True))
+        self.escala_fundo_fusao.bind("<Double-Button-1>", lambda e: (self.fundo_fusao.set(0), self._mudou_fusao_fundo(marcar=True)))
+
         imagem = ttk.LabelFrame(quadro, text="Imagem de fundo", padding=6)
-        imagem.pack(side="top", fill="x", pady=(6, 4))
+        imagem.pack(side="top", fill="x", pady=(4, 4))
         self.rotulo_fundo_imagem = ttk.Label(imagem, text="", style="Fraco.TLabel", wraplength=300, justify="left")
         self.rotulo_fundo_imagem.pack(anchor="w")
         linha = ttk.Frame(imagem)
@@ -1002,7 +1036,7 @@ class Aplicativo:
         ajustar = self._botao(linha, "Ajustar cor...", lambda: self.abrir_editor_fundo(),
                               "Brilho, contraste, saturação, matiz e tingir com uma cor\n(também: duplo clique numa imagem da galeria)")
         ajustar.pack(side="left", fill="x", expand=True, padx=(0, 2))
-        tirar = self._botao(linha, "Tirar imagem", self.tirar_imagem_fundo, "Fica só a cor de fundo")
+        tirar = self._botao(linha, "Tirar imagem", self.tirar_imagem_fundo, "Remove a imagem do alvo selecionado (Lâmina, Pág. Esq. ou Pág. Dir.)")
         tirar.pack(side="left", fill="x", expand=True)
         self._controles_fundo += [ajustar, tirar]
         self._botao(quadro, "Aplicar este fundo em todas as lâminas", self.fundo_em_todas).pack(side="top", fill="x", pady=(2, 4))
@@ -1984,15 +2018,30 @@ class Aplicativo:
             fotos = [e["foto"] for e in lamina["espacos"] if e.get("foto")]
         if marcar:
             self.marcar_historico()
-        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), self._modelos(), maximo=1)
-        self._aplicar_opcao(lamina, opcoes[0])
+        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), self._modelos(), maximo=10)
+        if not opcoes:
+            return
+        atual_geom = tuple((round(e["x"], 3), round(e["y"], 3), round(e["w"], 3), round(e["h"], 3))
+                           for e in lamina.get("espacos", []))
+        escolhida = opcoes[0]
+        if len(opcoes) > 1:
+            for idx_op, op in enumerate(opcoes):
+                geom = tuple((round(e["x"], 3), round(e["y"], 3), round(e["w"], 3), round(e["h"], 3))
+                             for e in op.get("espacos", []))
+                if geom == atual_geom:
+                    escolhida = opcoes[(idx_op + 1) % len(opcoes)]
+                    break
+        self._aplicar_opcao(lamina, escolhida)
 
     def rediagramar_lamina(self):
-        if self._lamina() is None:
+        lamina = self._lamina()
+        if lamina is None:
             return
+        antes = [dict(e) for e in lamina.get("espacos", [])]
         self.relayout(self.atual)
         self.espaco_sel = None
         self.atualizar_lamina_atual()
+        self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def rediagramar_todas(self):
         if not self.projeto["laminas"]:
@@ -2038,6 +2087,7 @@ class Aplicativo:
         lamina = self._lamina(li)
         if lamina is None or not (0 <= ei < len(lamina["espacos"])):
             return
+        antes = [dict(e) for e in lamina.get("espacos", [])] if li == self.atual else None
         if marcar:
             self.marcar_historico()
         espaco = lamina["espacos"][ei]
@@ -2047,20 +2097,26 @@ class Aplicativo:
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
         self.atual, self.espaco_sel = li, ei
         self.atualizar_lamina_atual()
+        if antes is not None:
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def adicionar_na_lamina(self, fotos, li, marcar=True):
         lamina = self._lamina(li)
         if lamina is None:
             return
+        antes = [dict(e) for e in lamina.get("espacos", [])] if li == self.atual else None
         atuais = [e["foto"] for e in lamina["espacos"] if e.get("foto")]
         self.relayout(li, atuais + [str(f) for f in fotos], marcar=marcar)
         self.atual, self.espaco_sel = li, None
         self.atualizar_lamina_atual()
+        if antes is not None:
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def trocar_espacos(self, li, a, lj, b):
         la, lb = self._lamina(li), self._lamina(lj)
         if la is None or lb is None:
             return
+        antes = [dict(e) for e in lb.get("espacos", [])] if li == lj == self.atual else None
         self.marcar_historico()
         ea, eb = la["espacos"][a], lb["espacos"][b]
         ea["foto"], eb["foto"] = eb.get("foto"), ea.get("foto")
@@ -2074,6 +2130,8 @@ class Aplicativo:
                 diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
         self.atual, self.espaco_sel = lj, b
         self.atualizar_tudo()
+        if antes is not None:
+            self._animar_transicao_layout(antes, lb.get("espacos", []))
 
     def tirar_foto(self, li, ei, marcar=True):
         lamina = self._lamina(li)
@@ -2093,6 +2151,7 @@ class Aplicativo:
         lamina = self._lamina(li)
         if lamina is None:
             return
+        antes = [dict(e) for e in lamina.get("espacos", [])] if li == self.atual else None
         self.marcar_historico()
         del lamina["espacos"][ei]
         lamina["modelo"] = None
@@ -2100,6 +2159,8 @@ class Aplicativo:
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
         self.espaco_sel = None
         self.atualizar_lamina_atual()
+        if antes is not None:
+            self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def adicionar_lamina(self):
         self.marcar_historico()
@@ -2185,6 +2246,7 @@ class Aplicativo:
         if lamina is None or modelo is None:
             self.registrar("Escolha uma lâmina e um modelo.")
             return
+        antes = [dict(e) for e in lamina.get("espacos", [])]
         self.marcar_historico()
         if modelo.get("escopo") == "pagina" and self.produto["paginas_por_lamina"] > 1:
             pagina = self.pagina_modelo.get()
@@ -2206,6 +2268,7 @@ class Aplicativo:
             self.registrar("%s foto(s) não couberam no modelo e voltaram para as não usadas." % len(sobras))
         self.espaco_sel = None
         self.atualizar_lamina_atual()
+        self._animar_transicao_layout(antes, lamina.get("espacos", []))
 
     def salvar_modelo(self):
         lamina = self._lamina()
@@ -2254,6 +2317,7 @@ class Aplicativo:
         return list(range(len(self.projeto["laminas"])))
 
     def selecionar_lamina(self, item):
+        self._cancelar_animacao_layout()
         self.atual = item
         self._definir_selecao_espacos(set())
         self._ancora_espaco = None
@@ -2345,7 +2409,7 @@ class Aplicativo:
                 p.get("descricao") or p["nome"], p["pagina_mm"][0], p["pagina_mm"][1], p["paginas_por_lamina"],
                 p["sangria_mm"], p["seguranca_mm"], p["dobra_mm"], W, H, p["laminas_min"], p["laminas_max"]))
 
-    # ---------------- lâmina central ----------------
+    # ---------------- lâmina central (sem piscar e com animação) ----------------
 
     def _tamanho_item(self, item):
         return lamina_mm(self.produto)
@@ -2369,13 +2433,32 @@ class Aplicativo:
             mini["laminas"][self.atual] = json.loads(json.dumps(self.projeto["laminas"][self.atual]))
         return mini
 
+    def _assinatura_lamina_render(self, item, dw, dh):
+        if not (isinstance(item, int) and 0 <= item < len(self.projeto["laminas"])):
+            return None
+        return (self._assinatura(item), int(dw), int(dh), bool(self.guias.get()))
+
+    def _guardar_cache_lamina(self, item, dw, dh, img, tk_img=None):
+        if not (isinstance(item, int) and 0 <= item < len(self.projeto["laminas"])):
+            return None
+        id_lam = self.projeto["laminas"][item].get("id") or str(item)
+        ass = self._assinatura_lamina_render(item, dw, dh)
+        if tk_img is None:
+            tk_img = ImageTk.PhotoImage(img)
+        self._cache_laminas[id_lam] = (ass, (dw, dh), img.copy(), tk_img)
+        self._cache_laminas.move_to_end(id_lam)
+        while len(self._cache_laminas) > 24:
+            self._cache_laminas.popitem(last=False)
+        return tk_img
+
     def desenhar_lamina(self, pedir_render=True):
-        self.canvas.delete("all")
         itens = self._itens_timeline()
         if not self.projeto["fotos"] and not self.projeto["laminas"]:
+            self.canvas.delete("all")
             self._desenhar_vazio()
             return
         if not itens:
+            self.canvas.delete("all")
             self.canvas.create_text(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2,
                                     text="Clique em 'Diagramar automático' ou em '+ Lâmina'.", fill=tema.TEXTO_FRACO,
                                     font=tema.FONTE_TITULO)
@@ -2383,21 +2466,194 @@ class Aplicativo:
             return
         dw, dh, ox, oy = self._geometria()
         self._geo = (dw, dh, ox, oy)
-        self.canvas.create_rectangle(ox + 6, oy + 8, ox + dw + 6, oy + dh + 8, fill="#0d0d0f", outline="")
-        if self._tk_lamina is not None and self._tk_lamina[1] == (self.atual, dw, dh):
-            self.canvas.create_image(ox, oy, image=self._tk_lamina[0], anchor="nw", tags="img")
+        lamina = self._lamina()
+        id_lam = (lamina or {}).get("id") or str(self.atual)
+        ass_atual = self._assinatura_lamina_render(self.atual, dw, dh)
+        entrada_cache = self._cache_laminas.get(id_lam)
+
+        tk_para_exibir = None
+        precisa_worker = pedir_render
+
+        if entrada_cache is not None:
+            ass_cache, tam_cache, img_cache, tk_cache = entrada_cache
+            self._cache_laminas.move_to_end(id_lam)
+            if tam_cache == (dw, dh):
+                tk_para_exibir = tk_cache
+                self._tk_lamina = (tk_cache, (self.atual, dw, dh))
+                self._imagem_lamina = (self.atual, img_cache)
+                if ass_cache == ass_atual:
+                    precisa_worker = False
+            else:
+                redim = img_cache.resize((dw, dh), Image.BILINEAR)
+                self._tk_lamina_zoom = ImageTk.PhotoImage(redim)
+                tk_para_exibir = self._tk_lamina_zoom
+                self._imagem_lamina = (self.atual, redim)
+        elif self._tk_lamina is not None and self._tk_lamina[1] == (self.atual, dw, dh):
+            tk_para_exibir = self._tk_lamina[0]
         elif self._imagem_lamina is not None and self._imagem_lamina[0] == self.atual:
             imagem = self._imagem_lamina[1].resize((dw, dh), Image.BILINEAR)
             self._tk_lamina_zoom = ImageTk.PhotoImage(imagem)
-            self.canvas.create_image(ox, oy, image=self._tk_lamina_zoom, anchor="nw", tags="img")
+            tk_para_exibir = self._tk_lamina_zoom
         else:
-            fundo = (self._lamina() or {}).get("fundo", "#ffffff")
-            self.canvas.create_rectangle(ox, oy, ox + dw, oy + dh, fill=cor_hex(fundo), outline="")
+            # Renderização rápida imediata na troca de lâmina para NUNCA piscar branco
+            try:
+                mini = self._copia_para_render()
+                img_imediata = exportar.renderizar_item(
+                    mini, self.produto, self.info, self.atual,
+                    largura=dw, guias=self.guias.get(), rapido=True
+                )
+                tk_para_exibir = self._guardar_cache_lamina(self.atual, dw, dh, img_imediata)
+                self._tk_lamina = (tk_para_exibir, (self.atual, dw, dh))
+                self._imagem_lamina = (self.atual, img_imediata)
+                precisa_worker = False
+            except Exception:
+                tk_para_exibir = None
+
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(ox + 6, oy + 8, ox + dw + 6, oy + dh + 8, fill="#0d0d0f", outline="")
+        if tk_para_exibir is not None:
+            self.canvas.create_image(ox, oy, image=tk_para_exibir, anchor="nw", tags="img")
+        else:
+            fundo = (lamina or {}).get("fundo", "#ffffff")
+            self.canvas.create_rectangle(ox, oy, ox + dw, oy + dh, fill=cor_hex(fundo), outline="", tags="img")
         self._desenhar_remendo()
         self._desenhar_espacos()
-        if pedir_render:
+        if precisa_worker:
             self._pedir_render(dw, dh)
         self._atualizar_rotulo_lamina()
+
+    def _cancelar_animacao_layout(self):
+        if self._anim_layout_id is not None:
+            try:
+                self.root.after_cancel(self._anim_layout_id)
+            except tk.TclError:
+                pass
+            self._anim_layout_id = None
+        self._anim_tks = []
+        self.canvas.delete("anim_layout")
+
+    def _animar_transicao_layout(self, antes_espacos, depois_espacos, duracao=0.18):
+        """
+        Deslize suave (~180ms, cubic ease-out) das fotos da posição antiga até a nova
+        quando o layout da lâmina muda.
+        """
+        self._cancelar_animacao_layout()
+        if self._geo is None or not antes_espacos or not depois_espacos:
+            return
+        lamina = self._lamina()
+        if lamina is None:
+            return
+        dw, dh, ox, oy = self._geo
+        if dw < 40 or dh < 20:
+            return
+
+        # Emparelha cada foto do novo layout com sua posição anterior
+        filas_antes = {}
+        for e in antes_espacos:
+            if e.get("foto"):
+                ch = normalizar_caminho(e["foto"])
+                filas_antes.setdefault(ch, []).append(e)
+
+        pares = []
+        moveu_algo = False
+        for e_dep in depois_espacos:
+            foto = e_dep.get("foto")
+            if not foto:
+                continue
+            ch = normalizar_caminho(foto)
+            lista_ant = filas_antes.get(ch)
+            e_ant = lista_ant.pop(0) if lista_ant else e_dep
+            if any(abs(float(e_ant[k]) - float(e_dep[k])) > 0.003 for k in ("x", "y", "w", "h")):
+                moveu_algo = True
+            pares.append((e_ant, e_dep))
+
+        if not moveu_algo or not pares:
+            return
+
+        # Prepara o fundo limpo da lâmina e a imagem base de cada foto uma única vez
+        try:
+            fundo_rgba = compor_fundo_completo(
+                (dw, dh), lamina.get("fundo", "#ffffff"),
+                lamina.get("fundo_imagem"), rapido=True, opcoes_pagina=lamina
+            )
+            fundo_rgb = fundo_rgba.convert("RGB")
+            if self.guias.get():
+                exportar._guias_lamina(fundo_rgb, self.produto)
+            tk_fundo_limpo = ImageTk.PhotoImage(fundo_rgb)
+        except Exception:
+            return
+
+        lado_max = max(dw, dh)
+        px_mm = dw / float(lamina_mm(self.produto)[0])
+        cor_fundo_rgb = cor_rgb(lamina.get("fundo", "#ffffff"))
+        itens_anim = []
+        for e_ant, e_dep in pares:
+            foto = e_dep["foto"]
+            ed = e_dep.get("edicao") or {}
+            try:
+                fonte = analise.imagem_para(foto, lado_max)
+                img_t = recorte.aplicar_ajustes(recorte.transformar(fonte, ed), ed)
+                rosto_t = recorte.rosto_transformado(rosto_de(self.info, foto), ed)
+                itens_anim.append({
+                    "ant": (float(e_ant["x"]), float(e_ant["y"]), float(e_ant["w"]), float(e_ant["h"])),
+                    "dep": (float(e_dep["x"]), float(e_dep["y"]), float(e_dep["w"]), float(e_dep["h"])),
+                    "img": img_t,
+                    "edicao": ed,
+                    "rosto_t": rosto_t,
+                    "moldura": ed.get("moldura"),
+                })
+            except Exception:
+                continue
+
+        if not itens_anim:
+            return
+
+        inicio = time.perf_counter()
+
+        def passo_animacao():
+            self._anim_layout_id = None
+            if self._geo != (dw, dh, ox, oy):
+                self._cancelar_animacao_layout()
+                return
+            decorrido = time.perf_counter() - inicio
+            t = min(1.0, max(0.0, decorrido / duracao))
+            if t >= 1.0:
+                self._cancelar_animacao_layout()
+                self.desenhar_lamina(pedir_render=True)
+                return
+            # Ease-out cúbico suave
+            suave = 1.0 - ((1.0 - t) ** 3)
+            c = self.canvas
+            c.delete("anim_layout")
+            novos_tks = [tk_fundo_limpo]
+            c.create_image(ox, oy, image=tk_fundo_limpo, anchor="nw", tags="anim_layout")
+            for info_f in itens_anim:
+                ax, ay, aw, ah = info_f["ant"]
+                bx, by, bw, bh = info_f["dep"]
+                ix = ax + (bx - ax) * suave
+                iy = ay + (by - ay) * suave
+                iw = aw + (bw - aw) * suave
+                ih = ah + (bh - ah) * suave
+                x0 = int(round(ox + ix * dw))
+                y0 = int(round(oy + iy * dh))
+                pw = max(2, int(round(iw * dw)))
+                ph = max(2, int(round(ih * dh)))
+                img_f = info_f["img"]
+                W, H = img_f.size
+                aspecto = pw / float(ph)
+                corte = recorte.corte_do_espaco(W, H, aspecto, info_f["edicao"], info_f["rosto_t"], rosto_ja_transformado=True)
+                rec = recorte.recortar(img_f, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), cor_fundo_rgb, rapido=True)
+                if info_f["moldura"]:
+                    aplicar_moldura(rec, info_f["moldura"], px_mm)
+                tk_f = ImageTk.PhotoImage(rec)
+                novos_tks.append(tk_f)
+                c.create_image(x0, y0, image=tk_f, anchor="nw", tags="anim_layout")
+            self._anim_tks = novos_tks
+            c.tag_raise("anim_layout")
+            c.tag_raise("espaco")
+            self._anim_layout_id = self.root.after(14, passo_animacao)
+
+        passo_animacao()
 
     def _atualizar_rotulo_lamina(self):
         lamina = self._lamina()
@@ -2474,22 +2730,16 @@ class Aplicativo:
         self._atualizar_moldura_ui()
 
     def _desenhar_remendo(self):
-        """Depois de soltar, a prévia do arrasto fica por cima da imagem antiga até a nova chegar."""
+        """Depois de soltar, a prévia do arrasto com o fundo limpo fica até a imagem final chegar."""
         r = self._remendo
         if not r:
             return
         if r["item"] != self.atual or r["geo"] != self._geo:
             self._remendo = None
             return
-        if r.get("tampa"):
-            tampa = r["tampa"]
-            caixa = tampa["caixa"]
-            if tampa.get("imagem") is not None:
-                if r.get("tampa_tk") is None:
-                    r["tampa_tk"] = ImageTk.PhotoImage(tampa["imagem"])
-                self.canvas.create_image(caixa[0], caixa[1], image=r["tampa_tk"], anchor="nw", tags="remendo")
-            else:
-                self.canvas.create_rectangle(*caixa, fill=tampa["cor"], outline="", tags="remendo")
+        _dw, _dh, ox, oy = self._geo
+        if r.get("base_limpa_tk") is not None:
+            self.canvas.create_image(ox, oy, image=r["base_limpa_tk"], anchor="nw", tags="remendo")
         if r.get("tk") is not None:
             self.canvas.create_image(r["pos"][0], r["pos"][1], image=r["tk"], anchor="nw", tags="remendo")
 
@@ -2514,15 +2764,20 @@ class Aplicativo:
     def _receber_render(self, versao, item, dw, dh, img):
         if versao != self._versao_render:
             return
-        self._tk_lamina = (ImageTk.PhotoImage(img), (item, dw, dh))
+        tk_img = self._guardar_cache_lamina(item, dw, dh, img)
+        if tk_img is None:
+            tk_img = ImageTk.PhotoImage(img)
+        self._tk_lamina = (tk_img, (item, dw, dh))
         self._imagem_lamina = (item, img.copy())
         if self._geo is None or (item, dw, dh) != (self.atual, self._geo[0], self._geo[1]):
+            return
+        if self._anim_layout_id is not None:
             return
         _dw, _dh, ox, oy = self._geo
         self._remendo = None
         self.canvas.delete("img")
         self.canvas.delete("remendo")
-        self.canvas.create_image(ox, oy, image=self._tk_lamina[0], anchor="nw", tags="img")
+        self.canvas.create_image(ox, oy, image=tk_img, anchor="nw", tags="img")
         self.canvas.tag_raise("espaco")
         self.canvas.tag_raise("arrasto")
 
@@ -3154,42 +3409,52 @@ class Aplicativo:
 
     def _iniciar_previa(self, a, lamina, item):
         """
-        No começo do arrasto: tampa o lugar antigo na imagem da lâmina e prepara a foto (ou o
-        molde) já reduzida para a escala da tela, para a prévia não esperar a thread de desenho.
+        No começo do arrasto/redimensionamento: gera a imagem base limpa da lâmina SEM o espaço
+        que está sendo movido/redimensionado (eliminando qualquer rastro branco ou fantasma)
+        e prepara a foto já transformada para 60fps.
         """
         c = self.canvas
         dw, dh, ox, oy = self._geo
         lado = max(dw, dh)
-        caixa = (int(ox + item["x"] * dw) - 1, int(oy + item["y"] * dh) - 1,
-                 int(ox + (item["x"] + item["w"]) * dw) + 2, int(oy + (item["y"] + item["h"]) * dh) + 2)
         c.delete("arrasto")
-        a["tampa"] = None
-        a["tampa_tk"] = None
+        a["base_limpa_tk"] = None
         a["previa"] = None
         a["tk"] = None
-        if a["alvo"][0] == "espaco":
-            cor = cor_hex(lamina.get("fundo", "#ffffff"))
-            imagem_atual = self._imagem_lamina
-            if (imagem_atual is not None and imagem_atual[0] == self.atual
-                    and imagem_atual[1].size == (dw, dh)):
-                x0, y0, x1, y1 = caixa
-                recorte_atual = imagem_atual[1].crop((max(0, x0 - ox), max(0, y0 - oy),
-                                                       min(dw, x1 - ox), min(dh, y1 - oy)))
-                a["tampa"] = {"caixa": caixa, "imagem": recorte_atual}
-                a["tampa_tk"] = ImageTk.PhotoImage(recorte_atual)
-                c.create_image(caixa[0], caixa[1], image=a["tampa_tk"], anchor="nw", tags="arrasto")
+
+        # Renderiza a lâmina sem o item ativo para mostrar o fundo verdadeiro por baixo
+        try:
+            lamina_sem = dict(lamina)
+            idx_alvo = a["alvo"][1]
+            if a["alvo"][0] == "espaco":
+                lamina_sem["espacos"] = [e for idx, e in enumerate(lamina.get("espacos", [])) if idx != idx_alvo]
             else:
-                a["tampa"] = {"caixa": caixa, "cor": cor}
-                c.create_rectangle(*caixa, fill=cor, outline="", tags="arrasto")
+                lamina_sem["sobreposicoes"] = [s for idx, s in enumerate(lamina.get("sobreposicoes") or []) if idx != idx_alvo]
+            img_limpa = exportar.renderizar_lamina(
+                lamina_sem, self.produto, self.info, largura=dw, guias=self.guias.get(), rapido=True
+            )
+            a["base_limpa_tk"] = ImageTk.PhotoImage(img_limpa)
+            c.delete("img")
+            c.create_image(ox, oy, image=a["base_limpa_tk"], anchor="nw", tags="img")
+        except Exception:
+            pass
+
+        if a["alvo"][0] == "espaco":
             foto = item.get("foto")
             if foto:
                 try:
-                    img = recorte.transformar(analise.imagem_para(foto, lado), item.get("edicao"))
+                    ed = item.get("edicao") or {}
+                    img = recorte.transformar(analise.imagem_para(foto, lado), ed)
                     if max(img.size) > lado:
                         escala = lado / float(max(img.size))
                         img = img.resize((max(1, round(img.width * escala)), max(1, round(img.height * escala))), Image.BILINEAR)
-                    a["previa"] = {"img": recorte.aplicar_ajustes(img, item.get("edicao")), "edicao": item.get("edicao"),
-                                   "rosto": rosto_de(self.info, foto), "fundo": cor_rgb(lamina.get("fundo"))}
+                    a["previa"] = {
+                        "img": recorte.aplicar_ajustes(img, ed),
+                        "edicao": ed,
+                        "rosto_t": recorte.rosto_transformado(rosto_de(self.info, foto), ed),
+                        "moldura": ed.get("moldura"),
+                        "px_mm": dw / float(lamina_mm(self.produto)[0]),
+                        "fundo": cor_rgb(lamina.get("fundo")),
+                    }
                 except (OSError, ValueError):
                     pass
         else:
@@ -3239,8 +3504,10 @@ class Aplicativo:
                 img = previa["img"]
                 W, H = img.size
                 aspecto = pw / float(ph)
-                corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto"])
+                corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto_t"], rosto_ja_transformado=True)
                 pronta = recorte.recortar(img, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), previa["fundo"], rapido=True)
+                if previa.get("moldura"):
+                    aplicar_moldura(pronta, previa["moldura"], previa.get("px_mm"))
                 a["tk"] = ImageTk.PhotoImage(pronta)
                 c.create_image(x0, y0, image=a["tk"], anchor="nw", tags=etiqueta)
             else:
@@ -3281,8 +3548,8 @@ class Aplicativo:
             self._atualizar_layout_sem_piscar()
             return
         self._desenhar_previa_final(a)
-        self._remendo = {"item": self.atual, "geo": self._geo, "tampa": a.get("tampa"),
-                         "tampa_tk": a.get("tampa_tk"), "tk": a.get("tk"), "pos": a.get("pos", (0, 0))}
+        self._remendo = {"item": self.atual, "geo": self._geo, "base_limpa_tk": a.get("base_limpa_tk"),
+                         "tk": a.get("tk"), "pos": a.get("pos", (0, 0))}
         self.canvas.delete("arrasto")
         self._desenhar_remendo()
         self._atualizar_layout_sem_piscar()
@@ -3310,14 +3577,16 @@ class Aplicativo:
             self.root.after_cancel(anterior)
 
     def _mudar_espacos(self, funcao, texto=None):
-        """Uma mudança nos espaços da lâmina atual, com desfazer e o modelo esquecido."""
+        """Uma mudança nos espaços da lâmina atual, com desfazer, modelo esquecido e animação suave."""
         lamina = self._lamina()
         if lamina is None:
             return False
+        antes = [dict(e) for e in lamina.get("espacos", [])]
         self.marcar_historico()
         funcao(lamina)
         lamina["modelo"] = None
         self.atualizar_lamina_atual()
+        self._animar_transicao_layout(antes, lamina.get("espacos", []))
         if texto:
             self.registrar(texto)
         return True
@@ -3449,7 +3718,7 @@ class Aplicativo:
             ed["rot"] = (int(ed.get("rot", 0)) + graus) % 360
             ed.pop("corte", None)
             esp["edicao"] = ed
-            self._ajustar_lamina_proporcional(l)
+            diagramar.ajustar_espacos_lamina(l, self._mapa_proporcoes(l), self.produto, self._cfg())
 
         self._mudar_espacos(mudar, "Foto girada em %s° com reajuste proporcional da página." % graus)
 
@@ -4169,6 +4438,7 @@ class Aplicativo:
             if x0 <= evento.x <= x1 and y0 <= y <= y1:
                 lamina = self._lamina()
                 if lamina is not None:
+                    antes = [dict(e) for e in lamina.get("espacos", [])]
                     self.marcar_historico()
                     self._aplicar_opcao(lamina, self._sugestoes[i])
                     self.espaco_sel = None
@@ -4176,6 +4446,7 @@ class Aplicativo:
                     self.desenhar_lamina()
                     self.desenhar_timeline()
                     self.desenhar_sugestoes()
+                    self._animar_transicao_layout(antes, lamina.get("espacos", []))
                     if self.editor:
                         alvo = self._alvo_padrao()
                         if alvo:
@@ -4232,35 +4503,76 @@ class Aplicativo:
                 self.desenhar_modelos()
                 return
 
-    # ---------------- fundo e capa ----------------
+    # ---------------- fundo (lâmina inteira, por página e mistura no meio) ----------------
 
     def _dono_do_fundo(self):
         """O dicionário que guarda o fundo da lâmina aberta."""
         return self._lamina()
 
+    def _chaves_fundo_alvo(self, alvo=None):
+        alvo = (self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina") if alvo is None else alvo
+        if alvo == "esquerda":
+            return "fundo_esquerda", "fundo_imagem_esquerda"
+        if alvo == "direita":
+            return "fundo_direita", "fundo_imagem_direita"
+        return "fundo", "fundo_imagem"
+
+    def _dados_fundo_imagem_ativo(self, dono=None):
+        dono = self._dono_do_fundo() if dono is None else dono
+        if dono is None:
+            return None
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        return dono.get(ch_img)
+
+    def _cor_fundo_ativa(self, dono=None):
+        dono = self._dono_do_fundo() if dono is None else dono
+        if dono is None:
+            return "#ffffff"
+        ch_cor, _ch_img = self._chaves_fundo_alvo()
+        return dono.get(ch_cor) or dono.get("fundo", "#ffffff")
+
     def escolher_fundo(self):
         dono = self._dono_do_fundo()
         if dono is None:
             return
-        cor = colorchooser.askcolor(color=cor_hex(dono.get("fundo", "#ffffff")), parent=self.root)[1]
+        cor_atual = cor_hex(self._cor_fundo_ativa(dono))
+        cor = colorchooser.askcolor(color=cor_atual, parent=self.root)[1]
         if cor:
             self.marcar_historico()
-            dono["fundo"] = cor
-            self.projeto.setdefault("config", {})["fundo"] = cor
+            ch_cor, _ch_img = self._chaves_fundo_alvo()
+            dono[ch_cor] = cor
+            if ch_cor == "fundo":
+                self.projeto.setdefault("config", {})["fundo"] = cor
             self._atualizar_fundo_ui()
             self.atualizar_lamina_atual()
+
+    def _mudou_fusao_fundo(self, marcar=False):
+        if self._carregando_fundo:
+            return
+        dono = self._dono_do_fundo()
+        valor = int(round(self.fundo_fusao.get()))
+        if hasattr(self, "rotulo_fundo_fusao"):
+            self.rotulo_fundo_fusao.configure(text="%d%%" % valor)
+        if dono is None:
+            return
+        if int(dono.get("fundo_fusao") or 0) == valor and not marcar:
+            return
+        dono["fundo_fusao"] = valor
+        self.fundo_ajustado(final=marcar)
 
     def fundo_em_todas(self):
         dono = self._dono_do_fundo()
         if dono is None or not self.projeto["laminas"]:
             return
         self.marcar_historico()
+        chaves_copiar = ("fundo", "fundo_esquerda", "fundo_direita", "fundo_fusao",
+                         "fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita")
         for outra in self.projeto["laminas"]:
-            outra["fundo"] = dono.get("fundo", "#ffffff")
-            if dono.get("fundo_imagem"):
-                outra["fundo_imagem"] = proj.copia(dono["fundo_imagem"])
-            else:
-                outra.pop("fundo_imagem", None)
+            for ch in chaves_copiar:
+                if dono.get(ch) is not None:
+                    outra[ch] = proj.copia(dono[ch])
+                else:
+                    outra.pop(ch, None)
         self.atualizar_tudo()
         self.registrar("Fundo aplicado em todas as %s lâminas." % len(self.projeto["laminas"]))
 
@@ -4284,51 +4596,60 @@ class Aplicativo:
     def definir_imagem_fundo(self, caminho):
         self.aplicar_fundo_em(caminho, self.atual)
 
-    def aplicar_fundo_em(self, caminho, item=None):
+    def aplicar_fundo_em(self, caminho, item=None, alvo=None):
         """
-        Põe a imagem como fundo da lâmina (ou da capa), mantendo modo, opacidade,
-        desfoque, P&B e os ajustes de cor que ela já tinha.
+        Põe a imagem como fundo do alvo selecionado (lâmina inteira, página esquerda ou página direita),
+        mantendo modo, opacidade, desfoque, P&B e os ajustes de cor que já tinha.
         """
         item = self.atual if item is None else item
         dono = self._lamina(item)
         if dono is None:
             self.registrar("Escolha uma lâmina.")
             return False
-        anterior = (dono.get("fundo_imagem") or {}).get("caminho")
+        _ch_cor, ch_img = self._chaves_fundo_alvo(alvo)
+        anterior = (dono.get(ch_img) or {}).get("caminho")
         if anterior and normalizar_caminho(anterior) == normalizar_caminho(caminho):
             return False
         self.marcar_historico()
         dados = fundo_imagem_padrao()
-        dados.update(proj.copia(dono.get("fundo_imagem") or {}))
+        dados.update(proj.copia(dono.get(ch_img) or dono.get("fundo_imagem") or {}))
         dados["caminho"] = str(Path(caminho))
-        dono["fundo_imagem"] = dados
+        dono[ch_img] = dados
+        # Se aplicou em uma página (esquerda/direita) e ainda não tinha fusão configurada, mantém suave se o outro lado existir
         self._fundos_avisados.discard(normalizar_caminho(caminho))
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
-        self.registrar("Fundo da lâmina %s: %s" % (item + 1, Path(caminho).name))
+        nome_alvo = {"fundo_imagem": "lâmina %s" % (item + 1),
+                     "fundo_imagem_esquerda": "lâmina %s (pág. esquerda)" % (item + 1),
+                     "fundo_imagem_direita": "lâmina %s (pág. direita)" % (item + 1)}[ch_img]
+        self.registrar("Fundo da %s: %s" % (nome_alvo, Path(caminho).name))
         return True
 
     def aplicar_fundo_em_todas(self, caminho):
         if not self.projeto["laminas"]:
             return
         self.marcar_historico()
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
         for lamina in self.projeto["laminas"]:
             dados = fundo_imagem_padrao()
-            dados.update(proj.copia(lamina.get("fundo_imagem") or {}))
+            dados.update(proj.copia(lamina.get(ch_img) or lamina.get("fundo_imagem") or {}))
             dados["caminho"] = str(Path(caminho))
-            lamina["fundo_imagem"] = dados
+            lamina[ch_img] = dados
         self.atualizar_tudo()
         self.registrar("Fundo %s em todas as %s lâminas." % (Path(caminho).name, len(self.projeto["laminas"])))
 
     def fundo_imagem_em_todas(self):
         """A imagem e todos os ajustes do fundo aberto copiados para as lâminas."""
         dono = self._dono_do_fundo()
-        dados = (dono or {}).get("fundo_imagem")
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados = (dono or {}).get(ch_img)
         if not dados or not self.projeto["laminas"]:
             return
         self.marcar_historico()
         for lamina in self.projeto["laminas"]:
-            lamina["fundo_imagem"] = proj.copia(dados)
+            lamina[ch_img] = proj.copia(dados)
+            if dono.get("fundo_fusao") is not None:
+                lamina["fundo_fusao"] = dono.get("fundo_fusao")
         self.atualizar_tudo()
         self.registrar("Fundo e ajustes copiados para as %s lâminas." % len(self.projeto["laminas"]))
 
@@ -4386,7 +4707,7 @@ class Aplicativo:
         self.rotulo_pasta_fundos.configure(text=texto)
 
     def _fundo_atual_normalizado(self):
-        dados = (self._dono_do_fundo() or {}).get("fundo_imagem") or {}
+        dados = self._dados_fundo_imagem_ativo() or {}
         return normalizar_caminho(dados["caminho"]) if dados.get("caminho") else None
 
     def _galeria_pressionou(self, caminho, evento):
@@ -4398,7 +4719,9 @@ class Aplicativo:
             return
         alvo = self.root.winfo_containing(evento.x_root, evento.y_root)
         if alvo is self.canvas:
-            if self._dentro_da_lamina(evento.x_root - self.canvas.winfo_rootx(), evento.y_root - self.canvas.winfo_rooty()):
+            cx = evento.x_root - self.canvas.winfo_rootx()
+            cy = evento.y_root - self.canvas.winfo_rooty()
+            if self._dentro_da_lamina(cx, cy):
                 self.aplicar_fundo_em(a["caminho"])
         elif alvo is self.canvas_timeline:
             item = self._timeline_em(self._eixo_tl_root(evento.x_root, evento.y_root))
@@ -4407,7 +4730,11 @@ class Aplicativo:
 
     def _galeria_menu(self, caminho, evento):
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Aplicar nesta lâmina", command=lambda: self.aplicar_fundo_em(caminho))
+        menu.add_command(label="Aplicar no alvo atual (%s)" % self.fundo_alvo.get(), command=lambda: self.aplicar_fundo_em(caminho))
+        menu.add_command(label="Aplicar na Lâmina inteira", command=lambda: (self.fundo_alvo.set("lamina"), self.aplicar_fundo_em(caminho, alvo="lamina")))
+        menu.add_command(label="Aplicar na Página Esquerda", command=lambda: (self.fundo_alvo.set("esquerda"), self.aplicar_fundo_em(caminho, alvo="esquerda")))
+        menu.add_command(label="Aplicar na Página Direita", command=lambda: (self.fundo_alvo.set("direita"), self.aplicar_fundo_em(caminho, alvo="direita")))
+        menu.add_separator()
         menu.add_command(label="Aplicar em todas as lâminas", command=lambda: self.aplicar_fundo_em_todas(caminho))
         menu.add_command(label="Ajustar cor...", command=lambda: self.abrir_editor_fundo(caminho))
         menu.add_separator()
@@ -4488,19 +4815,10 @@ class Aplicativo:
             return
         inicio = time.perf_counter()
         frente = self._camada_frente[1]
-        base = Image.new("RGBA", frente.size, cor_rgb(dono.get("fundo")) + (255,))
-        dados = dono.get("fundo_imagem")
-        if dados and dados.get("caminho"):
-            chave_base = (normalizar_caminho(dados["caminho"]), dados.get("modo"), bool(dados.get("pb")), frente.size)
-            if not self._fundo_base_cache or self._fundo_base_cache[0] != chave_base:
-                try:
-                    camada = fundo_posicionado(dados, frente.size, rapido=True)
-                except (OSError, ValueError):
-                    camada = None
-                self._fundo_base_cache = (chave_base, camada)
-            camada = self._fundo_base_cache[1]
-            if camada is not None:
-                base.alpha_composite(acabar_fundo(camada, dados))
+        base = compor_fundo_completo(
+            frente.size, dono.get("fundo", "#ffffff"),
+            dono.get("fundo_imagem"), rapido=True, opcoes_pagina=dono
+        )
         base.alpha_composite(frente)
         self._tk_previa_fundo = ImageTk.PhotoImage(base.convert("RGB"))
         _dw, _dh, ox, oy = self._geo
@@ -4515,10 +4833,16 @@ class Aplicativo:
 
     def tirar_imagem_fundo(self):
         dono = self._dono_do_fundo()
-        if dono is None or not dono.get("fundo_imagem"):
+        if dono is None:
+            return
+        ch_cor, ch_img = self._chaves_fundo_alvo()
+        tem_algo = bool(dono.get(ch_img) or (ch_cor != "fundo" and dono.get(ch_cor)))
+        if not tem_algo:
             return
         self.marcar_historico()
-        dono.pop("fundo_imagem", None)
+        dono.pop(ch_img, None)
+        if ch_cor != "fundo":
+            dono.pop(ch_cor, None)
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
 
@@ -4526,7 +4850,8 @@ class Aplicativo:
         if self._carregando_fundo:
             return
         dono = self._dono_do_fundo()
-        dados = (dono or {}).get("fundo_imagem")
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados = (dono or {}).get(ch_img)
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
         if not dados:
@@ -4537,22 +4862,29 @@ class Aplicativo:
             return
         if marcar:
             self.marcar_historico()
-        dono["fundo_imagem"] = novo
+        dono[ch_img] = novo
         self.fundo_ajustado(final=marcar)
 
     def _atualizar_fundo_ui(self):
         if not hasattr(self, "rotulo_fundo"):
             return
         dono = self._dono_do_fundo()
+        alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
+        sufixo_alvo = {"lamina": "", "esquerda": " · Pág. Esq.", "direita": " · Pág. Dir."}.get(alvo, "")
         if dono is None:
             self.rotulo_fundo.configure(text="Fundo")
         else:
-            self.rotulo_fundo.configure(text="Fundo da lâmina %s" % (self.atual + 1))
-        self.amostra_fundo.configure(bg=cor_hex((dono or {}).get("fundo", "#ffffff")))
-        dados = (dono or {}).get("fundo_imagem")
+            self.rotulo_fundo.configure(text="Fundo da lâmina %s%s" % (self.atual + 1, sufixo_alvo))
+        self.amostra_fundo.configure(bg=cor_hex(self._cor_fundo_ativa(dono)))
+        dados = self._dados_fundo_imagem_ativo(dono)
+        fusao_val = int(round(float((dono or {}).get("fundo_fusao") or 0)))
         self._carregando_fundo = True
         try:
-            if dados:
+            if hasattr(self, "fundo_fusao"):
+                self.fundo_fusao.set(fusao_val)
+            if hasattr(self, "rotulo_fundo_fusao"):
+                self.rotulo_fundo_fusao.configure(text="%d%%" % fusao_val)
+            if dados and dados.get("caminho"):
                 base = fundo_imagem_padrao()
                 base.update(dados)
                 faltando = not Path(base["caminho"]).is_file()
@@ -4562,9 +4894,12 @@ class Aplicativo:
                 self.fundo_desfoque.set(base["desfoque"])
                 self.fundo_pb.set(bool(base["pb"]))
             else:
-                self.rotulo_fundo_imagem.configure(text="Sem imagem: só a cor.")
+                if alvo in ("esquerda", "direita") and not (dono or {}).get("fundo_" + alvo):
+                    self.rotulo_fundo_imagem.configure(text="Usando o fundo da lâmina inteira (escolha cor ou imagem para separar esta página).")
+                else:
+                    self.rotulo_fundo_imagem.configure(text="Sem imagem: só a cor.")
             for controle in self._controles_fundo:
-                controle.state(["!disabled"] if dados else ["disabled"])
+                controle.state(["!disabled"] if (dados and dados.get("caminho")) else ["disabled"])
         finally:
             self._carregando_fundo = False
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
@@ -4575,13 +4910,16 @@ class Aplicativo:
 
     def _avisar_fundo_faltando(self):
         dono = self._dono_do_fundo()
-        dados = (dono or {}).get("fundo_imagem")
-        if not dados or not dados.get("caminho"):
+        if not dono:
             return
-        chave = normalizar_caminho(dados["caminho"])
-        if chave not in self._fundos_avisados and not Path(dados["caminho"]).is_file():
-            self._fundos_avisados.add(chave)
-            self.registrar("Imagem de fundo não encontrada (a lâmina sai só com a cor): %s" % dados["caminho"])
+        for ch_img in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
+            dados = dono.get(ch_img)
+            if not dados or not dados.get("caminho"):
+                continue
+            chave = normalizar_caminho(dados["caminho"])
+            if chave not in self._fundos_avisados and not Path(dados["caminho"]).is_file():
+                self._fundos_avisados.add(chave)
+                self.registrar("Imagem de fundo não encontrada (a lâmina sai só com a cor): %s" % dados["caminho"])
 
     # ==================================================================
     # Tela de edição

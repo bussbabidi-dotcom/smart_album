@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Monta a imagem de uma lâmina: fundo, fotos nos espaços e moldes PNG por cima."""
+"""Monta a imagem de uma lâmina: fundo (inteiro, por página ou misturado com fusão), fotos nos espaços e moldes PNG por cima."""
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
@@ -63,12 +63,12 @@ def ajustar_cores(img, ajustes):
 
 
 def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
-    """A imagem de fundo já no tamanho da lâmina e no modo escolhido, antes de ajustes, desfoque e opacidade."""
+    """A imagem de fundo já no tamanho pedido e no modo escolhido, antes de ajustes, desfoque e opacidade."""
     dados = fundo_imagem_padrao()
     dados.update(fundo_imagem or {})
     if not dados.get("caminho"):
         return None
-    W, H = int(tamanho[0]), int(tamanho[1])
+    W, H = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
     if rapido:
         fonte = analise.imagem_para(dados["caminho"], max(W, H))
     else:
@@ -94,14 +94,25 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
     return camada
 
 
+def raio_desfoque_fundo(desfoque, largura):
+    """
+    Curva suave e calibrada para o desfoque (0 a 50):
+    Em 10 produz um desfoque leve e natural; chega ao máximo suavemente em 50.
+    """
+    d = max(0.0, min(50.0, float(desfoque or 0)))
+    if d <= 0:
+        return 0.0
+    return ((d / 50.0) ** 1.25) * (float(largura) * 0.011)
+
+
 def acabar_fundo(camada, fundo_imagem):
-    """Ajustes de cor, desfoque (milésimos da largura) e opacidade sobre a camada posicionada."""
+    """Ajustes de cor, desfoque suave calibrado e opacidade sobre a camada posicionada."""
     dados = fundo_imagem_padrao()
     dados.update(fundo_imagem or {})
     entrada = camada
     camada = ajustar_cores(camada, ajustes_fundo(dados))
-    raio = float(dados.get("desfoque") or 0) / 1000.0 * camada.width
-    if raio >= 0.5:
+    raio = raio_desfoque_fundo(dados.get("desfoque"), camada.width)
+    if raio >= 0.4:
         camada = camada.filter(ImageFilter.GaussianBlur(raio))
     opacidade = max(0, min(100, int(dados.get("opacidade", 100))))
     if opacidade < 100:
@@ -115,13 +126,123 @@ def acabar_fundo(camada, fundo_imagem):
 
 def imagem_de_fundo(fundo_imagem, tamanho, rapido=False):
     """
-    Camada RGBA do tamanho da lâmina com a imagem de fundo, ou None sem imagem.
-    desfoque é em milésimos da largura, para a prévia e a exportação ficarem iguais.
+    Camada RGBA do tamanho dado com a imagem de fundo, ou None sem imagem.
     """
     camada = fundo_posicionado(fundo_imagem, tamanho, rapido)
     if camada is None:
         return None
     return acabar_fundo(camada, fundo_imagem)
+
+
+def _mascara_fusao_horizontal(W, H, fusao):
+    """
+    Máscara L de tamanho (W, H) para transição entre Página Esquerda (0) e Página Direita (255).
+    Quando fusao == 0, corte seco no meio (W // 2).
+    Quando fusao > 0 (até 100), degradê suave centrado na dobra (W / 2).
+    """
+    meio = W / 2.0
+    zona = max(0.0, min(100.0, float(fusao or 0))) / 100.0 * (W * 0.36)
+    linha = Image.new("L", (W, 1))
+    px = linha.load()
+    if zona < 1.0:
+        corte = W // 2
+        for x in range(W):
+            px[x, 0] = 0 if x < corte else 255
+    else:
+        x0 = meio - zona
+        larg_z = max(1.0, 2.0 * zona)
+        for x in range(W):
+            if x <= x0:
+                px[x, 0] = 0
+            elif x >= meio + zona:
+                px[x, 0] = 255
+            else:
+                t = (x - x0) / larg_z
+                suave = t * t * (3.0 - 2.0 * t)
+                px[x, 0] = int(round(suave * 255.0))
+    return linha.resize((W, H), Image.NEAREST)
+
+
+def _renderizar_lado_em_lamina(cor_base, fundo_img_lamina, cor_lado, fundo_img_lado, tamanho, lado, fusao, rapido=False):
+    """
+    Monta uma imagem RGBA (W, H) representando o fundo de uma das páginas (esquerda ou direita),
+    posicionada para que, com fusão suave no meio, a imagem da página cubra até a faixa de transição.
+    """
+    W, H = int(tamanho[0]), int(tamanho[1])
+    cor_efetiva = cor_rgb(cor_lado if cor_lado else cor_base)
+    base = Image.new("RGBA", (W, H), cor_efetiva + (255,))
+    # Se o lado não tem imagem própria nem cor própria, usa o fundo da lâmina inteira como base
+    if not fundo_img_lado and not cor_lado and fundo_img_lamina:
+        try:
+            cam_inteira = imagem_de_fundo(fundo_img_lamina, (W, H), rapido)
+            if cam_inteira is not None:
+                base.alpha_composite(cam_inteira)
+        except (OSError, ValueError):
+            pass
+        return base
+
+    if fundo_img_lado and fundo_img_lado.get("caminho"):
+        zona = int(round(max(0.0, min(100.0, float(fusao or 0))) / 100.0 * (W * 0.36)))
+        meio = W // 2
+        if lado == "esquerda":
+            x0, x1 = 0, min(W, meio + zona)
+        else:
+            x0, x1 = max(0, meio - zona), W
+        larg_p = max(1, x1 - x0)
+        try:
+            cam_p = imagem_de_fundo(fundo_img_lado, (larg_p, H), rapido)
+            if cam_p is not None:
+                folha = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                folha.paste(cam_p, (x0, 0))
+                base.alpha_composite(folha)
+        except (OSError, ValueError):
+            pass
+    return base
+
+
+def tem_fundo_por_pagina(dono):
+    if not isinstance(dono, dict):
+        return False
+    return bool(
+        dono.get("fundo_esquerda")
+        or dono.get("fundo_direita")
+        or (dono.get("fundo_imagem_esquerda") or {}).get("caminho")
+        or (dono.get("fundo_imagem_direita") or {}).get("caminho")
+    )
+
+
+def compor_fundo_completo(tamanho, fundo, fundo_imagem=None, rapido=False, opcoes_pagina=None):
+    """
+    Gera a base RGBA do tamanho da lâmina combinando o fundo da lâmina inteira
+    e eventuais fundos por página (esquerda / direita) com fusão suave no meio.
+    """
+    W, H = int(tamanho[0]), int(tamanho[1])
+    cor = cor_rgb(fundo)
+    base = Image.new("RGBA", (W, H), cor + (255,))
+    try:
+        camada = imagem_de_fundo(fundo_imagem, (W, H), rapido)
+        if camada is not None:
+            base.alpha_composite(camada)
+    except (OSError, ValueError):
+        pass
+
+    if opcoes_pagina and tem_fundo_por_pagina(opcoes_pagina):
+        fusao = float(opcoes_pagina.get("fundo_fusao") or 0)
+        esq = _renderizar_lado_em_lamina(
+            fundo, fundo_imagem,
+            opcoes_pagina.get("fundo_esquerda"),
+            opcoes_pagina.get("fundo_imagem_esquerda"),
+            (W, H), "esquerda", fusao, rapido
+        )
+        dir_ = _renderizar_lado_em_lamina(
+            fundo, fundo_imagem,
+            opcoes_pagina.get("fundo_direita"),
+            opcoes_pagina.get("fundo_imagem_direita"),
+            (W, H), "direita", fusao, rapido
+        )
+        mascara = _mascara_fusao_horizontal(W, H, fusao)
+        base = Image.composite(dir_, esq, mascara)
+    return base
 
 
 def colar_sobreposicoes(base, sobreposicoes):
@@ -142,7 +263,7 @@ def colar_sobreposicoes(base, sobreposicoes):
 
 
 def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco=None, fundo_imagem=None,
-           px_por_mm=None):
+           px_por_mm=None, opcoes_pagina=None):
     """
     Imagem RGB com as fotos nos espaços. ao_espaco(indice, espaco, erro) é
     chamado para cada espaço, com o erro quando a foto não abre. A imagem de
@@ -150,13 +271,10 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
     onde não há foto (a camada da frente, para a prévia rápida do fundo).
     """
     cor = cor_rgb(fundo)
-    base = Image.new("RGBA", tamanho, (0, 0, 0, 0) if fundo is None else cor + (255,))
-    try:
-        camada = imagem_de_fundo(fundo_imagem, tamanho, rapido)
-        if camada is not None:
-            base.alpha_composite(camada)
-    except (OSError, ValueError):
-        pass
+    if fundo is None:
+        base = Image.new("RGBA", tamanho, (0, 0, 0, 0))
+    else:
+        base = compor_fundo_completo(tamanho, fundo, fundo_imagem, rapido, opcoes_pagina=opcoes_pagina)
     for indice, espaco in enumerate(espacos):
         foto = espaco.get("foto")
         if not foto:

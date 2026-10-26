@@ -90,7 +90,7 @@ def renderizar_lamina(lamina, produto, info, largura=None, guias=False, rapido=F
     img = compor(
         tamanho, None if sem_fundo else lamina.get("fundo", "#ffffff"), lamina.get("espacos", []),
         lamina.get("sobreposicoes", []), info, rapido, ao_espaco, None if sem_fundo else lamina.get("fundo_imagem"),
-        tamanho[0] / float(lamina_mm(produto)[0]),
+        tamanho[0] / float(lamina_mm(produto)[0]), opcoes_pagina=None if sem_fundo else lamina,
     )
     if guias and not sem_fundo:
         _guias_lamina(img, produto)

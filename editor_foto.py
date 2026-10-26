@@ -3,8 +3,10 @@
 Tela de edição da foto (janela própria, pode ficar aberta ao lado).
 
 Mostra a foto grande com a moldura de corte na proporção do espaço.
-Arrastar move o corte, a rodinha dá zoom. Os ajustes ficam no projeto e
-só são aplicados na exportação; a foto original não é alterada aqui.
+Arrastar move o corte, a rodinha dá zoom. Inclui controles completos
+estilo Lightroom (Temperatura, Matiz, Exposição, Brilho, Contraste,
+Realces, Sombras, Vibração, Saturação, Nitidez, Vinheta e P&B).
+Os ajustes ficam no projeto e só são aplicados no álbum; a foto original não é alterada.
 """
 
 import math
@@ -20,18 +22,33 @@ import recorte
 import tema
 from composicao import rosto_de
 
-LADO_PREVIA_FINAL = 300
+LADO_PREVIA_FINAL = 280
 ZOOM_MAXIMO = recorte.ZOOM_MAXIMO
+
+CONTROLES_LIGHTROOM = (
+    # (chave, rótulo, mínimo, máximo, grupo, dica)
+    ("exposicao", "Exposição", -100, 100, "Luz", "Ajuste geral de exposição fotográfica (EV)"),
+    ("brilho", "Brilho", -100, 100, "Luz", "Clareia ou escurece os meios-tons"),
+    ("contraste", "Contraste", -100, 100, "Luz", "Aumenta ou reduz a separação entre claros e escuros"),
+    ("realces", "Realces", -100, 100, "Luz", "Recupera detalhes nas áreas claras ou intensifica os brilhos"),
+    ("sombras", "Sombras", -100, 100, "Luz", "Clareia ou aprofunda as áreas escuras sem lavar o preto"),
+    ("temperatura", "Temperatura", -100, 100, "Cor", "Balanço de branco: Azul frio (-) <-> Âmbar quente (+)"),
+    ("matiz", "Matiz", -100, 100, "Cor", "Tinta do balanço de branco: Verde (-) <-> Magenta (+)"),
+    ("vibracao", "Vibração", -100, 100, "Cor", "Saturação inteligente que protege tons de pele e cores já vivas"),
+    ("saturacao", "Saturação", -100, 100, "Cor", "Intensidade uniforme de todas as cores da foto"),
+    ("nitidez", "Nitidez", 0, 100, "Efeitos", "Realça a definição de bordas e detalhes finos"),
+    ("vinheta", "Vinheta", -100, 100, "Efeitos", "Escurece (+) ou clareia (-) suavemente os cantos da foto"),
+)
 
 
 class EditorFoto(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        self.title("Editar foto")
+        self.title("Editar foto · Lightroom & Enquadramento")
         self.configure(bg=tema.FUNDO)
-        self.geometry("1180x760")
-        self.minsize(900, 560)
+        self.geometry("1220x820")
+        self.minsize(920, 600)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.alvo = None
         self.espaco = None
@@ -70,81 +87,109 @@ class EditorFoto(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>", self._soltou)
         self.canvas.bind("<MouseWheel>", self._roda)
 
-        lado = ttk.Frame(corpo, padding=10, width=320)
-        lado.pack(side="right", fill="y")
-        lado.pack_propagate(False)
+        # Painel lateral direito com rolagem suave para caber todos os controles Lightroom
+        container_lado = ttk.Frame(corpo, width=348)
+        container_lado.pack(side="right", fill="y")
+        container_lado.pack_propagate(False)
+
+        barra_rol = ttk.Scrollbar(container_lado, orient="vertical")
+        barra_rol.pack(side="right", fill="y")
+        self.canvas_lado = tk.Canvas(container_lado, bg=tema.PAINEL, highlightthickness=0, width=330,
+                                     yscrollcommand=barra_rol.set)
+        self.canvas_lado.pack(side="left", fill="both", expand=True)
+        barra_rol.configure(command=self.canvas_lado.yview)
+
+        lado = ttk.Frame(self.canvas_lado, padding=10)
+        self._janela_lado = self.canvas_lado.create_window((0, 0), window=lado, anchor="nw")
+        lado.bind("<Configure>", lambda e: self.canvas_lado.configure(scrollregion=self.canvas_lado.bbox("all")))
+        self.canvas_lado.bind("<Configure>", lambda e: self.canvas_lado.itemconfigure(self._janela_lado, width=e.width))
 
         nav = ttk.Frame(lado)
         nav.pack(fill="x", pady=(0, 6))
-        ttk.Button(nav, text="◀ Anterior", command=lambda: self.navegar(-1)).pack(side="left")
-        ttk.Button(nav, text="Fechar", command=self.fechar).pack(side="left", expand=True)
-        ttk.Button(nav, text="Próxima ▶", command=lambda: self.navegar(1)).pack(side="right")
-        self.rotulo_nome = ttk.Label(lado, text="", style="Titulo.TLabel", wraplength=290)
+        ttk.Button(nav, text="◀ Anterior", style="Compacto.TButton", command=lambda: self.navegar(-1)).pack(side="left")
+        ttk.Button(nav, text="Fechar", style="Compacto.TButton", command=self.fechar).pack(side="left", expand=True, padx=4)
+        ttk.Button(nav, text="Próxima ▶", style="Compacto.TButton", command=lambda: self.navegar(1)).pack(side="right")
+
+        self.rotulo_nome = ttk.Label(lado, text="", style="Titulo.TLabel", wraplength=300)
         self.rotulo_nome.pack(anchor="w")
         self.rotulo_lugar = ttk.Label(lado, text="", style="Fraco.TLabel")
-        self.rotulo_lugar.pack(anchor="w", pady=(0, 6))
-        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=200, bg=tema.PAINEL_2, highlightthickness=0)
-        self.previa.pack(pady=(0, 8))
+        self.rotulo_lugar.pack(anchor="w", pady=(0, 4))
+        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=160, bg=tema.PAINEL_2, highlightthickness=0)
+        self.previa.pack(pady=(0, 6))
 
-        corte = ttk.LabelFrame(lado, text="Corte", padding=6)
+        corte = ttk.LabelFrame(lado, text="Corte e Enquadramento", padding=6)
         corte.pack(fill="x", pady=3)
         self.zoom = tk.DoubleVar(value=0)
         linha = ttk.Frame(corte)
         linha.pack(fill="x")
-        ttk.Label(linha, text="Zoom", width=10).pack(side="left")
+        ttk.Label(linha, text="Zoom", width=11).pack(side="left")
         self.escala_zoom = ttk.Scale(linha, from_=0, to=100, variable=self.zoom, command=self._mudou_zoom)
         self.escala_zoom.pack(side="left", fill="x", expand=True)
         self.escala_zoom.bind("<ButtonPress-1>", lambda e: self._marcar(True))
         botoes = ttk.Frame(corte)
         botoes.pack(fill="x", pady=(4, 0))
-        ttk.Button(botoes, text="Centralizar no rosto", command=self.centralizar_rosto).pack(side="left", fill="x", expand=True)
-        botoes2 = ttk.Frame(corte)
-        botoes2.pack(fill="x", pady=(4, 0))
-        ttk.Button(botoes2, text="Preencher", command=self.preencher).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(botoes2, text="Encaixar inteira", command=self.encaixar).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        ttk.Button(botoes, text="Centralizar no rosto", style="Compacto.TButton", command=self.centralizar_rosto).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(botoes, text="Preencher", style="Compacto.TButton", command=self.preencher).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(botoes, text="Encaixar inteira", style="Compacto.TButton", command=self.encaixar).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        giro = ttk.LabelFrame(lado, text="Girar", padding=6)
+        giro = ttk.LabelFrame(lado, text="Girar e Endireitar", padding=6)
         giro.pack(fill="x", pady=3)
         botoes3 = ttk.Frame(giro)
-        botoes3.pack(fill="x")
-        ttk.Button(botoes3, text="◀ 90°", command=lambda: self.girar(-90)).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(botoes3, text="90° ▶", command=lambda: self.girar(90)).pack(side="left", fill="x", expand=True, padx=2)
-        ttk.Button(botoes3, text="Espelhar", command=self.espelhar).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        botoes3.pack(fill="x", pady=(0, 3))
+        ttk.Button(botoes3, text="◀ 90°", style="Compacto.TButton", command=lambda: self.girar(-90)).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(botoes3, text="90° ▶", style="Compacto.TButton", command=lambda: self.girar(90)).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(botoes3, text="Espelhar", style="Compacto.TButton", command=self.espelhar).pack(side="left", fill="x", expand=True, padx=(2, 0))
         self.angulo = tk.DoubleVar(value=0)
-        self._linha_escala(giro, "Endireitar", self.angulo, -15, 15, "angulo")
+        self._linha_escala(giro, "Endireitar", self.angulo, -15, 15, "angulo", "Gira suavemente em graus (duplo clique zera)")
 
-        ajustes = ttk.LabelFrame(lado, text="Ajustes (só no álbum)", padding=6)
-        ajustes.pack(fill="x", pady=3)
-        self.brilho = tk.DoubleVar(value=0)
-        self.contraste = tk.DoubleVar(value=0)
-        self.saturacao = tk.DoubleVar(value=0)
+        # Grupos estilo Lightroom: Luz, Cor e Efeitos
+        quadros_lr = {}
+        for nome_grupo, titulo_grupo in (
+            ("Luz", "Luz (Lightroom)"),
+            ("Cor", "Cor e Balanço de Branco"),
+            ("Efeitos", "Nitidez e Vinheta"),
+        ):
+            qf = ttk.LabelFrame(lado, text=titulo_grupo, padding=6)
+            qf.pack(fill="x", pady=3)
+            quadros_lr[nome_grupo] = qf
+
+        for chave, texto_rot, de, ate, grupo, dica_txt in CONTROLES_LIGHTROOM:
+            var = tk.DoubleVar(value=0)
+            setattr(self, chave, var)
+            self._linha_escala(quadros_lr[grupo], texto_rot, var, de, ate, chave, dica_txt)
+
         self.pb = tk.BooleanVar(value=False)
-        self._linha_escala(ajustes, "Brilho", self.brilho, -100, 100, "brilho")
-        self._linha_escala(ajustes, "Contraste", self.contraste, -100, 100, "contraste")
-        self._linha_escala(ajustes, "Saturação", self.saturacao, -100, 100, "saturacao")
-        linha_pb = ttk.Frame(ajustes)
+        linha_pb = ttk.Frame(quadros_lr["Cor"])
         linha_pb.pack(fill="x", pady=(4, 0))
-        ttk.Checkbutton(linha_pb, text="Preto e branco", variable=self.pb, command=self._mudou_pb).pack(side="left")
-        ttk.Button(linha_pb, text="Zerar ajustes", command=self.zerar_ajustes).pack(side="right")
+        ttk.Checkbutton(linha_pb, text="Preto e branco (P&B)", variable=self.pb, command=self._mudou_pb).pack(side="left")
 
-        tratar = ttk.LabelFrame(lado, text="Tratar a foto original", padding=6)
+        linha_zerar = ttk.Frame(lado)
+        linha_zerar.pack(fill="x", pady=(4, 3))
+        ttk.Button(linha_zerar, text="↺ Zerar todos os ajustes de luz e cor", style="Compacto.TButton",
+                   command=self.zerar_ajustes).pack(fill="x")
+
+        tratar = ttk.LabelFrame(lado, text="Tratar arquivo original externo", padding=6)
         tratar.pack(fill="x", pady=3)
         linha = ttk.Frame(tratar)
         linha.pack(fill="x")
-        ttk.Button(linha, text="Photoshop", command=self._photoshop).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        ttk.Button(linha, text="Lightroom", command=self._lightroom).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        ttk.Button(linha, text="Photoshop", style="Compacto.TButton", command=self._photoshop).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(linha, text="Lightroom", style="Compacto.TButton", command=self._lightroom).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-    def _linha_escala(self, pai, texto, variavel, de, ate, chave):
+    def _linha_escala(self, pai, texto, variavel, de, ate, chave, dica_txt=None):
         linha = ttk.Frame(pai)
         linha.pack(fill="x", pady=1)
-        ttk.Label(linha, text=texto, width=10).pack(side="left")
-        valor = ttk.Label(linha, text="0", width=4, style="Fraco.TLabel")
+        rot = ttk.Label(linha, text=texto, width=11)
+        rot.pack(side="left")
+        valor = ttk.Label(linha, text="0", width=4, anchor="e", style="Fraco.TLabel")
         valor.pack(side="right")
         escala = ttk.Scale(linha, from_=de, to=ate, variable=variavel,
                            command=lambda v, c=chave, r=valor: self._mudou_escala(c, v, r))
-        escala.pack(side="left", fill="x", expand=True)
+        escala.pack(side="left", fill="x", expand=True, padx=(2, 4))
         escala.bind("<ButtonPress-1>", lambda e: self._marcar(True))
         escala.bind("<Double-Button-1>", lambda e, c=chave, var=variavel: self._zerar_um(c, var))
+        if dica_txt:
+            tema.dica(rot, dica_txt + "\n(Duplo clique na barra para zerar)")
+            tema.dica(escala, dica_txt + "\n(Duplo clique na barra para zerar)")
         setattr(self, "_rotulo_" + chave, valor)
 
     # ------------------------------------------------------------
@@ -225,9 +270,11 @@ class EditorFoto(tk.Toplevel):
             ed = recorte.edicao_padrao()
             ed.update(self.ed)
             self.zoom.set(self._zoom_para_escala(self._corte()["zoom"]))
-            for chave in ("angulo", "brilho", "contraste", "saturacao"):
-                getattr(self, chave).set(float(ed[chave] or 0))
-                getattr(self, "_rotulo_" + chave).configure(text="%d" % round(float(ed[chave] or 0)))
+            for chave in ("angulo",) + recorte.CHAVES_AJUSTES:
+                val = float(ed.get(chave) or 0)
+                getattr(self, chave).set(val)
+                formato = "%.1f" % val if chave == "angulo" and abs(val - round(val)) > 0.05 else "%d" % round(val)
+                getattr(self, "_rotulo_" + chave).configure(text=formato)
             self.pb.set(bool(ed["pb"]))
         finally:
             self._sincronizando = False
@@ -239,7 +286,7 @@ class EditorFoto(tk.Toplevel):
     def _agendar_desenho(self):
         if self._agendado:
             self.after_cancel(self._agendado)
-        self._agendado = self.after(30, self._desenhar)
+        self._agendado = self.after(24, self._desenhar)
 
     def _desenhar(self):
         self._agendado = None
@@ -289,8 +336,8 @@ class EditorFoto(tk.Toplevel):
             return
         largura = LADO_PREVIA_FINAL
         altura = int(round(largura / self.aspecto))
-        if altura > 170:
-            altura = 170
+        if altura > 150:
+            altura = 150
             largura = int(round(altura * self.aspecto))
         caixa = recorte.caixa_corte(img.width, img.height, self.aspecto, self._corte())
         fundo = self.app.fundo_do_alvo(self.alvo)
@@ -441,7 +488,7 @@ class EditorFoto(tk.Toplevel):
         if self._fonte is None:
             return
         self._marcar(True)
-        for chave in ("brilho", "contraste", "saturacao"):
+        for chave in recorte.CHAVES_AJUSTES:
             self.ed[chave] = 0
         self.ed["pb"] = False
         self._sincronizar_controles()
