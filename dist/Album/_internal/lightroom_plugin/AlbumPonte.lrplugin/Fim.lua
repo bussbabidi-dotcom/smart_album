@@ -1,0 +1,1 @@
+_G.albumPonteAtivo = false

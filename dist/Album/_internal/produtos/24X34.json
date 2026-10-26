@@ -1,0 +1,23 @@
+{
+  "nome": "24X34",
+  "descricao": "Álbum 24x34 cm, vertical (lâmina aberta 48x34)",
+  "pagina_mm": [240, 340],
+  "paginas_por_lamina": 2,
+  "dpi": 300,
+  "sangria_mm": 3,
+  "seguranca_mm": 8,
+  "dobra_mm": 10,
+  "margem_mm": 8,
+  "espacamento_mm": 4,
+  "fotos_por_lamina": 4,
+  "max_fotos_lamina": 12,
+  "laminas_min": 10,
+  "laminas_max": 40,
+  "icc": "",
+  "capa": {
+    "frente_mm": [245, 345],
+    "sangria_mm": 15,
+    "lombada_base_mm": 4,
+    "lombada_por_lamina_mm": 0.6
+  }
+}

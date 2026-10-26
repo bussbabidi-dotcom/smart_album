@@ -1,0 +1,9 @@
+{
+  "id": "pagina_1_borda",
+  "nome": "1 foto com borda",
+  "escopo": "pagina",
+  "espacos": [
+    {"x": 0.08, "y": 0.08, "w": 0.84, "h": 0.84}
+  ],
+  "molde_png": null
+}

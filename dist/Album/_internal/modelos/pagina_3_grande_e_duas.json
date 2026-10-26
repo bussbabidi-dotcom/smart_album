@@ -1,0 +1,11 @@
+{
+  "id": "pagina_3_grande_e_duas",
+  "nome": "3 fotos: uma grande e duas embaixo",
+  "escopo": "pagina",
+  "espacos": [
+    {"x": 0.05, "y": 0.05, "w": 0.9, "h": 0.53},
+    {"x": 0.05, "y": 0.6, "w": 0.44, "h": 0.35},
+    {"x": 0.51, "y": 0.6, "w": 0.44, "h": 0.35}
+  ],
+  "molde_png": null
+}
