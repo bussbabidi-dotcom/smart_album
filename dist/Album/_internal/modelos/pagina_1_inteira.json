@@ -1,9 +1,0 @@
-{
-  "id": "pagina_1_inteira",
-  "nome": "1 foto, página inteira",
-  "escopo": "pagina",
-  "espacos": [
-    {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-  ],
-  "molde_png": null
-}
