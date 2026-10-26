@@ -369,33 +369,39 @@ class Aplicativo:
         self.rotulo_produto.pack(side="left")
         self.dica_produto = tema.Dica(self.rotulo_produto, "")
 
-        self.botao_exportar = self._botao(topo, "Exportar...", self.abrir_exportar,
-                                          "Formato, pasta, quais lâminas e nomes dos arquivos (Ctrl+E)",
+        self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
+                                          "Exportar lâminas: formato, pasta e nomes dos arquivos (Ctrl+E)",
                                           "PrimarioCompacto.TButton")
-        self.botao_exportar.pack(side="right", padx=(4, 0))
-        self.botao_tratar = self._botao(topo, "Tratar fotos", self.abrir_tratamento,
-                                        "Photoshop (editar ou rodar Ação) e Lightroom (preset)")
-        self.botao_tratar.pack(side="right", padx=4)
-        self.botao_capa = self._botao(topo, "Capa ▸", self.abrir_programa_capa,
-                                      "Abrir o programa de capas: a capa continua lá\n"
-                                      "(Arquivo > Escolher o programa de capas... para trocar)")
-        self.botao_capa.pack(side="right", padx=(4, 0))
+        self.botao_exportar.pack(side="right", padx=(3, 0))
+        self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
+                                        "Tratar fotos no Photoshop (editar/Ação) ou Lightroom (preset)",
+                                        "Compacto.TButton")
+        self.botao_tratar.pack(side="right", padx=2)
+        self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
+                                      "Abrir o programa de capas externo\n"
+                                      "(Arquivo > Escolher o programa de capas... para trocar)",
+                                      "Compacto.TButton")
+        self.botao_capa.pack(side="right", padx=2)
 
-        guias = ttk.Checkbutton(topo, text="Guias", variable=self.guias, command=self.desenhar_lamina,
-                                style="Compacto.TCheckbutton")
-        guias.pack(side="right", padx=(6, 4))
-        tema.dica(guias, "Mostrar sangria, área de segurança e dobra")
-        layout = ttk.Checkbutton(topo, text="Layout", variable=self.editar_layout, style="Alternar.Toolbutton",
+        guias = ttk.Checkbutton(topo, text="⊞", variable=self.guias, command=self.desenhar_lamina,
+                                style="Alternar.Toolbutton")
+        guias.pack(side="right", padx=2)
+        tema.dica(guias, "Guias: mostrar sangria, área de segurança e dobra central")
+        layout = ttk.Checkbutton(topo, text="⬚", variable=self.editar_layout, style="Alternar.Toolbutton",
                                  command=self._mudou_modo_layout)
-        layout.pack(side="right", padx=(6, 0))
-        tema.dica(layout, "Editar layout: mover e redimensionar os espaços e moldes\n"
-                          "Também: duplo clique na lâmina ou tecla L. Esc sai.")
-        ttk.Frame(topo, width=8).pack(side="right")
-        self._botao(topo, "↷", self.refazer, "Refazer (Ctrl+Y)", "Mini.TButton", width=2).pack(side="right", padx=1)
-        self._botao(topo, "↶", self.desfazer, "Desfazer (Ctrl+Z)", "Mini.TButton", width=2).pack(side="right", padx=1)
-        ttk.Frame(topo, width=8).pack(side="right")
-        self._botao(topo, "Diagramar", self.abrir_diagramacao,
-                    "Diagramar o álbum inteiro automaticamente", "PrimarioCompacto.TButton").pack(side="right", padx=1)
+        layout.pack(side="right", padx=2)
+        tema.dica(layout, "Modo Layout (L): mover e redimensionar espaços e moldes\n"
+                          "Duplo clique na lâmina também ativa. Esc sai.")
+        ttk.Frame(topo, width=6).pack(side="right")
+        self._botao(topo, "↷", self.refazer, "Refazer última alteração (Ctrl+Y)", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(topo, "↶", self.desfazer, "Desfazer última alteração (Ctrl+Z)", "Icone.TButton", width=3).pack(side="right", padx=1)
+        ttk.Frame(topo, width=6).pack(side="right")
+        self._botao(topo, "⟳", self.rediagramar_lamina,
+                    "Diagramar esta lâmina de novo (alterna layout proporcional sem distorcer)",
+                    "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(topo, "⊞ Diagramar", self.abrir_diagramacao,
+                    "Diagramar o álbum inteiro automaticamente (preenchendo sem distorcer > 22%)",
+                    "PrimarioCompacto.TButton").pack(side="right", padx=2)
 
     def _montar_menu_exibir(self, menu):
         a = self.arranjo
@@ -425,10 +431,10 @@ class Aplicativo:
     def _montar_status(self, status):
         self.rotulo_status = ttk.Label(status, text="Arraste fotos ou uma pasta para a janela.", style="Fraco.TLabel")
         self.rotulo_status.pack(side="left", fill="x", expand=True)
-        self._botao(status, "Registro", self.mostrar_registro, "Tudo o que o programa avisou").pack(side="right", padx=(6, 0))
-        self.botao_parar = self._botao(status, "Parar", self.parar_tarefa, "Parar a tarefa em andamento", state="disabled")
-        self.botao_parar.pack(side="right", padx=(6, 0))
-        self.barra = ttk.Progressbar(status, length=220, mode="determinate")
+        self._botao(status, "☰", self.mostrar_registro, "Registro de avisos e histórico de eventos", "Icone.TButton", width=3).pack(side="right", padx=(4, 0))
+        self.botao_parar = self._botao(status, "■", self.parar_tarefa, "Parar a tarefa em andamento", "Icone.TButton", width=3, state="disabled")
+        self.botao_parar.pack(side="right", padx=(4, 0))
+        self.barra = ttk.Progressbar(status, length=180, mode="determinate")
         self.barra.pack(side="right")
 
     def _montar_fotos(self, pai):
@@ -446,12 +452,12 @@ class Aplicativo:
         combo.pack(side="left", padx=(10, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.ordenar_fotos())
         tema.dica(combo, "Ordenar as fotos por nome ou pela data em que foram tiradas")
-        self._botao(cabeca, "+ Pasta", self.escolher_pasta, "Adicionar uma pasta de fotos").pack(side="right", padx=1)
-        self._botao(cabeca, "+ Fotos", self.escolher_fotos, "Adicionar fotos").pack(side="right", padx=1)
-        self._botao(cabeca, "− Remover", self.remover_fotos_selecionadas,
-                    "Tirar as fotos selecionadas do projeto, sem apagar os arquivos").pack(side="right", padx=(8, 1))
-        self._botao(cabeca, "Distribuir", self.distribuir_nao_usadas,
-                    "Colocar as fotos não usadas em lâminas novas").pack(side="right", padx=6)
+        self._botao(cabeca, "📁+", self.escolher_pasta, "Adicionar uma pasta inteira de fotos ao projeto", "Icone.TButton", width=4).pack(side="right", padx=1)
+        self._botao(cabeca, "🖼+", self.escolher_fotos, "Adicionar fotos avulsas ao projeto", "Icone.TButton", width=4).pack(side="right", padx=1)
+        self._botao(cabeca, "🗑", self.remover_fotos_selecionadas,
+                    "Remover fotos selecionadas do projeto (não apaga do disco)", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
+        self._botao(cabeca, "⇉", self.distribuir_nao_usadas,
+                    "Distribuir fotos não usadas em lâminas novas automaticamente", "Icone.TButton", width=3).pack(side="right", padx=3)
         barra = ttk.Scrollbar(caixa, orient="horizontal", command=self._rolar_fotos)
         barra.pack(side="bottom", fill="x")
         self.canvas_fotos = tk.Canvas(caixa, height=100, bg=tema.PAINEL, highlightthickness=0)
@@ -681,13 +687,16 @@ class Aplicativo:
             self.desenhar_modelos()
 
     def _secao_sugestoes(self, quadro):
-        ttk.Label(quadro, text="Sugestões para esta lâmina", style="Fraco.TLabel").pack(side="top", anchor="w")
-        espacos = ttk.LabelFrame(quadro, text="Espaçamento", padding=6)
+        cab = ttk.Frame(quadro)
+        cab.pack(side="top", fill="x")
+        ttk.Label(cab, text="SUGESTÕES DE LAYOUT", style="Fraco.TLabel").pack(side="left")
+        self._botao(cab, "💾", self.salvar_modelo,
+                    "Salvar o layout atual desta lâmina como predefinição", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(cab, "⟳", self.rediagramar_lamina,
+                    "Diagramar esta lâmina de novo (alterna composição mantendo proporções)", "Icone.TButton", width=3).pack(side="right", padx=1)
+        espacos = ttk.LabelFrame(quadro, text="Geometria (mm)", padding=6)
         espacos.pack(side="bottom", fill="x", pady=4)
-        ttk.Button(quadro, text="Diagramar esta lâmina de novo", command=self.rediagramar_lamina).pack(side="bottom", fill="x", pady=2)
-        ttk.Button(quadro, text="Salvar layout personalizado...", command=self.salvar_modelo).pack(
-            side="bottom", fill="x", pady=2)
-        self.canvas_sugestoes = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=120)
+        self.canvas_sugestoes = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=130)
         self.canvas_sugestoes.pack(side="top", fill="both", expand=True, pady=(4, 6))
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
@@ -696,17 +705,24 @@ class Aplicativo:
         self.margem_var = tk.DoubleVar()
         self.espacamento_var = tk.DoubleVar()
         self.fotos_lamina_var = tk.IntVar()
-        for texto, var, de, ate, passo in (("Margem (mm)", self.margem_var, 0, 60, 1),
-                                           ("Entre fotos (mm)", self.espacamento_var, 0, 40, 0.5),
-                                           ("Fotos por lâmina", self.fotos_lamina_var, 1, 12, 1)):
+        for texto, dica_txt, var, de, ate, passo in (
+            ("⬚ Margem", "Margem externa da página em milímetros", self.margem_var, 0, 60, 1),
+            ("⇔ Espaço", "Distância entre as fotos em milímetros", self.espacamento_var, 0, 40, 0.5),
+            ("⊞ Fotos/Lâm.", "Quantidade padrão de fotos por lâmina na diagramação", self.fotos_lamina_var, 1, 12, 1)
+        ):
             linha = ttk.Frame(espacos)
             linha.pack(fill="x", pady=1)
-            ttk.Label(linha, text=texto).pack(side="left")
-            ttk.Spinbox(linha, from_=de, to=ate, increment=passo, textvariable=var, width=6,
-                        command=self._mudou_config).pack(side="right")
+            rot = ttk.Label(linha, text=texto)
+            rot.pack(side="left")
+            tema.dica(rot, dica_txt)
+            sp = ttk.Spinbox(linha, from_=de, to=ate, increment=passo, textvariable=var, width=6,
+                             command=self._mudou_config)
+            sp.pack(side="right")
+            tema.dica(sp, dica_txt)
         for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var):
             var.trace_add("write", lambda *a: self.agendar("config", 500, self._mudou_config))
-        ttk.Button(espacos, text="Aplicar em todas as lâminas", command=self.rediagramar_todas).pack(fill="x", pady=(6, 0))
+        self._botao(espacos, "⟳ Aplicar em todas as lâminas", self.rediagramar_todas,
+                    "Recalcular todas as lâminas com esta margem, espaçamento e motor elástico").pack(fill="x", pady=(6, 0))
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
@@ -720,14 +736,17 @@ class Aplicativo:
         ttk.Radiobutton(lado, text="Direita", value=1, variable=self.pagina_modelo).pack(side="left")
         linha = ttk.Frame(quadro)
         linha.pack(side="bottom", fill="x", pady=(2, 0))
-        self._botao(linha, "Importar PNG...", self.importar_png, "Molde PNG com os espaços transparentes").pack(
-            side="left", fill="x", expand=True, padx=(0, 2))
-        self._botao(linha, "Importar pasta...", self.importar_pasta_png, "Todos os PNG de uma pasta").pack(
-            side="left", fill="x", expand=True, padx=(0, 2))
-        self._botao(linha, "Apagar", self.apagar_modelo, "Apagar o modelo selecionado").pack(side="left")
-        ttk.Button(quadro, text="Salvar esta lâmina como modelo...", command=self.salvar_modelo).pack(side="bottom", fill="x", pady=2)
-        ttk.Button(quadro, text="Aplicar modelo na lâmina", style="Primario.TButton",
-                   command=self.aplicar_modelo_selecionado).pack(side="bottom", fill="x", pady=2)
+        self._botao(linha, "✓ Aplicar", self.aplicar_modelo_selecionado,
+                    "Aplicar modelo selecionado na lâmina (ajustando proporções sem distorcer)",
+                    "PrimarioCompacto.TButton").pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(linha, "💾", self.salvar_modelo,
+                    "Salvar o layout atual desta lâmina como modelo", "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(linha, "🖼+", self.importar_png,
+                    "Importar molde PNG com janelas transparentes", "Icone.TButton", width=4).pack(side="left", padx=1)
+        self._botao(linha, "📁+", self.importar_pasta_png,
+                    "Importar todos os moldes PNG de uma pasta", "Icone.TButton", width=4).pack(side="left", padx=1)
+        self._botao(linha, "🗑", self.apagar_modelo,
+                    "Apagar o modelo selecionado", "Icone.TButton", width=3).pack(side="left", padx=(1, 0))
         self.canvas_modelos = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=120)
         self.canvas_modelos.pack(side="top", fill="both", expand=True, pady=6)
         self.canvas_modelos.bind("<ButtonPress-1>", self._modelo_clicado)
@@ -736,41 +755,46 @@ class Aplicativo:
         self.canvas_modelos.bind("<Configure>", lambda e: self.desenhar_modelos())
 
     def _montar_edicao_layout(self, quadro):
-        caixa = ttk.LabelFrame(quadro, text="Editar layout", padding=6)
+        caixa = ttk.LabelFrame(quadro, text="Ferramentas de Espaço", padding=6)
         caixa.pack(side="top", fill="x", pady=(0, 4))
-        ttk.Label(quadro, text="Duplo clique na lâmina liga a edição. Ctrl+clique alterna espaços; Shift+clique "
-                  "seleciona uma faixa. Arraste as alças do contorno do grupo para redimensionar junto. "
-                  "Shift mantém a proporção de um espaço; Alt desliga o ímã.", style="Fraco.TLabel",
-                  wraplength=300, justify="left").pack(side="top", anchor="w", pady=(4, 0))
-        linha = ttk.Frame(caixa)
-        linha.pack(fill="x")
-        alternar = ttk.Checkbutton(linha, text="Editar layout (duplo clique)", variable=self.editar_layout,
+        barra_ic = ttk.Frame(caixa)
+        barra_ic.pack(fill="x", pady=(0, 4))
+        alternar = ttk.Checkbutton(barra_ic, text="⬚ Mover", variable=self.editar_layout,
                                    style="Alternar.Toolbutton", command=self._mudou_modo_layout)
-        alternar.pack(side="left", fill="x", expand=True, padx=(0, 2))
-        tema.dica(alternar, "Também liga com duplo clique na lâmina ou a tecla L. Esc sai.")
-        self._botao(linha, "Editar foto (corte)...", self.editar_foto_selecionada,
-                    "Abre o espaço selecionado para ajustar o corte da foto (Enter)").pack(side="left")
-        linha = ttk.Frame(caixa)
-        linha.pack(fill="x", pady=(4, 0))
-        for texto, comando in (("+ Espaço", self.adicionar_espaco), ("Duplicar", self.duplicar_espaco),
-                               ("Apagar", self.apagar_espaco_selecionado)):
-            ttk.Button(linha, text=texto, command=comando).pack(side="left", fill="x", expand=True, padx=1)
-        linha = ttk.Frame(caixa)
-        linha.pack(fill="x", pady=(2, 0))
-        ttk.Button(linha, text="Trazer p/ frente", command=lambda: self.ordem_espaco(True)).pack(side="left", fill="x", expand=True, padx=1)
-        ttk.Button(linha, text="Mandar p/ trás", command=lambda: self.ordem_espaco(False)).pack(side="left", fill="x", expand=True, padx=1)
-        posicao = ttk.Menubutton(linha, text="Alinhar")
+        alternar.pack(side="left", padx=(0, 2))
+        tema.dica(alternar, "Ferramenta Mover/Transformar Espaços (Tecla L ou duplo clique na lâmina).\n"
+                            "Ctrl+clique seleciona vários; Shift mantém proporção; Alt desliga o ímã.")
+        self._botao(barra_ic, "✂", self.editar_foto_selecionada,
+                    "Recortar / Enquadrar foto dentro do espaço selecionado (Enter)",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "＋", self.adicionar_espaco,
+                    "Adicionar novo espaço de foto na lâmina",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "❐", self.duplicar_espaco,
+                    "Duplicar o espaço selecionado",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "↑", lambda: self.ordem_espaco(True),
+                    "Trazer espaço selecionado para a frente",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "↓", lambda: self.ordem_espaco(False),
+                    "Enviar espaço selecionado para trás",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "🗑", self.apagar_espaco_selecionado,
+                    "Apagar espaço selecionado (reorganiza os demais espaços da página)",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
+        posicao = ttk.Menubutton(barra_ic, text="⊞", style="Compacto.TMenubutton", width=3)
+        tema.dica(posicao, "Alinhar, distribuir ou ajustar proporção do espaço selecionado")
         menu = tk.Menu(posicao, tearoff=0)
-        for texto, acao in (("Centralizar na horizontal (na página)", "centro_h"),
-                            ("Centralizar na vertical", "centro_v"),
-                            ("Preencher a página (respeitando proporção)", "pagina_util"),
-                            ("Usar proporção padrão da foto", "proporcao_foto"),
-                            ("Página inteira (até a sangria)", "pagina"),
-                            ("Lâmina inteira", "lamina"),
-                            ("Igualar o tamanho dos outros a este", "igualar")):
+        for texto, acao in (("⇕ Preencher página útil (sem distorcer)", "pagina_util"),
+                            ("⊡ Usar proporção padrão da foto", "proporcao_foto"),
+                            ("↔ Centralizar na horizontal (na página)", "centro_h"),
+                            ("↕ Centralizar na vertical", "centro_v"),
+                            ("⬒ Página inteira (até a sangria)", "pagina"),
+                            ("▭ Lâmina inteira", "lamina"),
+                            ("＝ Igualar tamanho dos outros a este", "igualar")):
             menu.add_command(label=texto, command=lambda a=acao: self.alinhar_espaco(a))
         posicao["menu"] = menu
-        posicao.pack(side="left", fill="x", expand=True, padx=1)
+        posicao.pack(side="right", padx=(2, 0))
         numeros = ttk.Frame(caixa)
         numeros.pack(fill="x", pady=(4, 0))
         self.num_vars = {}
