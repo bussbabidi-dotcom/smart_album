@@ -247,7 +247,7 @@ class Aplicativo:
         self.fotos_sel = set()
         self.ultima_foto_clicada = None
         self.filtro = tk.StringVar(value="todas")
-        self.pasta_filtro = tk.StringVar(value="Todas as pastas")
+        self.pasta_filtro = tk.StringVar(value="todas")
         self.pastas_recolhidas = set()
         self._itens_painel_fotos = []
         self.igualar_no_grupo = tk.BooleanVar(value=False)
@@ -334,6 +334,7 @@ class Aplicativo:
         self.margem_var = tk.DoubleVar()
         self.espacamento_var = tk.DoubleVar()
         self.fotos_lamina_var = tk.IntVar()
+        self.auto_salvar_var = tk.IntVar(value=5)
 
         topo = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 4))
         topo.pack(side="top", fill="x")
@@ -495,6 +496,7 @@ class Aplicativo:
             ("M:", "Margem externa (mm)", self.margem_var, 0, 60, 1, "mm"),
             ("E:", "Espaçamento (mm)", self.espacamento_var, 0, 40, 0.5, "mm"),
             ("F/L:", "Fotos por lâmina", self.fotos_lamina_var, 1, 12, 1, ""),
+            ("Auto-salvar:", "Intervalo de auto-salvamento do arquivo .album.json local em minutos (0 = desativado)", self.auto_salvar_var, 0, 60, 1, "min"),
         ):
             r = ttk.Label(barra, text=rot_txt, style="Fraco.TLabel")
             r.pack(side="left", padx=(4, 2))
@@ -593,10 +595,12 @@ class Aplicativo:
                             command=self.atualizar_fotos).pack(side="left", padx=(8 if valor == "todas" else 2, 0))
 
         ttk.Label(cabeca, text="📂", style="Fraco.TLabel").pack(side="left", padx=(8, 2))
-        self.combo_pasta_filtro = ttk.Combobox(cabeca, textvariable=self.pasta_filtro, state="readonly", width=15,
+        self.combo_pasta_filtro = ttk.Combobox(cabeca, state="readonly", width=15,
                                                values=["Todas as pastas"])
+        self.combo_pasta = self.combo_pasta_filtro
+        self.combo_pasta_filtro.set("Todas as pastas")
         self.combo_pasta_filtro.pack(side="left", padx=(0, 4))
-        self.combo_pasta_filtro.bind("<<ComboboxSelected>>", lambda e: self.atualizar_fotos())
+        self.combo_pasta_filtro.bind("<<ComboboxSelected>>", self._mudou_filtro_pasta)
         tema.dica(self.combo_pasta_filtro, "Filtrar visualização por pasta carregada (as pastas ficam separadas sem se misturar)")
 
         self.ordem_var = tk.StringVar(value="nome")
@@ -874,7 +878,7 @@ class Aplicativo:
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
         self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
-        for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var):
+        for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
             var.trace_add("write", lambda *a: self.agendar("config", 500, self._mudou_config))
 
     def _secao_modelos(self, quadro):
@@ -1921,6 +1925,14 @@ class Aplicativo:
 
         self._agendados[chave] = self.root.after(ms, rodar)
 
+    def cancelar_agendado(self, chave):
+        anterior = self._agendados.pop(chave, None)
+        if anterior:
+            try:
+                self.root.after_cancel(anterior)
+            except Exception:
+                pass
+
     def registrar(self, texto):
         self.registro.append(texto)
         del self.registro[:-800]
@@ -2109,9 +2121,45 @@ class Aplicativo:
             self.margem_var.set(cfg["margem_mm"])
             self.espacamento_var.set(cfg["espacamento_mm"])
             self.fotos_lamina_var.set(cfg["fotos_por_lamina"])
+            self.auto_salvar_var.set(int(cfg.get("auto_salvar_minutos", 5)))
         finally:
             self._carregando = False
+        self._reagendar_auto_salvar()
         self.atualizar_fundos()
+
+    def _reagendar_auto_salvar(self):
+        self.cancelar_agendado("auto_salvar_json")
+        try:
+            minutos = max(0, int(self._cfg().get("auto_salvar_minutos", 5)))
+        except (TypeError, ValueError):
+            minutos = 5
+        if minutos > 0:
+            self.agendar("auto_salvar_json", minutos * 60 * 1000, self._executar_auto_salvar)
+
+    def _executar_auto_salvar(self):
+        try:
+            if self.projeto.get("fotos") or self.projeto.get("laminas"):
+                caminho = self.caminho_projeto
+                if not caminho:
+                    pasta_base = self.projeto.get("pasta_saida") or self.projeto.get("pasta_fotos")
+                    nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (self.projeto.get("nome") or "album").strip()) or "album"
+                    if pasta_base and Path(pasta_base).parent.exists():
+                        Path(pasta_base).mkdir(parents=True, exist_ok=True)
+                        caminho = str(Path(pasta_base) / (nome_limpo + proj.EXTENSAO))
+                    else:
+                        pasta_auto = PASTA_DADOS / "autosave"
+                        pasta_auto.mkdir(parents=True, exist_ok=True)
+                        caminho = str(pasta_auto / (nome_limpo + proj.EXTENSAO))
+                caminho_salvo = proj.salvar(self.projeto, caminho)
+                if not self.caminho_projeto:
+                    self.caminho_projeto = str(caminho_salvo)
+                self.modificado = False
+                self._atualizar_titulo()
+                self.registrar("Auto-salvamento (.album.json): salvo em %s" % Path(caminho_salvo).name)
+        except Exception as e:
+            self.registrar("Aviso no auto-salvamento: %s" % e)
+        finally:
+            self._reagendar_auto_salvar()
 
     def novo_projeto(self, silencioso=False):
         if not silencioso and not self._confirmar_descartar():
@@ -2168,6 +2216,9 @@ class Aplicativo:
         entrada.adicionar_recente("projeto", caminho)
         self.registrar("Salvo em %s" % caminho)
         return True
+
+    def salvar_projeto_como(self):
+        return self.salvar_projeto(como=True)
 
     def _montar_recentes(self):
         self.menu_recentes.delete(0, "end")
@@ -3006,6 +3057,7 @@ class Aplicativo:
             ),
             "margem_mm": tk.DoubleVar(value=float(cfg["margem_mm"])),
             "espacamento_mm": tk.DoubleVar(value=float(cfg["espacamento_mm"])),
+            "auto_salvar_minutos": tk.IntVar(value=int(cfg.get("auto_salvar_minutos", 5))),
         }
         campos = (
             ("Lâminas desejadas", "laminas_desejadas", 1, self.produto["laminas_max"], 1),
@@ -3013,6 +3065,7 @@ class Aplicativo:
             ("Máximo de fotos por página", "max_fotos_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
             ("Margem externa de segurança (mm)", "margem_mm", 0, 60, 1),
             ("Espaçamento entre fotos (mm)", "espacamento_mm", 0, 40, 0.5),
+            ("Auto-salvamento do .album.json (min, 0 = desligado)", "auto_salvar_minutos", 0, 60, 1),
         )
         for texto, chave, minimo, maximo, passo in campos:
             linha = ttk.Frame(numeros)
@@ -3074,6 +3127,11 @@ class Aplicativo:
             except (tk.TclError, ValueError):
                 pct_c = 22
 
+            try:
+                auto_min = max(0, min(60, int(vars_num["auto_salvar_minutos"].get())))
+            except (tk.TclError, ValueError):
+                auto_min = int(cfg.get("auto_salvar_minutos", 5))
+
             cfg_temp = dict(cfg)
             cfg_temp.update({
                 "laminas_desejadas": lam_des,
@@ -3082,6 +3140,7 @@ class Aplicativo:
                 "max_fotos_lamina": max_pag * paginas,
                 "margem_mm": marg,
                 "espacamento_mm": esp,
+                "auto_salvar_minutos": auto_min,
                 "separar_pastas": bool(separar_pastas_var.get()),
                 "reconhecer_cenarios": bool(cenario_var.get()),
                 "limiar_cenario": lim_cen,
@@ -3326,8 +3385,8 @@ class Aplicativo:
                 texto = "Álbum diagramado: %s lâminas." % len(novas_laminas)
 
             self.espaco_sel = None
-            if hasattr(self, "espacos_selecionados"):
-                self.espacos_selecionados.clear()
+            if hasattr(self, "espacos_sel"):
+                self.espacos_sel.clear()
             if removidas:
                 texto += " %s foto(s) repetida(s) ignorada(s)." % len(removidas)
             self.registrar(texto)
@@ -3469,14 +3528,25 @@ class Aplicativo:
         if getattr(self, "_carregando", False):
             return
         try:
-            cfg = {"margem_mm": float(self.margem_var.get()), "espacamento_mm": float(self.espacamento_var.get()),
-                   "fotos_por_lamina": int(self.fotos_lamina_var.get())}
+            cfg = {
+                "margem_mm": float(self.margem_var.get()),
+                "espacamento_mm": float(self.espacamento_var.get()),
+                "fotos_por_lamina": int(self.fotos_lamina_var.get()),
+                "auto_salvar_minutos": max(0, int(self.auto_salvar_var.get())),
+            }
         except (tk.TclError, ValueError):
             return
         atual = self._cfg()
-        if any(abs(float(cfg[k]) - float(atual[k])) > 1e-9 for k in cfg):
+        mudou_auto = int(cfg["auto_salvar_minutos"]) != int(atual.get("auto_salvar_minutos", 5))
+        if any(abs(float(cfg[k]) - float(atual.get(k, 0))) > 1e-9 for k in cfg):
             self.projeto.setdefault("config", {}).update(cfg)
             self._marcar_modificado()
+            if mudou_auto:
+                self._reagendar_auto_salvar()
+                if cfg["auto_salvar_minutos"] > 0:
+                    self.registrar("Auto-salvamento do .album.json definido para cada %d min." % cfg["auto_salvar_minutos"])
+                else:
+                    self.registrar("Auto-salvamento do .album.json desativado.")
             self.atualizar_sugestoes()
 
     def colocar_foto(self, caminho, li, ei, marcar=True):
@@ -6256,7 +6326,7 @@ class Aplicativo:
         self._mapa_pastas_ui = {"Todas as pastas": "todas"}
         opcoes = ["Todas as pastas"]
         nomes_vistos = {}
-        for ch_pasta, nome_pasta, qtd in pastas:
+        for ch_pasta, _cam_pasta, nome_pasta, qtd in pastas:
             cont = nomes_vistos.get(nome_pasta, 0) + 1
             nomes_vistos[nome_pasta] = cont
             rotulo = "%s (%d)" % (nome_pasta, qtd) if cont == 1 else "%s #%d (%d)" % (nome_pasta, cont, qtd)
@@ -6282,7 +6352,7 @@ class Aplicativo:
         pasta_alvo = self.pasta_filtro.get() if hasattr(self, "pasta_filtro") else "todas"
         lista = []
         for foto in self.projeto["fotos"]:
-            if pasta_alvo != "todas" and proj.pasta_da_foto(foto) != pasta_alvo:
+            if pasta_alvo != "todas" and normalizar_caminho(proj.pasta_da_foto(foto)) != normalizar_caminho(pasta_alvo):
                 continue
             usos = contagem.get(normalizar_caminho(foto["caminho"]), 0)
             if filtro == "usadas" and not usos:

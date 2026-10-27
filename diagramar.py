@@ -53,6 +53,7 @@ def configuracao(produto, projeto_cfg=None):
         "corte_maximo": CORTE_MAXIMO,
         "preencher_espacos_extras": False,
         "excluir_repetidas": False,
+        "auto_salvar_minutos": 5,
         "fundo": "#ffffff",
     }
     for chave, valor in (projeto_cfg or {}).items():

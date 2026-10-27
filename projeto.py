@@ -27,7 +27,7 @@ def novo(produto, pasta_fotos=None, fotos=()):
         "pasta_fotos": str(pasta_fotos) if pasta_fotos else "",
         "pasta_saida": "",
         "fotos": [],
-        "config": {},
+        "config": {"auto_salvar_minutos": 5},
         "laminas": [],
         "capa": capa_mod.capa_padrao(),
         "photoshop": {"conjunto": "", "acao": ""},
