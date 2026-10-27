@@ -2233,6 +2233,15 @@ class Aplicativo:
         if pasta:
             self.adicionar_caminhos([pasta])
 
+    _HEADERS_DRIVE = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
     @staticmethod
     def _extrair_id_drive(url):
         url = str(url or "").strip()
@@ -2246,24 +2255,180 @@ class Aplicativo:
         qs = urllib.parse.parse_qs(parsed.query)
         if "id" in qs and qs["id"]:
             return "pasta", qs["id"][0]
+        if re.fullmatch(r"[a-zA-Z0-9_-]{18,}", url):
+            return "pasta", url
         return None, None
 
     @staticmethod
-    def _baixar_item_drive(file_id, destino_arq):
-        url_dl = "https://drive.google.com/uc?export=download&id=%s" % file_id
-        req = urllib.request.Request(url_dl, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            conteudo = resp.read()
-        if b"confirm=" in conteudo[:4096] and b"<html" in conteudo[:512].lower():
-            m_conf = re.search(rb"confirm=([0-9A-Za-z_-]+)", conteudo)
-            if m_conf:
-                token = m_conf.group(1).decode("utf-8", errors="ignore")
-                url_conf = "%s&confirm=%s" % (url_dl, token)
-                req2 = urllib.request.Request(url_conf, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req2, timeout=30) as resp2:
-                    conteudo = resp2.read()
+    def _decodificar_html_drive(raw_html):
+        s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), raw_html)
+        s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
+        return s.replace("\\/", "/")
+
+    @classmethod
+    def _resolver_atalho_drive(cls, file_id):
+        try:
+            url = "https://drive.google.com/file/d/%s/view" % file_id
+            req = urllib.request.Request(url, headers=cls._HEADERS_DRIVE)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            s = cls._decodificar_html_drive(raw)
+            m = re.search(
+                r'\["([a-zA-Z0-9_-]{15,})",(?:\["[^"]*"\]|null),"([^"]+)","(image/[^"]+)"',
+                s,
+            )
+            if m:
+                return m.group(1), m.group(2)
+        except Exception:
+            pass
+        return file_id, None
+
+    @classmethod
+    def _listar_arquivos_pasta_drive(cls, folder_id, visitados=None, nivel=0):
+        if visitados is None:
+            visitados = set()
+        if folder_id in visitados or nivel > 5:
+            return [], None
+        visitados.add(folder_id)
+
+        arquivos = []
+        subpastas = []
+        ids_subpastas = set()
+        ids_atalhos = set()
+        ids_arquivos = set()
+        titulo_pasta = None
+
+        # 1. Lê a página principal da pasta do Google Drive (_initData traz arquivos, subpastas e alvos reais de atalhos)
+        try:
+            url_folder = "https://drive.google.com/drive/folders/%s?usp=sharing" % folder_id
+            req = urllib.request.Request(url_folder, headers=cls._HEADERS_DRIVE)
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+            m_title = re.search(r"<title>([^<]+)</title>", raw, re.I)
+            if m_title:
+                t_limpo = re.sub(r"\s*-\s*Google\s*Drive\s*$", "", m_title.group(1), flags=re.I).strip()
+                if t_limpo and t_limpo.lower() != "google drive":
+                    titulo_pasta = t_limpo
+
+            s = cls._decodificar_html_drive(raw)
+            for fid, nome, mime in re.findall(
+                r'\["([a-zA-Z0-9_-]{15,})",(?:\["[^"]*"\]|null),"([^"]+)","([^"]+)"',
+                s,
+            ):
+                if mime == "application/vnd.google-apps.folder":
+                    if fid != folder_id and fid not in visitados and fid not in ids_subpastas:
+                        ids_subpastas.add(fid)
+                        subpastas.append((fid, nome))
+                elif mime == "application/vnd.google-apps.shortcut":
+                    ids_atalhos.add(fid)
+                elif mime.startswith("image/") or Path(nome).suffix.lower() in EXTENSOES:
+                    if fid not in ids_arquivos:
+                        ids_arquivos.add(fid)
+                        arquivos.append((fid, nome))
+        except Exception:
+            pass
+
+        # 2. Complementa com embeddedfolderview (caso a pasta tenha mais itens ou estrutura clássica)
+        try:
+            url_lista = "https://drive.google.com/embeddedfolderview?id=%s#list" % folder_id
+            req_emb = urllib.request.Request(url_lista, headers=cls._HEADERS_DRIVE)
+            with urllib.request.urlopen(req_emb, timeout=25) as resp_emb:
+                html_emb = resp_emb.read().decode("utf-8", errors="ignore")
+            if not titulo_pasta:
+                m_t2 = re.search(r"<title>([^<]+)</title>", html_emb, re.I)
+                if m_t2 and m_t2.group(1).strip():
+                    titulo_pasta = m_t2.group(1).strip()
+
+            padrao_entry = re.compile(
+                r'id="entry-([a-zA-Z0-9_-]{10,})".*?<a\s+href="([^"]+)".*?class="flip-entry-title">([^<]+)<',
+                re.S,
+            )
+            for m in padrao_entry.finditer(html_emb):
+                eid, href, titulo = m.group(1), m.group(2), m.group(3).strip()
+                bloco = m.group(0)
+                if "/folders/" in href or "drive-sprite-folder" in bloco:
+                    if eid != folder_id and eid not in visitados and eid not in ids_subpastas:
+                        ids_subpastas.add(eid)
+                        subpastas.append((eid, titulo))
+                elif "vnd.google-apps.shortcut" in bloco:
+                    if eid not in ids_atalhos and not arquivos:
+                        ids_atalhos.add(eid)
+                        real_id, real_nome = cls._resolver_atalho_drive(eid)
+                        if real_id and real_id not in ids_arquivos:
+                            ids_arquivos.add(real_id)
+                            arquivos.append((real_id, real_nome or titulo))
+                else:
+                    if eid not in ids_arquivos and eid not in ids_atalhos:
+                        ids_arquivos.add(eid)
+                        arquivos.append((eid, titulo))
+        except Exception:
+            pass
+
+        # 3. Percorre recursivamente todas as subpastas encontradas (ex: "Álbum 20x20" dentro da pasta principal)
+        for sub_id, sub_nome in subpastas:
+            sub_arqs, _ = cls._listar_arquivos_pasta_drive(sub_id, visitados, nivel + 1)
+            if sub_arqs and len(subpastas) == 1 and not arquivos and sub_nome:
+                titulo_pasta = sub_nome
+            for fid, nome in sub_arqs:
+                if fid not in ids_arquivos:
+                    ids_arquivos.add(fid)
+                    arquivos.append((fid, nome))
+
+        return arquivos, titulo_pasta
+
+    @classmethod
+    def _eh_conteudo_imagem_valido(cls, dados):
+        if not dados or len(dados) < 256:
+            return False
+        cabecalho = dados[:512].lstrip().lower()
+        if cabecalho.startswith(b"<!doctype") or cabecalho.startswith(b"<html") or cabecalho.startswith(b"<head"):
+            return False
+        return True
+
+    @classmethod
+    def _baixar_item_drive(cls, file_id, destino_arq):
+        urls_tentativa = [
+            "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % file_id,
+            "https://drive.google.com/uc?export=download&id=%s" % file_id,
+            "https://lh3.googleusercontent.com/d/%s=s0" % file_id,
+        ]
+        conteudo = None
+        for url_dl in urls_tentativa:
+            try:
+                req = urllib.request.Request(url_dl, headers=cls._HEADERS_DRIVE)
+                with urllib.request.urlopen(req, timeout=35) as resp:
+                    dados = resp.read()
+                if not cls._eh_conteudo_imagem_valido(dados):
+                    # Verifica se é página de confirmação do Google Drive
+                    m_conf = re.search(rb"confirm=([0-9A-Za-z_-]+)", dados)
+                    m_uuid = re.search(rb'name="uuid"\s+value="([^"]+)"', dados)
+                    if m_uuid:
+                        uuid_val = m_uuid.group(1).decode("utf-8", errors="ignore")
+                        url_conf = (
+                            "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t&uuid=%s"
+                            % (file_id, uuid_val)
+                        )
+                        req2 = urllib.request.Request(url_conf, headers=cls._HEADERS_DRIVE)
+                        with urllib.request.urlopen(req2, timeout=35) as resp2:
+                            dados = resp2.read()
+                    elif m_conf:
+                        token = m_conf.group(1).decode("utf-8", errors="ignore")
+                        url_conf = "https://drive.google.com/uc?export=download&id=%s&confirm=%s" % (file_id, token)
+                        req2 = urllib.request.Request(url_conf, headers=cls._HEADERS_DRIVE)
+                        with urllib.request.urlopen(req2, timeout=35) as resp2:
+                            dados = resp2.read()
+                if cls._eh_conteudo_imagem_valido(dados):
+                    conteudo = dados
+                    break
+            except Exception:
+                continue
+
+        if not conteudo:
+            return False
+
         with open(destino_arq, "wb") as f:
             f.write(conteudo)
+        return True
 
     def importar_link_drive(self):
         janela = tk.Toplevel(self.root)
@@ -2328,59 +2493,84 @@ class Aplicativo:
 
         pasta_base = tempfile.mkdtemp(prefix="SmartAlbum_Drive_")
         self._pastas_temp_drive.append(pasta_base)
-        pasta_destino = Path(pasta_base) / ("Drive_%s" % drive_id[:6])
-        pasta_destino.mkdir(parents=True, exist_ok=True)
+        estado_destino = {"pasta": Path(pasta_base) / ("Drive_%s" % drive_id[:6])}
+        estado_destino["pasta"].mkdir(parents=True, exist_ok=True)
 
         def trabalho(t):
             baixados = []
-            # 1. Tenta usar gdown se estiver instalado no Python do usuário
-            try:
-                import gdown
-                if tipo_id == "pasta":
-                    arqs = gdown.download_folder(id=drive_id, output=str(pasta_destino), quiet=True, use_cookies=False) or []
-                    baixados = [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES]
-                else:
-                    arq_out = gdown.download(id=drive_id, output=str(pasta_destino) + os.sep, quiet=True)
-                    if arq_out and Path(arq_out).is_file():
-                        baixados = [Path(arq_out)]
-                if baixados:
-                    return baixados
-            except Exception:
-                pass
+            pasta_destino = estado_destino["pasta"]
 
-            # 2. Fallback nativo sem pacotes externos (lê embeddedfolderview da pasta pública do Drive)
             if tipo_id == "arquivo":
-                dest = pasta_destino / ("foto_%s.jpg" % drive_id[:8])
-                self._baixar_item_drive(drive_id, dest)
-                if dest.is_file() and dest.stat().st_size > 256:
+                real_id, real_nome = self._resolver_atalho_drive(drive_id)
+                nome_arq = re.sub(r'[<>:"/\\|?*]', "_", (real_nome or ("foto_%s.jpg" % drive_id[:8])).strip())
+                if Path(nome_arq).suffix.lower() not in EXTENSOES:
+                    nome_arq += ".jpg"
+                dest = pasta_destino / nome_arq
+                if self._baixar_item_drive(real_id or drive_id, dest) and dest.is_file():
                     baixados.append(dest)
                 return baixados
 
-            url_lista = "https://drive.google.com/embeddedfolderview?id=%s#list" % drive_id
-            req = urllib.request.Request(url_lista, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
+            # 1. Lista recursivamente fotos (incluindo subpastas e atalhos do Google Drive)
+            achados, titulo_pasta = self._listar_arquivos_pasta_drive(drive_id)
+            if titulo_pasta:
+                nome_pasta_limpo = re.sub(r'[<>:"/\\|?*]', "_", titulo_pasta).strip()
+                if nome_pasta_limpo:
+                    nova_pasta = Path(pasta_base) / nome_pasta_limpo
+                    nova_pasta.mkdir(parents=True, exist_ok=True)
+                    pasta_destino = nova_pasta
+                    estado_destino["pasta"] = nova_pasta
 
-            achados = re.findall(r'id="entry-([a-zA-Z0-9_-]{10,})".*?class="flip-entry-title">([^<]+)<', html, re.S)
-            if not achados:
-                ids_brutos = list(dict.fromkeys(re.findall(r"/file/d/([a-zA-Z0-9_-]{15,})", html)))
-                achados = [(fid, "foto_%03d.jpg" % (idx + 1)) for idx, fid in enumerate(ids_brutos)]
+            if achados:
+                import concurrent.futures
 
-            total = max(1, len(achados))
-            for idx, (fid, nome_arq) in enumerate(achados, start=1):
-                if t.parar():
-                    break
-                nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", nome_arq.strip())
-                if Path(nome_limpo).suffix.lower() not in EXTENSOES:
-                    nome_limpo += ".jpg"
-                dest = pasta_destino / nome_limpo
-                try:
-                    self._baixar_item_drive(fid, dest)
-                    if dest.is_file() and dest.stat().st_size > 256:
-                        baixados.append(dest)
-                except Exception:
-                    pass
-                t.progresso(idx, total)
+                total = len(achados)
+                nomes_usados = set()
+                tarefas_dl = []
+                for idx, (fid, nome_arq) in enumerate(achados, start=1):
+                    nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (nome_arq or ("foto_%03d.jpg" % idx)).strip())
+                    if Path(nome_limpo).suffix.lower() not in EXTENSOES:
+                        nome_limpo += ".jpg"
+                    base_stem = Path(nome_limpo).stem
+                    ext_s = Path(nome_limpo).suffix
+                    cand = nome_limpo
+                    contador_dup = 2
+                    while cand.lower() in nomes_usados:
+                        cand = "%s_%d%s" % (base_stem, contador_dup, ext_s)
+                        contador_dup += 1
+                    nomes_usados.add(cand.lower())
+                    tarefas_dl.append((fid, pasta_destino / cand))
+
+                concluidos = 0
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                    futuros = {
+                        pool.submit(self._baixar_item_drive, fid, dest): dest
+                        for fid, dest in tarefas_dl
+                    }
+                    for fut in concurrent.futures.as_completed(futuros):
+                        if t.parar():
+                            break
+                        dest = futuros[fut]
+                        concluidos += 1
+                        try:
+                            if fut.result() and dest.is_file() and dest.stat().st_size > 256:
+                                baixados.append(dest)
+                        except Exception:
+                            pass
+                        t.progresso(concluidos, total)
+
+                if baixados:
+                    # Ordena na mesma ordem da listagem da pasta
+                    ordem_map = {dest: i for i, (_fid, dest) in enumerate(tarefas_dl)}
+                    baixados.sort(key=lambda p: ordem_map.get(p, 999999))
+                    return baixados
+
+            # 2. Fallback com gdown caso instalado e a listagem direta não tenha encontrado itens
+            try:
+                import gdown
+                arqs = gdown.download_folder(id=drive_id, output=str(pasta_destino), quiet=True, use_cookies=False) or []
+                baixados = [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES and Path(a).is_file()]
+            except Exception:
+                pass
             return baixados
 
         def fim(baixados, erro):
@@ -2391,7 +2581,7 @@ class Aplicativo:
                     parent=self.root,
                 )
                 return
-            self.adicionar_caminhos([str(pasta_destino)], perguntar_diagramar=True)
+            self.adicionar_caminhos([str(estado_destino["pasta"])], perguntar_diagramar=True)
 
         self.executar("Baixando fotos do Google Drive", trabalho, fim)
 
