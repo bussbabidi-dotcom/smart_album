@@ -255,6 +255,52 @@ class EditorFundo(tk.Toplevel):
         self.rotulos = {}
         self._controles = []
 
+        # Seção 0: Redimensionamento, Giro 90°, Espelhar e Cortar vs Distorcer
+        sec_transf = ttk.LabelFrame(quadro, text="Transformação e Redimensionamento", padding=8)
+        sec_transf.pack(fill="x", pady=(0, 8))
+
+        linha_modo_tf = ttk.Frame(sec_transf)
+        linha_modo_tf.pack(fill="x", pady=(0, 5))
+        ttk.Label(linha_modo_tf, text="Encaixe:", width=10).pack(side="left")
+        self.var_modo_tf = tk.StringVar(value="preencher")
+        rb_cortar = ttk.Radiobutton(
+            linha_modo_tf,
+            text="Cortar (Sem Distorcer)",
+            value="preencher",
+            variable=self.var_modo_tf,
+            command=self._mudou_modo_tf,
+        )
+        rb_cortar.pack(side="left", padx=(0, 8))
+        rb_distorcer = ttk.Radiobutton(
+            linha_modo_tf,
+            text="Distorcer (Esticar)",
+            value="esticar",
+            variable=self.var_modo_tf,
+            command=self._mudou_modo_tf,
+        )
+        rb_distorcer.pack(side="left")
+        self._controles.extend([rb_cortar, rb_distorcer])
+
+        linha_bts_tf = ttk.Frame(sec_transf)
+        linha_bts_tf.pack(fill="x", pady=(0, 5))
+        bt_esp_h = ttk.Button(
+            linha_bts_tf, text="⇄ Espelhar H", style="Compacto.TButton", command=lambda: self._alternar_espelho("espelhar_h")
+        )
+        bt_esp_h.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        bt_esp_v = ttk.Button(
+            linha_bts_tf, text="⇅ Espelhar V", style="Compacto.TButton", command=lambda: self._alternar_espelho("espelhar_v")
+        )
+        bt_esp_v.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        bt_girar = ttk.Button(
+            linha_bts_tf, text="↻ Girar 90°", style="Compacto.TButton", command=self._girar_90
+        )
+        bt_girar.pack(side="left", fill="x", expand=True)
+        self.rotulo_giro = ttk.Label(linha_bts_tf, text="0°", style="Fraco.TLabel", width=5, anchor="e", font=tema.FONTE_MONO)
+        self.rotulo_giro.pack(side="right", padx=(6, 0))
+        self._controles.extend([bt_esp_h, bt_esp_v, bt_girar])
+
+        self._escala(sec_transf, "escala_pct", "Zoom (%)", 100, 300)
+
         # Seção 1: Ajustes de Luz, Cor e Presença
         sec_luz = ttk.LabelFrame(quadro, text="Matiz / Saturação / Luz e Desfoque", padding=8)
         sec_luz.pack(fill="x", pady=(0, 8))
@@ -378,6 +424,40 @@ class EditorFundo(tk.Toplevel):
             return dono, self.app._dados_fundo_imagem_ativo(dono)
         return dono, (dono or {}).get("fundo_imagem")
 
+    def _mudou_modo_tf(self):
+        if self._carregando:
+            return
+        dono, dados = self._dados()
+        if not dados:
+            return
+        self.app.marcar_historico()
+        dados["modo"] = self.var_modo_tf.get()
+        if hasattr(self.app, "_atualizar_fundo_ui"):
+            self.app._atualizar_fundo_ui()
+        self.app.fundo_ajustado(final=True)
+
+    def _alternar_espelho(self, chave):
+        dono, dados = self._dados()
+        if not dados:
+            return
+        self.app.marcar_historico()
+        dados[chave] = not bool(dados.get(chave, False))
+        if hasattr(self.app, "_atualizar_fundo_ui"):
+            self.app._atualizar_fundo_ui()
+        self.mostrar()
+        self.app.fundo_ajustado(final=True)
+
+    def _girar_90(self):
+        dono, dados = self._dados()
+        if not dados:
+            return
+        self.app.marcar_historico()
+        dados["giro"] = (int(dados.get("giro") or 0) + 90) % 360
+        if hasattr(self.app, "_atualizar_fundo_ui"):
+            self.app._atualizar_fundo_ui()
+        self.mostrar()
+        self.app.fundo_ajustado(final=True)
+
     def mostrar(self):
         dono, dados = self._dados()
         alvo = getattr(self.app, "fundo_alvo", None)
@@ -392,8 +472,14 @@ class EditorFundo(tk.Toplevel):
         try:
             ajustes = dict(AJUSTES_FUNDO_PADRAO)
             ajustes.update((dados or {}).get("ajustes") or {})
+            modo_atual = (dados or {}).get("modo", "preencher")
+            self.var_modo_tf.set("esticar" if modo_atual == "esticar" else "preencher")
+            giro_atual = int((dados or {}).get("giro") or 0) % 360
+            self.rotulo_giro.configure(text="%d°" % giro_atual)
             for chave, var in self.vars.items():
-                if chave in ("opacidade", "desfoque"):
+                if chave == "escala_pct":
+                    valor = int(round(float((dados or {}).get("escala", 1.0) or 1.0) * 100))
+                elif chave in ("opacidade", "desfoque"):
                     valor = (dados or {}).get(chave, 100 if chave == "opacidade" else 0)
                 else:
                     valor = ajustes.get(chave, 0)
@@ -447,7 +533,14 @@ class EditorFundo(tk.Toplevel):
                 self._aplicar_cor_sem_imagem(dono, cor_atual, valor)
                 self.app.fundo_ajustado()
             return
-        if chave in ("opacidade", "desfoque"):
+        if chave == "escala_pct":
+            nova_esc = max(1.0, min(3.0, valor / 100.0))
+            if abs(float(dados.get("escala", 1.0) or 1.0) - nova_esc) < 0.005:
+                return
+            dados["escala"] = nova_esc
+            if hasattr(self.app, "_atualizar_fundo_ui"):
+                self.app._atualizar_fundo_ui()
+        elif chave in ("opacidade", "desfoque"):
             if dados.get(chave) == valor:
                 return
             dados[chave] = valor
@@ -463,7 +556,9 @@ class EditorFundo(tk.Toplevel):
         if not dados:
             return
         self.app.marcar_historico()
-        if chave in ("opacidade", "desfoque"):
+        if chave == "escala_pct":
+            dados["escala"] = 1.0
+        elif chave in ("opacidade", "desfoque"):
             dados[chave] = 100 if chave == "opacidade" else 0
         else:
             dados.setdefault("ajustes", {})[chave] = AJUSTES_FUNDO_PADRAO[chave]
@@ -479,6 +574,14 @@ class EditorFundo(tk.Toplevel):
             dados["ajustes"] = {}
             dados["opacidade"] = 100
             dados["desfoque"] = 0
+            dados["escala"] = 1.0
+            dados["giro"] = 0
+            dados["espelhar_h"] = False
+            dados["espelhar_v"] = False
+            dados["cx"] = 0.5
+            dados["cy"] = 0.5
+            if hasattr(self.app, "_atualizar_fundo_ui"):
+                self.app._atualizar_fundo_ui()
         else:
             ch_cor, _ = self.app._chaves_fundo_alvo() if hasattr(self.app, "_chaves_fundo_alvo") else ("fundo", "fundo_imagem")
             dono[ch_cor] = "#ffffff"

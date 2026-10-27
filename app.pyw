@@ -444,6 +444,17 @@ class Aplicativo:
         self._botao(topo, "🖼 Fotos", self.escolher_fotos,
                     "Carregar fotos avulsas do computador", "Compacto.TButton").pack(side="left", padx=2)
 
+        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
+        self._botao(topo, "💾 Salvar JSON", self.salvar_projeto_como,
+                    "Salvar o arquivo JSON do álbum para continuar o projeto mais tarde",
+                    "Compacto.TButton").pack(side="left", padx=2)
+        self._botao(topo, "📂 Abrir JSON", self.abrir_projeto,
+                    "Abrir um arquivo JSON de álbum salvo anteriormente",
+                    "Compacto.TButton").pack(side="left", padx=2)
+        self._botao(topo, "🔗 Relinkar Fotos", self.consertar_caminhos,
+                    "Relinkar a pasta de fotos caso o projeto ou as fotos tenham mudado de lugar",
+                    "Compacto.TButton").pack(side="left", padx=2)
+
         ttk.Frame(topo, width=8).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_nome.pack(side="left", padx=(0, 8))
@@ -825,7 +836,7 @@ class Aplicativo:
         seletor.pack(side="top", fill="x", pady=(0, 6))
         self.secoes_layouts = {}
         for valor, texto, dica in (("sugestoes", "Sugestões", "Layouts para a lâmina inteira"),
-                                   ("modelos", "Modelos", "Layouts de página única (Esquerda ou Direita)"),
+                                   ("modelos", "Páginas", "Diagramação por página (Esquerda ou Direita); se uma foto passar do meio, diagrama o restante da página sem mexer nela"),
                                    ("editar", "Editar", "Medidas e enquadramento da foto")):
             botao = ttk.Radiobutton(seletor, text=texto, value=valor, variable=self.secao_layouts,
                                     style="Filtro.TRadiobutton", command=self._mostrar_secao_layouts)
@@ -871,14 +882,14 @@ class Aplicativo:
         self.pagina_modelo = tk.IntVar(value=0)
         self._opcoes_pagina_modelos = []
 
-        topo_pag = ttk.LabelFrame(quadro, text="Página Única", padding=6)
+        topo_pag = ttk.LabelFrame(quadro, text="Páginas (Diagramação por Lado)", padding=6)
         topo_pag.pack(side="top", fill="x", pady=(0, 4))
 
         linha_lado = ttk.Frame(topo_pag)
         linha_lado.pack(fill="x", pady=(0, 4))
         for val_p, txt_p, dica_p in (
-            (0, "◧ Página Esquerda", "Gera e aplica layouts apenas na Página Esquerda sem mexer na Página Direita"),
-            (1, "◨ Página Direita", "Gera e aplica layouts apenas na Página Direita sem mexer na Página Esquerda"),
+            (0, "◧ Página Esquerda", "Gera e aplica layouts na Página Esquerda (preservando fotos que passam do meio)"),
+            (1, "◨ Página Direita", "Gera e aplica layouts na Página Direita (preservando fotos que passam do meio)"),
         ):
             rb_p = ttk.Radiobutton(
                 linha_lado,
@@ -899,7 +910,7 @@ class Aplicativo:
             linha_qtd,
             "−1 Espaço",
             lambda: self._mudar_qtd_fotos_pagina(-1),
-            "Remover 1 espaço desta página (sem mexer na outra página)",
+            "Remover 1 espaço desta página (sem mexer na outra página nem na foto que passou do meio)",
             "Icone.TButton",
             width=9,
         ).pack(side="right", padx=(2, 0))
@@ -907,14 +918,14 @@ class Aplicativo:
             linha_qtd,
             "+1 Espaço",
             lambda: self._mudar_qtd_fotos_pagina(1),
-            "Adicionar 1 espaço nesta página (sem mexer na outra página)",
+            "Adicionar 1 espaço no restante desta página (sem mexer na outra página nem na foto que passou do meio)",
             "Icone.TButton",
             width=9,
         ).pack(side="right", padx=1)
 
         ttk.Checkbutton(
             topo_pag,
-            text="Incluir foto que atravessa o meio (60/40 ou 70/30) na página editada",
+            text="Se uma foto passar do meio, diagramar com o restante da página sem mexer nela",
             variable=self.so_compativeis,
             command=self.desenhar_modelos,
         ).pack(side="top", anchor="w", pady=(4, 0))
@@ -1114,30 +1125,97 @@ class Aplicativo:
         self.fundo_modo = tk.StringVar(value="preencher")
         self.fundo_opacidade = tk.DoubleVar(value=100)
         self.fundo_desfoque = tk.DoubleVar(value=0)
+        self.fundo_escala = tk.DoubleVar(value=100)
         self.fundo_pb = tk.BooleanVar(value=False)
+        self.fundo_espelhar_h = tk.BooleanVar(value=False)
+        self.fundo_espelhar_v = tk.BooleanVar(value=False)
+        self.fundo_giro = tk.IntVar(value=0)
         self._controles_fundo = []
+
+        # Escolha rápida entre Cortar (Preencher sem distorcer) e Distorcer (Esticar), além de Ajustar/Repetir
+        linha_encaixe = ttk.Frame(imagem)
+        linha_encaixe.pack(fill="x", pady=(4, 2))
+        rb_cortar = ttk.Radiobutton(
+            linha_encaixe,
+            text="✂ Cortar (Sem Distorcer)",
+            value="preencher",
+            variable=self.fundo_modo,
+            style="Filtro.TRadiobutton",
+            command=lambda: self._mudou_fundo_imagem(marcar=True),
+        )
+        rb_cortar.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        tema.dica(rb_cortar, "Preenche a área cortando o excesso sem distorcer a proporção da imagem")
+        rb_distorcer = ttk.Radiobutton(
+            linha_encaixe,
+            text="↔ Distorcer (Esticar)",
+            value="esticar",
+            variable=self.fundo_modo,
+            style="Filtro.TRadiobutton",
+            command=lambda: self._mudou_fundo_imagem(marcar=True),
+        )
+        rb_distorcer.pack(side="left", fill="x", expand=True)
+        tema.dica(rb_distorcer, "Estica/distorce a imagem para caber exatamente na área do fundo")
+        self._controles_fundo.extend([rb_cortar, rb_distorcer])
+
+        # Botões de Espelhar H, Espelhar V e Girar 90°
+        linha_tf = ttk.Frame(imagem)
+        linha_tf.pack(fill="x", pady=(2, 2))
+        bt_esp_h = self._botao(
+            linha_tf,
+            "⇄ Espelhar H",
+            lambda: self._alternar_espelho_fundo("espelhar_h"),
+            "Espelhar imagem de fundo horizontalmente",
+            "Compacto.TButton",
+        )
+        bt_esp_h.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        bt_esp_v = self._botao(
+            linha_tf,
+            "⇅ Espelhar V",
+            lambda: self._alternar_espelho_fundo("espelhar_v"),
+            "Espelhar imagem de fundo verticalmente",
+            "Compacto.TButton",
+        )
+        bt_esp_v.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        bt_girar_fundo = self._botao(
+            linha_tf,
+            "↻ Girar 90°",
+            self._girar_fundo_90,
+            "Girar a imagem de fundo em 90 graus no sentido horário",
+            "Compacto.TButton",
+        )
+        bt_girar_fundo.pack(side="left", fill="x", expand=True)
+        self._controles_fundo.extend([bt_esp_h, bt_esp_v, bt_girar_fundo])
+
         linha = ttk.Frame(imagem)
-        linha.pack(fill="x", pady=(4, 2))
+        linha.pack(fill="x", pady=(2, 2))
         ttk.Label(linha, text="Modo").pack(side="left")
         combo = ttk.Combobox(linha, textvariable=self.fundo_modo, state="readonly", width=10, values=list(MODOS_FUNDO))
         combo.pack(side="left", padx=6)
         combo.bind("<<ComboboxSelected>>", lambda e: self._mudou_fundo_imagem(marcar=True))
         self._controles_fundo.append(combo)
+        self.rotulo_info_tf_fundo = ttk.Label(linha, text="0°", style="Fraco.TLabel", font=tema.FONTE_MONO)
+        self.rotulo_info_tf_fundo.pack(side="left", padx=(2, 4))
         caixa_pb = ttk.Checkbutton(linha, text="P&B", variable=self.fundo_pb,
                                    command=lambda: self._mudou_fundo_imagem(marcar=True))
         caixa_pb.pack(side="right")
         self._controles_fundo.append(caixa_pb)
         self._rotulos_fundo = {}
-        for texto, var, ate in (("Opacidade", self.fundo_opacidade, 100), ("Desfoque", self.fundo_desfoque, 50)):
+        for texto, var, de, ate in (
+            ("Zoom", self.fundo_escala, 100, 300),
+            ("Opacidade", self.fundo_opacidade, 0, 100),
+            ("Desfoque", self.fundo_desfoque, 0, 50),
+        ):
             linha = ttk.Frame(imagem)
             linha.pack(fill="x", pady=1)
             ttk.Label(linha, text=texto, width=9).pack(side="left")
-            rotulo = ttk.Label(linha, text="", style="Fraco.TLabel", width=4, anchor="e")
+            rotulo = ttk.Label(linha, text="", style="Fraco.TLabel", width=5, anchor="e")
             rotulo.pack(side="right")
-            escala = ttk.Scale(linha, from_=0, to=ate, variable=var, command=lambda v: self._mudou_fundo_imagem(marcar=False))
+            escala = ttk.Scale(linha, from_=de, to=ate, variable=var, command=lambda v: self._mudou_fundo_imagem(marcar=False))
             escala.pack(side="right", fill="x", expand=True, padx=6)
             escala.bind("<ButtonPress-1>", lambda e: self.marcar_historico())
             escala.bind("<ButtonRelease-1>", lambda e: self.fundo_ajustado(final=True))
+            if texto == "Zoom":
+                escala.bind("<Double-Button-1>", lambda e: (self.fundo_escala.set(100), self._mudou_fundo_imagem(marcar=True)))
             self._controles_fundo.append(escala)
             self._rotulos_fundo[texto] = rotulo
         linha = ttk.Frame(imagem)
@@ -2673,14 +2751,28 @@ class Aplicativo:
         self.atualizar_fotos()
 
     def consertar_caminhos(self):
-        pasta = filedialog.askdirectory(parent=self.root, title="Onde estão as fotos agora?")
+        pasta = filedialog.askdirectory(
+            parent=self.root,
+            title="Escolha a pasta onde estão as fotos para relinkar o projeto",
+            initialdir=self.projeto.get("pasta_fotos") or "",
+        )
         if not pasta:
             return
         self.marcar_historico()
-        consertadas, faltam = entrada.consertar_caminhos(self.projeto, pasta)
-        messagebox.showinfo("Fotos", "%s foto(s) encontradas.%s" % (
-            consertadas, ("\n%s ainda não foram achadas." % len(faltam)) if faltam else ""), parent=self.root)
+        consertadas, faltam = entrada.consertar_caminhos(self.projeto, pasta, forcar_todas=True)
+        self._marcar_modificado()
+        messagebox.showinfo(
+            "Relinkar Fotos",
+            "%s foto(s) relinkadas com sucesso na pasta:\n%s%s"
+            % (
+                consertadas,
+                pasta,
+                ("\n\n%s arquivo(s) ainda não foram encontrados." % len(faltam)) if faltam else "\n\nTodas as fotos do álbum estão vinculadas!",
+            ),
+            parent=self.root,
+        )
         self._analisar_projeto()
+        self.atualizar_tudo()
 
     def criar_enviar_para(self):
         try:
@@ -3562,27 +3654,25 @@ class Aplicativo:
     def _particionar_espacos_pagina(self, lamina, pagina):
         """
         Divide os espaços da lâmina entre:
-        - `saem`: espaços que pertencem à `pagina` (0 = Esquerda, 1 = Direita) OU que atravessam o meio (60/40, 70/30)
-          quando `self.so_compativeis` (incluir foto que atravessa o meio) está ativo.
-        - `ficam`: espaços exclusivos da outra página (`1 - pagina`), que permanecem 100% intactos.
+        - `saem`: espaços exclusivos da `pagina` (0 = Esquerda, 1 = Direita) que serão diagramados.
+        - `ficam`: espaços da outra página (`1 - pagina`) E fotos que passam do meio da página (`x0 < 0.495 and x1 > 0.505`).
+          Quando uma foto passa do meio, ela permanece intacta em `ficam` e o sistema diagrama apenas
+          as demais fotos no espaço livre restante da página!
         """
         if self.produto.get("paginas_por_lamina", 1) < 2:
             return list(lamina.get("espacos", [])), []
-        incluir_atravessadas = bool(self.so_compativeis.get()) if hasattr(self, "so_compativeis") else True
+        preservar_atravessadas = bool(self.so_compativeis.get()) if hasattr(self, "so_compativeis") else True
         saem, ficam = [], []
         for e in lamina.get("espacos", []):
             x0 = float(e.get("x", 0.0))
             x1 = x0 + float(e.get("w", 0.0))
             atravessa = x0 < 0.495 and x1 > 0.505
             if atravessa:
-                if incluir_atravessadas:
-                    saem.append(e)
+                if preservar_atravessadas:
+                    # Mantém intacta a foto que passou do meio; o restante da página será diagramado ao redor dela
+                    ficam.append(e)
                 else:
-                    # Se desmarcado, mantém se o centro estiver na outra página
-                    if self._pagina_do_espaco(e) == pagina:
-                        saem.append(e)
-                    else:
-                        ficam.append(e)
+                    saem.append(e)
             elif self._pagina_do_espaco(e) == pagina:
                 saem.append(e)
             else:
@@ -3590,14 +3680,14 @@ class Aplicativo:
         return saem, ficam
 
     def _mudar_qtd_fotos_pagina(self, delta):
-        """Adiciona ou remove 1 espaço na página selecionada (Esquerda ou Direita) sem alterar a outra página."""
+        """Adiciona ou remove 1 espaço na página selecionada (Esquerda ou Direita) sem alterar a outra página nem a foto que passou do meio."""
         lamina = self._lamina()
         if lamina is None:
             return
         pagina = self.pagina_modelo.get() if self.produto.get("paginas_por_lamina", 1) > 1 else 0
         saem, ficam = self._particionar_espacos_pagina(lamina, pagina)
         if delta < 0 and len(saem) <= 1:
-            self.registrar("A página precisa ter pelo menos 1 espaço.")
+            self.registrar("A área restante da página precisa ter pelo menos 1 espaço.")
             return
         antes = [dict(e) for e in lamina.get("espacos", [])]
         self.marcar_historico()
@@ -3619,7 +3709,7 @@ class Aplicativo:
             idx_rem = next((idx for idx in range(len(fotos_atuais) - 1, -1, -1) if not fotos_atuais[idx].get("caminho")), len(fotos_atuais) - 1)
             fotos_atuais.pop(idx_rem)
 
-        opcoes = diagramar.opcoes_pagina_unica(fotos_atuais, self.produto, pagina, self._cfg(), maximo=1)
+        opcoes = diagramar.opcoes_pagina_unica(fotos_atuais, self.produto, pagina, self._cfg(), maximo=1, espacos_fixos=ficam)
         if opcoes:
             novos = opcoes[0]["espacos"]
             lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
@@ -6885,11 +6975,11 @@ class Aplicativo:
         if hasattr(self, "rotulo_info_pagina_modelo"):
             txt_info = "%s: %d foto(s)" % (nome_lado, len(fotos_pag))
             if atravessadas and self.so_compativeis.get():
-                txt_info += " (%d atravessa o meio)" % atravessadas
+                txt_info += " (%d no meio preservada)" % atravessadas
             self.rotulo_info_pagina_modelo.configure(text=txt_info)
 
         self._opcoes_pagina_modelos = (
-            diagramar.opcoes_pagina_unica(fotos_pag, self.produto, pagina, self._cfg(), maximo=14)
+            diagramar.opcoes_pagina_unica(fotos_pag, self.produto, pagina, self._cfg(), maximo=14, espacos_fixos=ficam)
             if lamina is not None
             else []
         )
@@ -7414,18 +7504,49 @@ class Aplicativo:
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
 
+    def _alternar_espelho_fundo(self, chave):
+        dono = self._dono_do_fundo()
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados = (dono or {}).get(ch_img)
+        if not dados:
+            return
+        self.marcar_historico()
+        dados[chave] = not bool(dados.get(chave, False))
+        self._atualizar_fundo_ui()
+        self.fundo_ajustado(final=True)
+
+    def _girar_fundo_90(self):
+        dono = self._dono_do_fundo()
+        _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados = (dono or {}).get(ch_img)
+        if not dados:
+            return
+        self.marcar_historico()
+        dados["giro"] = (int(dados.get("giro") or 0) + 90) % 360
+        self._atualizar_fundo_ui()
+        self.fundo_ajustado(final=True)
+
     def _mudou_fundo_imagem(self, marcar):
         if self._carregando_fundo:
             return
         dono = self._dono_do_fundo()
         _ch_cor, ch_img = self._chaves_fundo_alvo()
         dados = (dono or {}).get(ch_img)
+        if "Zoom" in self._rotulos_fundo:
+            self._rotulos_fundo["Zoom"].configure(text="%d%%" % round(self.fundo_escala.get()))
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
         if not dados:
             return
-        novo = dict(dados, modo=self.fundo_modo.get(), opacidade=int(round(self.fundo_opacidade.get())),
-                    desfoque=int(round(self.fundo_desfoque.get())), pb=bool(self.fundo_pb.get()))
+        escala_nova = max(1.0, min(3.0, round(self.fundo_escala.get()) / 100.0))
+        novo = dict(
+            dados,
+            modo=self.fundo_modo.get(),
+            opacidade=int(round(self.fundo_opacidade.get())),
+            desfoque=int(round(self.fundo_desfoque.get())),
+            escala=escala_nova,
+            pb=bool(self.fundo_pb.get()),
+        )
         if novo == dados:
             return
         if marcar:
@@ -7460,8 +7581,22 @@ class Aplicativo:
                 self.fundo_modo.set(base["modo"])
                 self.fundo_opacidade.set(base["opacidade"])
                 self.fundo_desfoque.set(base["desfoque"])
+                self.fundo_escala.set(int(round(float(base.get("escala") or 1.0) * 100)))
                 self.fundo_pb.set(bool(base["pb"]))
+                self.fundo_espelhar_h.set(bool(base.get("espelhar_h")))
+                self.fundo_espelhar_v.set(bool(base.get("espelhar_v")))
+                giro_val = int(base.get("giro") or 0) % 360
+                self.fundo_giro.set(giro_val)
+                if hasattr(self, "rotulo_info_tf_fundo"):
+                    partes_tf = ["%d°" % giro_val]
+                    if base.get("espelhar_h"):
+                        partes_tf.append("⇄H")
+                    if base.get("espelhar_v"):
+                        partes_tf.append("⇅V")
+                    self.rotulo_info_tf_fundo.configure(text=" ".join(partes_tf))
             else:
+                if hasattr(self, "rotulo_info_tf_fundo"):
+                    self.rotulo_info_tf_fundo.configure(text="0°")
                 if alvo in ("esquerda", "direita") and not (dono or {}).get("fundo_" + alvo):
                     self.rotulo_fundo_imagem.configure(text="Usando o fundo da lâmina inteira (escolha cor ou imagem para separar esta página).")
                 else:
@@ -7473,6 +7608,8 @@ class Aplicativo:
                 self.botao_fundo_selecionadas.configure(text="Aplicar nas selecionadas (%d)" % max(1, qtd_sel))
         finally:
             self._carregando_fundo = False
+        if "Zoom" in self._rotulos_fundo:
+            self._rotulos_fundo["Zoom"].configure(text="%d%%" % round(self.fundo_escala.get()))
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
         self.galeria_fundos._agendar()
@@ -7539,6 +7676,32 @@ class Aplicativo:
     # Photoshop e Lightroom
     # ==================================================================
 
+    def _restaurar_janela_smart_album(self, modificadas=None, motivo="salvo"):
+        """Restaura a janela do Smart Album para o primeiro plano assim que a edição no Photoshop termina (Ctrl+S ou fechar)."""
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(250, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except Exception:
+            pass
+        if getattr(self, "_tratamento_oculto_ps", False):
+            self._tratamento_oculto_ps = False
+            if self.janela_tratamento is not None and self.janela_tratamento.winfo_exists():
+                try:
+                    self.janela_tratamento.deiconify()
+                    self.janela_tratamento.lift()
+                except Exception:
+                    pass
+        for c in (modificadas or []):
+            self._foto_trocada(c, c)
+        if modificadas:
+            self.registrar("Foto atualizada pelo Photoshop (%d arquivo(s)) · Smart Album restaurado." % len(modificadas))
+        else:
+            self.registrar("Retornado do Photoshop para o Smart Album.")
+
     def editar_no_photoshop(self, caminhos):
         caminhos = [c for c in caminhos if c]
         if not caminhos:
@@ -7552,9 +7715,28 @@ class Aplicativo:
 
         def fim(_r, erro):
             if erro:
+                self._restaurar_janela_smart_album()
                 messagebox.showerror("Photoshop", str(erro), parent=self.root)
             else:
-                self.registrar("Aberto no Photoshop. Edite e salve com Ctrl+S: o álbum atualiza sozinho.")
+                # Minimiza o Smart Album para dar foco total ao Photoshop e monitora Ctrl+S / fechamento
+                self._tratamento_oculto_ps = False
+                if self.janela_tratamento is not None and self.janela_tratamento.winfo_exists() and self.janela_tratamento.winfo_ismapped():
+                    try:
+                        self.janela_tratamento.withdraw()
+                        self._tratamento_oculto_ps = True
+                    except Exception:
+                        pass
+                try:
+                    self.root.iconify()
+                except Exception:
+                    pass
+                photoshop.ativar_janela_photoshop()
+                self.registrar("Editando no Photoshop... Ao salvar (Ctrl+S) ou fechar a foto, o Smart Album volta automaticamente.")
+                photoshop.monitorar_edicao_photoshop(
+                    caminhos,
+                    ao_salvar=lambda c: self.fila.put(("chamar", lambda cam=c: self._foto_trocada(cam, cam))),
+                    ao_terminar=lambda mods, mot: self.fila.put(("chamar", lambda m=mods, mt=mot: self._restaurar_janela_smart_album(m, mt))),
+                )
 
         self.executar("Abrindo no Photoshop", trabalho, fim)
 
@@ -7714,6 +7896,10 @@ class Aplicativo:
                 pasta_pdf = janela_exportar.pasta_do_formato(pasta_album, "pdf")
                 pasta_pdf.mkdir(parents=True, exist_ok=True)
                 gravados += exportar.exportar_pdf(copia, produto, info, pasta_pdf, t.aviso, t.parar, t.progresso, opcoes)
+            if not t.parar():
+                caminho_json_alb = pasta_album / exportar.nome_json_projeto(copia, produto)
+                proj.salvar(copia, caminho_json_alb)
+                gravados.append(caminho_json_alb)
             return gravados
 
         def fim(gravados, erro):

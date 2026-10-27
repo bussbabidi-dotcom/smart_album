@@ -1407,10 +1407,63 @@ def espaco_inclui_na_pagina(espaco, produto, pagina):
     return (centro < 0.5) if pagina == 0 else (centro >= 0.5)
 
 
-def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14):
+def _recortar_area_livre_pagina(area, espacos_fixos, produto, intervalo):
+    """
+    Quando uma foto atravessa o meio da lâmina e invade a página sendo diagramada,
+    preserva essa foto intacta e devolve o maior retângulo livre restante dentro de `area`
+    (descontando a foto que passou do meio e o espaçamento `intervalo` em mm).
+    """
+    if not espacos_fixos:
+        return area
+    W_mm, H_mm = lamina_mm(produto)
+    ax, ay, aw, ah = [float(v) for v in area]
+    gap = max(0.0, float(intervalo or 0.0))
+
+    for esp in espacos_fixos:
+        ex = float(esp.get("x", 0.0)) * W_mm
+        ey = float(esp.get("y", 0.0)) * H_mm
+        ew = float(esp.get("w", 0.0)) * W_mm
+        eh = float(esp.get("h", 0.0)) * H_mm
+
+        ix0 = max(ax, ex)
+        iy0 = max(ay, ey)
+        ix1 = min(ax + aw, ex + ew)
+        iy1 = min(ay + ah, ey + eh)
+        if ix1 - ix0 <= 0.5 or iy1 - iy0 <= 0.5:
+            continue
+
+        candidatos = []
+        # 1. Espaço livre à direita da foto que atravessou
+        rx0 = ex + ew + gap
+        rw = (ax + aw) - rx0
+        if rw >= 15.0:
+            candidatos.append((rx0, ay, rw, ah))
+        # 2. Espaço livre à esquerda da foto que atravessou
+        lx1 = ex - gap
+        lw = lx1 - ax
+        if lw >= 15.0:
+            candidatos.append((ax, ay, lw, ah))
+        # 3. Espaço livre abaixo da foto que atravessou
+        by0 = ey + eh + gap
+        bh = (ay + ah) - by0
+        if bh >= 15.0:
+            candidatos.append((ax, by0, aw, bh))
+        # 4. Espaço livre acima da foto que atravessou
+        ty1 = ey - gap
+        th = ty1 - ay
+        if th >= 15.0:
+            candidatos.append((ax, ay, aw, th))
+
+        if candidatos:
+            ax, ay, aw, ah = max(candidatos, key=lambda r: r[2] * r[3])
+
+    return (ax, ay, max(15.0, aw), max(15.0, ah))
+
+
+def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_fixos=()):
     """
     Gera opções de layout exclusivas para uma única página (0 = Esquerda, 1 = Direita)
-    sem tocar na outra página da lâmina.
+    sem tocar na outra página da lâmina nem em fotos que atravessam o meio (`espacos_fixos`).
     Inclui variações:
     - Safe Zone Elástico (respeita as linhas da Safe Zone e limite de corte de 22%)
     - Sangria Total da Página (preenche a página até a sangria ignorando as linhas da Safe Zone)
@@ -1425,8 +1478,18 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14):
     lista_fotos = list(fotos) if fotos else [{"caminho": None, "proporcao": 1.5}]
     n = len(lista_fotos)
     proporcoes = [max(0.15, float(f.get("proporcao") or 1.5)) for f in lista_fotos]
-    area_safe = area_util_pagina_mm(produto, pagina, margem, respeitar_seguranca=True)
-    area_sang = area_pagina_mm(produto, pagina)
+    area_safe = _recortar_area_livre_pagina(
+        area_util_pagina_mm(produto, pagina, margem, respeitar_seguranca=True),
+        espacos_fixos,
+        produto,
+        intervalo,
+    )
+    area_sang = _recortar_area_livre_pagina(
+        area_pagina_mm(produto, pagina),
+        espacos_fixos,
+        produto,
+        intervalo,
+    )
 
     opcoes_brutas = []
 

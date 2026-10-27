@@ -9,7 +9,7 @@ from comum import cor_rgb, normalizar_caminho
 from produtos import caixa_px
 from recorte import foto_no_espaco
 
-MODOS_FUNDO = ("preencher", "ajustar", "repetir")
+MODOS_FUNDO = ("preencher", "esticar", "ajustar", "repetir")
 DIRECOES_DEGRADE = ("direita", "esquerda", "baixo", "cima", "radial", "bordas_h")
 LADRILHOS_NA_ALTURA = 2
 AJUSTES_FUNDO_PADRAO = {"brilho": 0, "contraste": 0, "saturacao": 0, "matiz": 0, "tingir_cor": "#c08a4a", "tingir_forca": 0}
@@ -110,7 +110,19 @@ def rosto_de(info, caminho):
 
 
 def fundo_imagem_padrao(caminho=None):
-    return {"caminho": caminho, "modo": "preencher", "opacidade": 100, "desfoque": 0, "pb": False}
+    return {
+        "caminho": caminho,
+        "modo": "preencher",
+        "opacidade": 100,
+        "desfoque": 0,
+        "pb": False,
+        "giro": 0,
+        "espelhar_h": False,
+        "espelhar_v": False,
+        "escala": 1.0,
+        "cx": 0.5,
+        "cy": 0.5,
+    }
 
 
 def ajustes_fundo(fundo_imagem):
@@ -161,34 +173,63 @@ def ajustar_cores(img, ajustes):
 
 
 def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
-    """A imagem de fundo já no tamanho pedido e no modo escolhido, antes de ajustes, desfoque e opacidade."""
+    """A imagem de fundo já no tamanho pedido e no modo escolhido (cortar/preencher, distorcer/esticar, ajustar ou repetir), com espelhamento, giro 90° e zoom/enquadramento."""
     dados = fundo_imagem_padrao()
     dados.update(fundo_imagem or {})
     if not dados.get("caminho"):
         return None
     W, H = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
+    escala_zoom = max(1.0, min(3.0, float(dados.get("escala") or 1.0)))
+    cx = max(0.0, min(1.0, float(dados.get("cx", 0.5) if dados.get("cx") is not None else 0.5)))
+    cy = max(0.0, min(1.0, float(dados.get("cy", 0.5) if dados.get("cy") is not None else 0.5)))
     if rapido:
-        fonte = analise.imagem_para(dados["caminho"], max(W, H))
+        fonte = analise.imagem_para(dados["caminho"], int(round(max(W, H) * max(1.0, min(2.0, escala_zoom)))))
     else:
         fonte = analise.abrir_imagem(dados["caminho"])[0]
+    if dados.get("espelhar_h"):
+        fonte = ImageOps.mirror(fonte)
+    if dados.get("espelhar_v"):
+        fonte = ImageOps.flip(fonte)
+    giro = int(dados.get("giro") or 0) % 360
+    if giro in (90, 180, 270):
+        fonte = fonte.rotate(-giro, expand=True)
     if dados.get("pb"):
         fonte = ImageOps.grayscale(fonte).convert("RGB")
     filtro = Image.BILINEAR if rapido else Image.LANCZOS
     camada = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     modo = dados.get("modo") if dados.get("modo") in MODOS_FUNDO else "preencher"
-    if modo == "ajustar":
-        escala = min(W / float(fonte.width), H / float(fonte.height))
-        w, h = max(1, int(round(fonte.width * escala))), max(1, int(round(fonte.height * escala)))
-        camada.paste(fonte.resize((w, h), filtro), ((W - w) // 2, (H - h) // 2))
+    if modo == "esticar":
+        # Distorce para caber exatamente na área (ou ampliado por escala_zoom) sem preservar proporção
+        nw = max(W, int(round(W * escala_zoom)))
+        nh = max(H, int(round(H * escala_zoom)))
+        redim = fonte.resize((nw, nh), filtro)
+        ox = int(round((nw - W) * cx))
+        oy = int(round((nh - H) * cy))
+        camada.paste(redim.crop((ox, oy, ox + W, oy + H)), (0, 0))
+    elif modo == "ajustar":
+        escala_fit = min(W / float(max(1, fonte.width)), H / float(max(1, fonte.height))) * escala_zoom
+        w = max(1, int(round(fonte.width * escala_fit)))
+        h = max(1, int(round(fonte.height * escala_fit)))
+        redim = fonte.resize((w, h), filtro)
+        px = int(round((W - w) * cx))
+        py = int(round((H - h) * cy))
+        camada.paste(redim, (px, py))
     elif modo == "repetir":
-        h = max(1, int(round(H / float(LADRILHOS_NA_ALTURA))))
-        w = max(1, int(round(fonte.width * h / float(fonte.height))))
+        h = max(1, int(round((H / float(LADRILHOS_NA_ALTURA)) * escala_zoom)))
+        w = max(1, int(round(fonte.width * h / float(max(1, fonte.height)))))
         ladrilho = fonte.resize((w, h), filtro)
         for y in range(0, H, h):
             for x in range(0, W, w):
                 camada.paste(ladrilho, (x, y))
     else:
-        camada.paste(ImageOps.fit(fonte, (W, H), filtro), (0, 0))
+        # "preencher" (Cortar sem distorcer) com zoom e deslocamento (cx, cy)
+        escala_cover = max(W / float(max(1, fonte.width)), H / float(max(1, fonte.height))) * escala_zoom
+        nw = max(W, int(round(fonte.width * escala_cover)))
+        nh = max(H, int(round(fonte.height * escala_cover)))
+        redim = fonte.resize((nw, nh), filtro)
+        ox = max(0, min(nw - W, int(round((nw - W) * cx))))
+        oy = max(0, min(nh - H, int(round((nh - H) * cy))))
+        camada.paste(redim.crop((ox, oy, ox + W, oy + H)), (0, 0))
     return camada
 
 

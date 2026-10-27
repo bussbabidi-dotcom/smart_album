@@ -199,20 +199,23 @@ def dados_proporcao(dados):
 
 
 def fundos_imagem(projeto):
-    """As imagens de fundo das lâminas."""
+    """As imagens de fundo das lâminas (inteira, página esquerda e página direita)."""
     for dono in projeto.get("laminas", []):
-        dados = dono.get("fundo_imagem")
-        if dados and dados.get("caminho"):
-            yield dados
+        for ch in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
+            dados = dono.get(ch)
+            if isinstance(dados, dict) and dados.get("caminho"):
+                yield dados
 
 
 def trocar_caminho(projeto, antigo, novo):
     """Troca a foto em todo o projeto (lista, espaços, capa e imagens de fundo)."""
     chave = normalizar_caminho(antigo)
     novo = str(novo)
+    nova_pasta = str(Path(novo).parent)
     for foto in projeto["fotos"]:
         if normalizar_caminho(foto["caminho"]) == chave:
             foto["caminho"] = novo
+            foto["pasta"] = nova_pasta
     for espaco in todos_espacos(projeto):
         if espaco.get("foto") and normalizar_caminho(espaco["foto"]) == chave:
             espaco["foto"] = novo

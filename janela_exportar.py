@@ -102,6 +102,7 @@ def arquivos_previstos(opcoes, projeto, produto, itens):
             saida.append("PDF/%s" % exportar.nome_pdf_unico(projeto, produto))
         else:
             saida.extend("PDF/%s.pdf" % nome for nome, _i in itens)
+    saida.append(exportar.nome_json_projeto(projeto, produto))
     return saida
 
 
@@ -463,7 +464,10 @@ class JanelaExportar(tk.Toplevel):
             )
 
         nome_pasta_alb = exportar.nome_pasta_album(produto)
-        subpastas_txt = "  +  ".join("📂 %s/" % SUBPASTAS_FORMATO[f] for f in ativos) if ativos else "(nenhum formato marcado)"
+        partes_est = ["📂 %s/" % SUBPASTAS_FORMATO[f] for f in ativos]
+        if ativos:
+            partes_est.append("📄 %s" % exportar.nome_json_projeto(projeto, produto))
+        subpastas_txt = "  +  ".join(partes_est) if partes_est else "(nenhum formato marcado)"
         self.rotulo_estrutura.configure(
             text="📁 %s   →   %s" % (nome_pasta_alb, subpastas_txt)
         )

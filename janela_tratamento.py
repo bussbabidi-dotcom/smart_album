@@ -209,8 +209,8 @@ class JanelaTratamento(tk.Toplevel):
         if not fotos:
             self.aviso("Nenhuma foto escolhida.")
             return
+        self.aviso("Alternando para o Photoshop (%s foto(s)). Ao salvar (Ctrl+S) ou fechar, o Smart Album volta sozinho." % len(fotos))
         self.app.editar_no_photoshop(fotos)
-        self.aviso("Abrindo %s foto(s) no Photoshop. Salve com Ctrl+S: o álbum atualiza sozinho." % len(fotos))
 
     def carregar_acoes(self):
         self.botao_carregar.configure(state="disabled")

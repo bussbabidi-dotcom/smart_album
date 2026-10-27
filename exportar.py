@@ -18,7 +18,7 @@ from composicao import compor, desenhar_guias
 from comum import mm_para_px
 from produtos import lamina_mm, lamina_px
 
-QUALIDADE_JPG = 95
+QUALIDADE_JPG = 100
 PADRAO_NOME = "{n:02d} - lamina"
 CARACTERES_PROIBIDOS = r'[<>:"/\\|?*\x00-\x1f]'
 DPIS_DISPONIVEIS = (150, 300)
@@ -150,6 +150,12 @@ def nome_pdf_unico(projeto, produto):
     """Nome do arquivo PDF único do álbum."""
     base = nome_arquivo("{album}", 1, projeto, produto)
     return base + ".pdf"
+
+
+def nome_json_projeto(projeto, produto):
+    """Nome do arquivo JSON do projeto salvo automaticamente na pasta do álbum."""
+    base = nome_arquivo("{album}", 1, projeto, produto)
+    return base + ".album.json"
 
 
 def tamanho_lamina(produto, largura=None):
