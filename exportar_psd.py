@@ -21,8 +21,8 @@ from pathlib import Path
 from PIL import Image
 
 from comum import apagar_pasta, cor_rgb, substituir_arquivo
-from composicao import aplicar_moldura, imagem_de_fundo, rosto_de
-from exportar import itens_exportacao, opcoes_padrao, perfil_icc, tamanho_lamina
+from composicao import aplicar_moldura, compor_fundo_completo, rosto_de
+from exportar import converter_para_perfil, itens_exportacao, opcoes_padrao, perfil_icc, produto_com_dpi, tamanho_lamina
 from photoshop import fechar_documentos_da_pasta, rodar_jsx
 from produtos import caixa_px, lamina_mm
 from recorte import foto_no_espaco
@@ -111,17 +111,26 @@ function adicionarTexto(doc, t) {
 """
 
 
-def _preparar_fotos(espacos, tamanho, fundo, info, pasta, prefixo, produto, com_icc=True):
-    """Corta cada foto no tamanho exato do espaÃ§o e grava na pasta temporÃ¡ria."""
-    icc = perfil_icc(produto) if com_icc else None
+def _preparar_fotos(espacos, tamanho, fundo, info, pasta, prefixo, produto, com_icc=True, perfil_cor="sRGB"):
+    """Corta cada foto no tamanho exato do espaço e grava na pasta temporária."""
+    icc = perfil_icc(produto, perfil_cor) if com_icc else None
     fotos = []
+    px_por_mm = tamanho[0] / float(lamina_mm(produto)[0])
     for indice, espaco in enumerate(espacos, start=1):
         if not espaco.get("foto"):
             continue
         x, y, w, h = caixa_px(espaco, tamanho)
-        pronta = foto_no_espaco(espaco["foto"], espaco.get("edicao"), rosto_de(info, espaco["foto"]), (w, h), fundo)
-        aplicar_moldura(pronta, (espaco.get("edicao") or {}).get("moldura"),
-                         tamanho[0] / float(lamina_mm(produto)[0]))
+        ex = float(espaco.get("x", 0.0))
+        ew = float(espaco.get("w", 0.0))
+        dobra_x = (0.5 - ex) / ew if (ew > 0.05 and ex < 0.495 and ex + ew > 0.505) else None
+        pronta = foto_no_espaco(
+            espaco["foto"], espaco.get("edicao"), rosto_de(info, espaco["foto"]), (w, h), fundo, dobra_x=dobra_x
+        )
+        aplicar_moldura(pronta, (espaco.get("edicao") or {}).get("moldura"), px_por_mm)
+        if com_icc:
+            pronta_conv = converter_para_perfil(pronta, perfil_cor)
+            pronta.close()
+            pronta = pronta_conv
         arquivo = pasta / ("%s_foto_%02d.jpg" % (prefixo, indice))
         opcoes = {"quality": 100, "subsampling": 0, "dpi": (produto["dpi"], produto["dpi"])}
         if icc:
@@ -136,7 +145,7 @@ def _preparar_fotos(espacos, tamanho, fundo, info, pasta, prefixo, produto, com_
 
 
 def _preparar_moldes(sobreposicoes, tamanho, pasta, prefixo):
-    """O PNG do molde no tamanho da Ã¡rea. dx/dy: onde comeÃ§a o conteÃºdo visÃ­vel do PNG."""
+    """O PNG do molde no tamanho da área. dx/dy: onde começa o conteúdo visível do PNG."""
     moldes = []
     for indice, sobre in enumerate(sobreposicoes or [], start=1):
         try:
@@ -157,35 +166,57 @@ def _preparar_moldes(sobreposicoes, tamanho, pasta, prefixo):
     return moldes
 
 
-def _preparar_fundo(fundo_imagem, tamanho, pasta, prefixo, aviso):
-    """A imagem de fundo jÃ¡ no tamanho do documento, com opacidade e desfoque, num PNG."""
-    if not fundo_imagem or not fundo_imagem.get("caminho"):
-        return []
+def _preparar_fundo(lamina, tamanho, pasta, prefixo, produto, com_icc=True, perfil_cor="sRGB", aviso=print):
+    """
+    Gera uma camada única de fundo já mesclada com todos os efeitos e configurações da lâmina:
+    cor base, imagem de fundo (lâmina inteira e/ou páginas esquerda/direita), brilho, contraste,
+    saturação, matiz, tingir com cor (Colorize), preto e branco, desfoque, opacidade, degradê e fusão.
+    """
     try:
-        camada = imagem_de_fundo(fundo_imagem, tamanho)
-    except (OSError, ValueError) as e:
-        aviso("  imagem de fundo ignorada (%s): %s" % (fundo_imagem["caminho"], e))
+        camada_rgba = compor_fundo_completo(
+            tamanho,
+            lamina.get("fundo", "#ffffff"),
+            lamina.get("fundo_imagem"),
+            rapido=False,
+            opcoes_pagina=lamina,
+        )
+        camada_rgb = camada_rgba.convert("RGB")
+        camada_rgba.close()
+        if com_icc:
+            conv = converter_para_perfil(camada_rgb, perfil_cor)
+            camada_rgb.close()
+            camada_rgb = conv
+        arquivo = pasta / ("%s_fundo.png" % prefixo)
+        icc = perfil_icc(produto, perfil_cor) if com_icc else None
+        op_png = {"compress_level": 1, "dpi": (produto["dpi"], produto["dpi"])}
+        if icc:
+            op_png["icc_profile"] = icc
+        camada_rgb.save(arquivo, "PNG", **op_png)
+        camada_rgb.close()
+
+        partes_nome = []
+        for ch in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
+            dados_f = lamina.get(ch) or {}
+            if dados_f.get("caminho"):
+                partes_nome.append(Path(dados_f["caminho"]).stem)
+        nome_camada = ("Fundo - " + " + ".join(partes_nome)) if partes_nome else "Fundo da Lâmina"
+        return [{
+            "arquivo": str(arquivo), "x": 0, "y": 0, "dx": 0, "dy": 0,
+            "nome": nome_camada,
+        }]
+    except Exception as e:
+        aviso("  aviso ao preparar camada de fundo (%s): %s" % (prefixo, e))
         return []
-    caixa = camada.getchannel("A").getbbox()
-    if not caixa:
-        return []
-    arquivo = pasta / ("%s_fundo.png" % prefixo)
-    camada.save(arquivo, "PNG", compress_level=1)
-    camada.close()
-    return [{
-        "arquivo": str(arquivo), "x": 0, "y": 0, "dx": caixa[0], "dy": caixa[1],
-        "nome": "Fundo - %s" % Path(fundo_imagem["caminho"]).stem,
-    }]
 
 
-def _job_item(projeto, produto, info, item, nome, pasta, aviso=print, com_icc=True):
+def _job_item(projeto, produto, info, item, nome, pasta, aviso=print, com_icc=True, perfil_cor="sRGB"):
     lamina = projeto["laminas"][item]
     tamanho = tamanho_lamina(produto)
     fundo = cor_rgb(lamina.get("fundo", "#ffffff"))
-    fotos = _preparar_fotos(lamina.get("espacos", []), tamanho, fundo, info, pasta, nome, produto, com_icc)
+    fotos = _preparar_fotos(lamina.get("espacos", []), tamanho, fundo, info, pasta, nome, produto, com_icc, perfil_cor)
     moldes = _preparar_moldes(lamina.get("sobreposicoes"), tamanho, pasta, nome)
     textos = []
-    fundos = _preparar_fundo(lamina.get("fundo_imagem"), tamanho, pasta, nome, aviso)
+    fundos = _preparar_fundo(lamina, tamanho, pasta, nome, produto, com_icc, perfil_cor, aviso)
     return {
         "largura": tamanho[0], "altura": tamanho[1], "dpi": produto["dpi"], "nome": nome,
         "fundo": list(fundo), "fundos": fundos, "fotos": fotos, "moldes": moldes, "textos": textos,
@@ -194,13 +225,15 @@ def _job_item(projeto, produto, info, item, nome, pasta, aviso=print, com_icc=Tr
 
 
 def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda: False, ao_progresso=None, opcoes=None):
-    """Um PSD por lÃ¢mina. Devolve os arquivos gravados. opcoes como em exportar.exportar_jpg."""
+    """Um PSD por lâmina com a camada única de fundo já mesclada com todos os efeitos e configurações."""
     op = opcoes_padrao()
     op.update(opcoes or {})
+    prod_dpi = produto_com_dpi(produto, op.get("dpi"))
+    perfil_cor = op.get("perfil_cor", "sRGB")
     pasta_saida = Path(pasta_saida)
     pasta_saida.mkdir(parents=True, exist_ok=True)
     pasta_temp = Path(tempfile.mkdtemp(prefix="album_psd_"))
-    itens = itens_exportacao(projeto, op.get("indices"), op["padrao"], produto)
+    itens = itens_exportacao(projeto, op.get("indices"), op["padrao"], prod_dpi)
     gravados = []
     try:
         for n, (nome, item) in enumerate(itens, start=1):
@@ -208,16 +241,16 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
                 aviso("Parado.")
                 break
             if op["existentes"] == "pular" and (pasta_saida / (nome + ".psd")).exists():
-                aviso("Pulou %s.psd (jÃ¡ existe)" % nome)
+                aviso("Pulou %s.psd (já existe)" % nome)
                 if ao_progresso:
                     ao_progresso(n, len(itens))
                 continue
             aviso("Montando %s no Photoshop..." % nome)
-            job = _job_item(projeto, produto, info, item, nome, pasta_temp, aviso, op["icc"])
+            job = _job_item(projeto, prod_dpi, info, item, nome, pasta_temp, aviso, op["icc"], perfil_cor)
             rodar_jsx(job, JSX_LAMINA, pasta_temp)
             local = Path(job["saida"])
             if not local.is_file() or local.stat().st_size == 0:
-                raise RuntimeError("O Photoshop nÃ£o gravou %s" % local.name)
+                raise RuntimeError("O Photoshop não gravou %s" % local.name)
             destino = pasta_saida / local.name
             substituir_arquivo(local, destino)
             gravados.append(destino)

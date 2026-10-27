@@ -407,15 +407,30 @@ class EditorFundo(tk.Toplevel):
                     text="Arquivo: %s  (edições salvas somente neste fundo)" % Path(dados["caminho"]).name
                 )
             else:
-                self.rotulo_arquivo.configure(text="Sem imagem de fundo: escolha uma imagem na galeria primeiro.")
+                self.rotulo_arquivo.configure(
+                    text="Fundo sem imagem: Tingir com Cor altera a cor do fundo diretamente."
+                )
             qtd_sel = len(getattr(self.app, "laminas_sel", set()) or ([self.app.atual] if isinstance(self.app.atual, int) else []))
             self.botao_selecionadas.configure(
                 text="Aplicar nas selecionadas (%d)" % max(1, qtd_sel)
             )
             for controle in self._controles:
-                controle.state(["!disabled"] if (dados and dados.get("caminho")) else ["disabled"])
+                controle.state(["!disabled"] if dono is not None else ["disabled"])
         finally:
             self._carregando = False
+
+    def _aplicar_cor_sem_imagem(self, dono, cor_tinta, forca):
+        if dono is None:
+            return
+        ch_cor, _ch_img = self.app._chaves_fundo_alvo() if hasattr(self.app, "_chaves_fundo_alvo") else ("fundo", "fundo_imagem")
+        f = max(0.0, min(100.0, float(forca if forca is not None else 100.0))) / 100.0
+        cr, cg, cb = cor_rgb(cor_tinta)
+        # Mistura suave do branco/base com a cor escolhida conforme a intensidade
+        r = int(round(255 * (1.0 - f) + cr * f))
+        g = int(round(255 * (1.0 - f) + cg * f))
+        b = int(round(255 * (1.0 - f) + cb * f))
+        dono[ch_cor] = "#%02x%02x%02x" % (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+        dono["_tingir_sem_img"] = {"tingir_cor": cor_hex(cor_tinta), "tingir_forca": int(round(f * 100))}
 
     def _mudou(self, chave):
         valor = int(round(self.vars[chave].get()))
@@ -423,7 +438,14 @@ class EditorFundo(tk.Toplevel):
         if self._carregando:
             return
         dono, dados = self._dados()
-        if not dados:
+        if dono is None:
+            return
+        if not dados or not dados.get("caminho"):
+            if chave == "tingir_forca":
+                info_s = dono.get("_tingir_sem_img") or {}
+                cor_atual = info_s.get("tingir_cor") or self.amostra.cget("bg") or AJUSTES_FUNDO_PADRAO["tingir_cor"]
+                self._aplicar_cor_sem_imagem(dono, cor_atual, valor)
+                self.app.fundo_ajustado()
             return
         if chave in ("opacidade", "desfoque"):
             if dados.get(chave) == valor:
@@ -450,31 +472,50 @@ class EditorFundo(tk.Toplevel):
 
     def zerar(self):
         dono, dados = self._dados()
-        if not dados:
+        if dono is None:
             return
         self.app.marcar_historico()
-        dados["ajustes"] = {}
-        dados["opacidade"] = 100
-        dados["desfoque"] = 0
+        if dados:
+            dados["ajustes"] = {}
+            dados["opacidade"] = 100
+            dados["desfoque"] = 0
+        else:
+            ch_cor, _ = self.app._chaves_fundo_alvo() if hasattr(self.app, "_chaves_fundo_alvo") else ("fundo", "fundo_imagem")
+            dono[ch_cor] = "#ffffff"
+            dono.pop("_tingir_sem_img", None)
         self.mostrar()
         self.app.fundo_ajustado(final=True)
 
     def escolher_cor(self):
         dono, dados = self._dados()
-        if not dados:
+        if dono is None:
             return
-        ajustes = dados.get("ajustes") or {}
+        ajustes = (dados.get("ajustes") if dados else dono.get("_tingir_sem_img")) or {}
         cor_ini = cor_hex(ajustes.get("tingir_cor", AJUSTES_FUNDO_PADRAO["tingir_cor"]))
         forca_ini = ajustes.get("tingir_forca", 0)
         self.app.marcar_historico()
 
         def _previa_cor(nova_cor):
-            aj = dados.setdefault("ajustes", {})
-            aj["tingir_cor"] = cor_hex(nova_cor)
-            if not aj.get("tingir_forca"):
-                aj["tingir_forca"] = 50
-            self.amostra.configure(bg=aj["tingir_cor"])
-            self.rotulo_hex.configure(text=aj["tingir_cor"].upper())
+            nova_hex = cor_hex(nova_cor)
+            if dados and dados.get("caminho"):
+                aj = dados.setdefault("ajustes", {})
+                aj["tingir_cor"] = nova_hex
+                if not aj.get("tingir_forca"):
+                    aj["tingir_forca"] = 65
+                f_atual = aj["tingir_forca"]
+            else:
+                info_s = dono.get("_tingir_sem_img") or {}
+                f_atual = info_s.get("tingir_forca") or 80
+                self._aplicar_cor_sem_imagem(dono, nova_hex, f_atual)
+            self.amostra.configure(bg=nova_hex)
+            self.rotulo_hex.configure(text=nova_hex.upper())
+            if "tingir_forca" in self.vars:
+                self._carregando = True
+                try:
+                    self.vars["tingir_forca"].set(f_atual)
+                    self.rotulos["tingir_forca"].configure(text="%d" % int(round(float(f_atual))))
+                finally:
+                    self._carregando = False
             self.app.fundo_ajustado()
 
         cor = tema.escolher_cor_photoshop(
@@ -485,9 +526,12 @@ class EditorFundo(tk.Toplevel):
         )
         if not cor:
             # Restaura caso cancelado
-            aj = dados.setdefault("ajustes", {})
-            aj["tingir_cor"] = cor_ini
-            aj["tingir_forca"] = forca_ini
+            if dados and dados.get("caminho"):
+                aj = dados.setdefault("ajustes", {})
+                aj["tingir_cor"] = cor_ini
+                aj["tingir_forca"] = forca_ini
+            elif forca_ini:
+                self._aplicar_cor_sem_imagem(dono, cor_ini, forca_ini)
             self.mostrar()
             self.app.fundo_ajustado(final=True)
             return
@@ -495,8 +539,8 @@ class EditorFundo(tk.Toplevel):
 
     def capturar_cor_da_tela(self):
         """Ativa o conta-gotas em tela cheia para capturar qualquer pixel da tela."""
-        dono, dados = self._dados()
-        if not dados:
+        dono, _dados = self._dados()
+        if dono is None:
             return
         self.withdraw()
         self.update_idletasks()
@@ -514,16 +558,22 @@ class EditorFundo(tk.Toplevel):
 
     def definir_tinta(self, cor, forca=None, marcar=True):
         dono, dados = self._dados()
-        if not dados:
+        if dono is None:
             return
         if marcar:
             self.app.marcar_historico()
-        ajustes = dados.setdefault("ajustes", {})
-        ajustes["tingir_cor"] = cor_hex(cor)
-        if forca is not None:
-            ajustes["tingir_forca"] = int(forca)
-        elif not ajustes.get("tingir_forca"):
-            ajustes["tingir_forca"] = 55
+        cor_limpa = cor_hex(cor)
+        if dados and dados.get("caminho"):
+            ajustes = dados.setdefault("ajustes", {})
+            ajustes["tingir_cor"] = cor_limpa
+            if forca is not None:
+                ajustes["tingir_forca"] = int(forca)
+            elif not ajustes.get("tingir_forca"):
+                ajustes["tingir_forca"] = 65
+        else:
+            info_s = dono.get("_tingir_sem_img") or {}
+            f_val = int(forca) if forca is not None else (info_s.get("tingir_forca") or 80)
+            self._aplicar_cor_sem_imagem(dono, cor_limpa, f_val)
         self.mostrar()
         self.app.fundo_ajustado(final=True)
 

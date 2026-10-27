@@ -126,26 +126,33 @@ def ajustar_cores(img, ajustes):
     """
     a = dict(AJUSTES_FUNDO_PADRAO)
     a.update(ajustes or {})
-    if not any(float(a[k] or 0) for k in ("brilho", "contraste", "saturacao", "matiz", "tingir_cor" if float(a.get("tingir_forca") or 0) else "tingir_forca")):
+    if not any(float(a.get(k) or 0) for k in ("brilho", "contraste", "saturacao", "matiz", "tingir_forca")):
         return img
     alfa = img.getchannel("A") if img.mode == "RGBA" else None
     rgb = img.convert("RGB")
-    matiz = float(a["matiz"] or 0)
+    matiz = float(a.get("matiz") or 0)
     if abs(matiz) >= 0.5:
         h, s, v = rgb.convert("HSV").split()
         passo = int(round(matiz * 256 / 360.0))
         h = h.point(lambda x: (x + passo) % 256)
         rgb = Image.merge("HSV", (h, s, v)).convert("RGB")
-    if float(a["saturacao"] or 0):
+    if float(a.get("saturacao") or 0):
         rgb = ImageEnhance.Color(rgb).enhance(max(0.0, 1 + float(a["saturacao"]) / 100.0))
-    if float(a["brilho"] or 0):
+    if float(a.get("brilho") or 0):
         rgb = ImageEnhance.Brightness(rgb).enhance(max(0.0, 1 + float(a["brilho"]) / 100.0))
-    if float(a["contraste"] or 0):
+    if float(a.get("contraste") or 0):
         rgb = ImageEnhance.Contrast(rgb).enhance(max(0.0, 1 + float(a["contraste"]) / 100.0))
-    forca = max(0.0, min(100.0, float(a["tingir_forca"] or 0))) / 100.0
+    forca = max(0.0, min(100.0, float(a.get("tingir_forca") or 0))) / 100.0
     if forca > 0:
-        tingida = ImageOps.colorize(ImageOps.grayscale(rgb), black=(0, 0, 0), mid=cor_rgb(a["tingir_cor"]),
-                                    white=(255, 255, 255))
+        cr, cg, cb = cor_rgb(a.get("tingir_cor") or "#c08a4a")
+        cinza = ImageOps.grayscale(rgb)
+        cor_escura = (int(round(cr * 0.12)), int(round(cg * 0.12)), int(round(cb * 0.12)))
+        cor_clara = (
+            int(round(cr + (255 - cr) * 0.18)),
+            int(round(cg + (255 - cg) * 0.18)),
+            int(round(cb + (255 - cb) * 0.18)),
+        )
+        tingida = ImageOps.colorize(cinza, black=cor_escura, mid=(cr, cg, cb), white=cor_clara)
         rgb = Image.blend(rgb, tingida, forca)
     if alfa is not None:
         rgb = rgb.convert("RGBA")
