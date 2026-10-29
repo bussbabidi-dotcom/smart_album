@@ -4735,21 +4735,39 @@ class Aplicativo:
         """
         Linhas (mm) onde as bordas grudam com ímã suave estilo Photoshop:
         Separa (xs_safe, ys_safe, xs_sangria, ys_sangria) para que as linhas de sangria
-        tenham tolerância mínima e nunca travem o movimento do mouse.
+        e a margem interna entre as páginas tenham tolerância mínima e nunca travem
+        o redimensionamento perto ou através do meio da lâmina.
         """
         p = self.produto
         lw, lh = self._mm()
         b = float(p["sangria_mm"])
         margem = float(self._cfg()["margem_mm"])
         esp = float(self._cfg()["espacamento_mm"])
-        xs_sangria = {0.0, lw, b, lw - b}
+        n_pags = int(p.get("paginas_por_lamina", 1))
+        meio_x = lw / 2.0
+
+        xs_sangria = {0.0, lw, b, lw - b, meio_x}
         ys_sangria = {0.0, lh, b, lh - b}
-        xs_safe = {lw / 2.0}
+        xs_safe = set()
         ys_safe = {lh / 2.0}
-        for pagina in range(p["paginas_por_lamina"]):
+
+        faixa_meio_min = meio_x
+        faixa_meio_max = meio_x
+        for pagina in range(n_pags):
             ux, uy, uw, uh = area_util_pagina_mm(p, pagina, margem, respeitar_seguranca=True)
-            xs_safe |= {ux, ux + uw / 2.0, ux + uw}
             ys_safe |= {uy, uy + uh / 2.0, uy + uh}
+            xs_safe.add(ux + uw / 2.0)
+            if n_pags > 1 and pagina == 0:
+                xs_safe.add(ux)
+                xs_sangria.add(ux + uw)
+                faixa_meio_min = min(faixa_meio_min, ux + uw)
+            elif n_pags > 1 and pagina == n_pags - 1:
+                xs_sangria.add(ux)
+                xs_safe.add(ux + uw)
+                faixa_meio_max = max(faixa_meio_max, ux)
+            else:
+                xs_safe |= {ux, ux + uw}
+
         indices_ignorar = set()
         if isinstance(ignorar, tuple):
             if ignorar[0] == "espaco":
@@ -4760,84 +4778,26 @@ class Aplicativo:
             if j in indices_ignorar:
                 continue
             ex, ey, ew, eh = self._espaco_mm(outro)
-            xs_safe |= {ex, ex + ew / 2.0, ex + ew, ex - esp, ex + ew + esp}
+            for cand_x in (ex, ex + ew / 2.0, ex + ew, ex - esp, ex + ew + esp):
+                if n_pags > 1 and (faixa_meio_min - 1.0) <= cand_x <= (faixa_meio_max + 1.0):
+                    xs_sangria.add(cand_x)
+                else:
+                    xs_safe.add(cand_x)
             ys_safe |= {ey, ey + eh / 2.0, ey + eh, ey - esp, ey + eh + esp}
         return sorted(xs_safe), sorted(ys_safe), sorted(xs_sangria), sorted(ys_sangria)
 
     def _limitar_caixa_vizinhas(self, lamina, indices_ignorados, caixa_ini, esq, topo, dir_, base, alca, guias_x, guias_y):
         """
-        Impede que o redimensionamento de uma foto ou grupo invada o espaçamento mínimo
-        (espacamento_mm) em relação às fotos vizinhas da lâmina.
+        Mantido por compatibilidade: o espaçamento entre fotos vizinhas agora atua via
+        ímã suave (_alvos_ima) sem criar parede/trava rígida ao redimensionar entre páginas.
         """
-        esp = float(self._cfg()["espacamento_mm"])
-        x0_i, y0_i, w0_i, h0_i = caixa_ini
-        x1_i, y1_i = x0_i + w0_i, y0_i + h0_i
-        for j, outro in enumerate(lamina["espacos"]):
-            if j in indices_ignorados:
-                continue
-            ox, oy, ow, oh = self._espaco_mm(outro)
-            ox1, oy1 = ox + ow, oy + oh
-            # Sobreposição vertical -> restringe movimento horizontal (esq / dir_)
-            if min(base, oy1) - max(topo, oy) > 0.5:
-                if "e" in alca and ox >= x1_i - 1.5:
-                    lim_dir = ox - esp
-                    if dir_ > lim_dir:
-                        dir_ = max(esq + LADO_MINIMO_MM, lim_dir)
-                        if lim_dir not in guias_x:
-                            guias_x.append(lim_dir)
-                if "w" in alca and ox1 <= x0_i + 1.5:
-                    lim_esq = ox1 + esp
-                    if esq < lim_esq:
-                        esq = min(dir_ - LADO_MINIMO_MM, lim_esq)
-                        if lim_esq not in guias_x:
-                            guias_x.append(lim_esq)
-            # Sobreposição horizontal -> restringe movimento vertical (topo / base)
-            if min(dir_, ox1) - max(esq, ox) > 0.5:
-                if "s" in alca and oy >= y1_i - 1.5:
-                    lim_base = oy - esp
-                    if base > lim_base:
-                        base = max(topo + LADO_MINIMO_MM, lim_base)
-                        if lim_base not in guias_y:
-                            guias_y.append(lim_base)
-                if "n" in alca and oy1 <= y0_i + 1.5:
-                    lim_topo = oy1 + esp
-                    if topo < lim_topo:
-                        topo = min(base - LADO_MINIMO_MM, lim_topo)
-                        if lim_topo not in guias_y:
-                            guias_y.append(lim_topo)
         return esq, topo, dir_, base
 
     def _limitar_movimento_vizinhas(self, lamina, indices_ignorados, caixa_ini, x, y, w, h, guias_x, guias_y):
         """
-        Ao arrastar uma foto ou grupo de fotos, respeita o espaçamento mínimo (espacamento_mm)
-        ao encostar em fotos vizinhas que estavam fora da caixa original.
+        Mantido por compatibilidade: o alinhamento de espaçamento ao mover atua via
+        ímã suave (_alvos_ima) sem travar a passagem entre páginas.
         """
-        esp = float(self._cfg()["espacamento_mm"])
-        x0_i, y0_i, w0_i, h0_i = caixa_ini
-        x1_i, y1_i = x0_i + w0_i, y0_i + h0_i
-        for j, outro in enumerate(lamina["espacos"]):
-            if j in indices_ignorados:
-                continue
-            ox, oy, ow, oh = self._espaco_mm(outro)
-            ox1, oy1 = ox + ow, oy + oh
-            if min(y + h, oy1) - max(y, oy) > 0.5:
-                if ox >= x1_i - 1.5 and x + w > ox - esp:
-                    x = max(0.0, ox - esp - w)
-                    if ox - esp not in guias_x:
-                        guias_x.append(ox - esp)
-                elif ox1 <= x0_i + 1.5 and x < ox1 + esp:
-                    x = ox1 + esp
-                    if ox1 + esp not in guias_x:
-                        guias_x.append(ox1 + esp)
-            if min(x + w, ox1) - max(x, ox) > 0.5:
-                if oy >= y1_i - 1.5 and y + h > oy - esp:
-                    y = max(0.0, oy - esp - h)
-                    if oy - esp not in guias_y:
-                        guias_y.append(oy - esp)
-                elif oy1 <= y0_i + 1.5 and y < oy1 + esp:
-                    y = oy1 + esp
-                    if oy1 + esp not in guias_y:
-                        guias_y.append(oy1 + esp)
         return x, y
 
     @staticmethod
@@ -4845,7 +4805,7 @@ class Aplicativo:
         """
         Ímã suave estilo Photoshop sem histerese pegajosa:
         Prioriza Safe Zone e fotos vizinhas (tolerância normal), e aplica ímã ultraleve
-        nas linhas de sangria (tol_sangria) para nunca travar perto da borda.
+        nas linhas de sangria e margem central (tol_sangria) para nunca travar.
         """
         melhor = None
         for v in valores:
@@ -4939,8 +4899,9 @@ class Aplicativo:
     def _layout_mover(self, evento):
         """
         Movimentação e redimensionamento de um único espaço ou molde no estilo Photoshop CC:
-        - Por padrão, arrastar as alças de canto mantém a proporção original do espaço sem travar nas bordas.
-        - Respeita as linhas guias (Safe Zone, dobra central e sangria) e o espaçamento mínimo para fotos vizinhas.
+        - Por padrão, arrastar as alças de canto mantém a proporção original do espaço sem travar nas bordas
+          nem na margem entre as páginas.
+        - Ímã suave nas linhas guias (Safe Zone, dobra central, sangria e espaçamento de fotos vizinhas).
         - Segurar Shift libera a Proporção Livre (estica livremente em X e Y, igual ao Photoshop moderno).
         - Alt desliga o ímã (alinhamento inteligente).
         """
@@ -4977,11 +4938,11 @@ class Aplicativo:
         x0, y0, w0, h0 = a["inicio"]
         guias_x, guias_y = [], []
         alca = a["alca"]
-        eh_espaco = a["alvo"][0] == "espaco"
-        ign_set = {a["alvo"][1]} if eh_espaco else set()
 
-        def imantar(chave, valores, alvos, val_sang=None, alv_sang=None):
-            d, linha = self._imantar(valores, alvos, tolerancia, memoria.get(chave), val_sang, alv_sang, tol_sangria)
+        def imantar(chave, valores, alvos, val_sang=None, alv_sang=None, ignorar_orig=None):
+            alvos_f = [v for v in alvos if ignorar_orig is None or abs(v - ignorar_orig) > 0.6]
+            alv_sang_f = [v for v in (alv_sang or []) if ignorar_orig is None or abs(v - ignorar_orig) > 0.6] if alv_sang else None
+            d, linha = self._imantar(valores, alvos_f, tolerancia, memoria.get(chave), val_sang, alv_sang_f, tol_sangria)
             memoria[chave] = linha
             return d, linha
 
@@ -4997,87 +4958,62 @@ class Aplicativo:
                 if linha is not None and 0 <= y + d <= lh - h0:
                     y += d
                     guias_y.append(linha)
-                if eh_espaco:
-                    x, y = self._limitar_movimento_vizinhas(
-                        lamina, ign_set, (x0, y0, w0, h0), x, y, w0, h0, guias_x, guias_y
-                    )
-                    x = min(max(x, 0.0), lw - w0)
-                    y = min(max(y, 0.0), lh - h0)
             w, h = w0, h0
         else:
-            esq, topo, dir_, base = x0, y0, x0 + w0, y0 + h0
+            esq_raw, topo_raw, dir_raw, base_raw = x0, y0, x0 + w0, y0 + h0
             if "w" in alca:
-                esq = x0 + dx
+                esq_raw = x0 + dx
             if "e" in alca:
-                dir_ = x0 + w0 + dx
+                dir_raw = x0 + w0 + dx
             if "n" in alca:
-                topo = y0 + dy
+                topo_raw = y0 + dy
             if "s" in alca:
-                base = y0 + h0 + dy
-            if ima:
-                for lado in ("w", "e"):
-                    if lado in alca:
-                        v_lado = [esq if lado == "w" else dir_]
-                        d, linha = imantar(lado, v_lado, xs, v_lado, xs_sang)
-                        if linha is not None:
-                            guias_x.append(linha)
-                            if lado == "w":
-                                esq += d
-                            else:
-                                dir_ += d
-                for lado in ("n", "s"):
-                    if lado in alca:
-                        v_lado = [topo if lado == "n" else base]
-                        d, linha = imantar(lado, v_lado, ys, v_lado, ys_sang)
-                        if linha is not None:
-                            guias_y.append(linha)
-                            if lado == "n":
-                                topo += d
-                            else:
-                                base += d
+                base_raw = y0 + h0 + dy
 
-            # Limita às bordas da lâmina e ao espaçamento das vizinhas
-            esq = max(0.0, min(esq, lw - LADO_MINIMO_MM))
-            dir_ = min(lw, max(dir_, LADO_MINIMO_MM))
-            topo = max(0.0, min(topo, lh - LADO_MINIMO_MM))
-            base = min(lh, max(base, LADO_MINIMO_MM))
-            if ima and eh_espaco:
-                esq, topo, dir_, base = self._limitar_caixa_vizinhas(
-                    lamina, ign_set, (x0, y0, w0, h0), esq, topo, dir_, base, alca, guias_x, guias_y
-                )
-            if "w" in alca:
-                esq = min(esq, dir_ - LADO_MINIMO_MM)
-            else:
-                dir_ = max(dir_, esq + LADO_MINIMO_MM)
-            if "n" in alca:
-                topo = min(topo, base - LADO_MINIMO_MM)
-            else:
-                base = max(base, topo + LADO_MINIMO_MM)
-
-            # Estilo Photoshop: alças de canto mantêm a proporção por padrão; Shift libera Proporção Livre
             manter_proporcao = (not proporcao_livre) and (len(alca) == 2) and w0 > 0 and h0 > 0
             if manter_proporcao:
                 razao = w0 / float(h0)
-                w, h = dir_ - esq, base - topo
-                ax = dir_ if "w" in alca else esq
-                ay = base if "n" in alca else topo
-                # Respeita tanto a borda da lâmina quanto o limite de vizinhas já calculado
-                lim_x_min, lim_x_max = 0.0, lw
-                lim_y_min, lim_y_max = 0.0, lh
-                if ima and eh_espaco:
-                    l_e, l_t, l_d, l_b = self._limitar_caixa_vizinhas(
-                        lamina, ign_set, (x0, y0, w0, h0), 0.0, 0.0, lw, lh, alca, [], []
-                    )
-                    lim_x_min, lim_y_min, lim_x_max, lim_y_max = l_e, l_t, l_d, l_b
-                max_w = (ax - lim_x_min) if "w" in alca else (lim_x_max - ax)
-                max_h = (ay - lim_y_min) if "n" in alca else (lim_y_max - ay)
+                ax = (x0 + w0) if "w" in alca else x0
+                ay = (y0 + h0) if "n" in alca else y0
+                max_w = ax if "w" in alca else (lw - ax)
+                max_h = ay if "n" in alca else (lh - ay)
 
-                if abs(w - w0) / max(1.0, w0) >= abs(h - h0) / max(1.0, h0):
-                    w_desejado = w
+                w_in = max(LADO_MINIMO_MM, (ax - esq_raw) if "w" in alca else (dir_raw - ax))
+                h_in = max(LADO_MINIMO_MM, (ay - topo_raw) if "n" in alca else (base_raw - ay))
+
+                if abs(w_in - w0) / max(1.0, w0) >= abs(h_in - h0) / max(1.0, h0):
+                    w_desejado = w_in
                     h_desejado = w_desejado / razao
                 else:
-                    h_desejado = h
+                    h_desejado = h_in
                     w_desejado = h_desejado * razao
+
+                if ima:
+                    lado_x = "w" if "w" in alca else "e"
+                    borda_x = (ax - w_desejado) if lado_x == "w" else (ax + w_desejado)
+                    orig_x = x0 if lado_x == "w" else (x0 + w0)
+                    ign_x = orig_x if abs(dx) < tolerancia * 1.5 else None
+                    dx_ima, linha_x = imantar(lado_x, [borda_x], xs, [borda_x], xs_sang, ignorar_orig=ign_x)
+                    if linha_x is not None:
+                        borda_x_nova = borda_x + dx_ima
+                        w_snap = (ax - borda_x_nova) if lado_x == "w" else (borda_x_nova - ax)
+                        h_snap = w_snap / razao
+                        if LADO_MINIMO_MM <= w_snap <= max_w and LADO_MINIMO_MM <= h_snap <= max_h:
+                            w_desejado, h_desejado = w_snap, h_snap
+                            guias_x.append(linha_x)
+
+                    lado_y = "n" if "n" in alca else "s"
+                    borda_y = (ay - h_desejado) if lado_y == "n" else (ay + h_desejado)
+                    orig_y = y0 if lado_y == "n" else (y0 + h0)
+                    ign_y = orig_y if abs(dy) < tolerancia * 1.5 else None
+                    dy_ima, linha_y = imantar(lado_y, [borda_y], ys, [borda_y], ys_sang, ignorar_orig=ign_y)
+                    if linha_y is not None and not guias_x:
+                        borda_y_nova = borda_y + dy_ima
+                        h_snap = (ay - borda_y_nova) if lado_y == "n" else (borda_y_nova - ay)
+                        w_snap = h_snap * razao
+                        if LADO_MINIMO_MM <= w_snap <= max_w and LADO_MINIMO_MM <= h_snap <= max_h:
+                            w_desejado, h_desejado = w_snap, h_snap
+                            guias_y.append(linha_y)
 
                 if w_desejado > max_w:
                     w_desejado = max_w
@@ -5089,14 +5025,50 @@ class Aplicativo:
                 w_desejado = max(LADO_MINIMO_MM, w_desejado)
                 h_desejado = max(LADO_MINIMO_MM, h_desejado)
 
+                esq = max(0.0, ax - w_desejado) if "w" in alca else ax
+                dir_ = ax if "w" in alca else min(lw, ax + w_desejado)
+                topo = max(0.0, ay - h_desejado) if "n" in alca else ay
+                base = ay if "n" in alca else min(lh, ay + h_desejado)
+            else:
+                esq, topo, dir_, base = esq_raw, topo_raw, dir_raw, base_raw
+                if ima:
+                    for lado in ("w", "e"):
+                        if lado in alca:
+                            v_lado = [esq if lado == "w" else dir_]
+                            orig_x = x0 if lado == "w" else (x0 + w0)
+                            ign_x = orig_x if abs(dx) < tolerancia * 1.5 else None
+                            d, linha = imantar(lado, v_lado, xs, v_lado, xs_sang, ignorar_orig=ign_x)
+                            if linha is not None:
+                                guias_x.append(linha)
+                                if lado == "w":
+                                    esq += d
+                                else:
+                                    dir_ += d
+                    for lado in ("n", "s"):
+                        if lado in alca:
+                            v_lado = [topo if lado == "n" else base]
+                            orig_y = y0 if lado == "n" else (y0 + h0)
+                            ign_y = orig_y if abs(dy) < tolerancia * 1.5 else None
+                            d, linha = imantar(lado, v_lado, ys, v_lado, ys_sang, ignorar_orig=ign_y)
+                            if linha is not None:
+                                guias_y.append(linha)
+                                if lado == "n":
+                                    topo += d
+                                else:
+                                    base += d
+
+                esq = max(0.0, min(esq, lw - LADO_MINIMO_MM))
+                dir_ = min(lw, max(dir_, LADO_MINIMO_MM))
+                topo = max(0.0, min(topo, lh - LADO_MINIMO_MM))
+                base = min(lh, max(base, LADO_MINIMO_MM))
                 if "w" in alca:
-                    esq = max(0.0, ax - w_desejado)
+                    esq = min(esq, dir_ - LADO_MINIMO_MM)
                 else:
-                    dir_ = min(lw, ax + w_desejado)
+                    dir_ = max(dir_, esq + LADO_MINIMO_MM)
                 if "n" in alca:
-                    topo = max(0.0, ay - h_desejado)
+                    topo = min(topo, base - LADO_MINIMO_MM)
                 else:
-                    base = min(lh, ay + h_desejado)
+                    base = max(base, topo + LADO_MINIMO_MM)
 
             x, y, w, h = esq, topo, max(LADO_MINIMO_MM, dir_ - esq), max(LADO_MINIMO_MM, base - topo)
         self._definir_espaco_mm(item, x, y, w, h)
@@ -5123,9 +5095,9 @@ class Aplicativo:
         """
         Movimentação e redimensionamento de várias fotos selecionadas ao mesmo tempo:
         - Respeita as linhas da lâmina (Safe Zone, dobra central, sangria e fotos vizinhas)
-          com ímã inteligente e linhas guias visuais (#ff3fb4).
-        - Mantém o espaçamento estabelecido (espacamento_mm) fixo entre as fotos do grupo
-          e impede invasão do espaçamento mínimo nas fotos vizinhas.
+          com ímã inteligente e linhas guias visuais (#ff3fb4), sem travar na margem entre páginas.
+        - Mantém o espaçamento estabelecido (espacamento_mm) entre fotos adjacentes do grupo
+          e preserva a margem entre páginas quando o grupo abrange as duas páginas.
         - Cada foto selecionada é redimensionada na sua própria proporção individual (w0 / h0).
         - Segurando Shift libera Proporção Livre; segurando Alt desliga o ímã.
         """
@@ -5162,11 +5134,13 @@ class Aplicativo:
         gh = max(1.0, y1 - y0)
         alca = arrasto["alca"]
         geometrias = arrasto["grupo"]
-        indices_grupo = set(geometrias.keys())
         esp = float(self._cfg()["espacamento_mm"])
+        meio_x = lw / 2.0
 
-        def imantar(chave, valores, alvos, val_sang=None, alv_sang=None):
-            d, linha = self._imantar(valores, alvos, tolerancia, memoria.get(chave), val_sang, alv_sang, tol_sangria)
+        def imantar(chave, valores, alvos, val_sang=None, alv_sang=None, ignorar_orig=None):
+            alvos_f = [v for v in alvos if ignorar_orig is None or abs(v - ignorar_orig) > 0.6]
+            alv_sang_f = [v for v in (alv_sang or []) if ignorar_orig is None or abs(v - ignorar_orig) > 0.6] if alv_sang else None
+            d, linha = self._imantar(valores, alvos_f, tolerancia, memoria.get(chave), val_sang, alv_sang_f, tol_sangria)
             memoria[chave] = linha
             return d, linha
 
@@ -5183,11 +5157,6 @@ class Aplicativo:
                 if linha is not None and 0.0 <= gy + d <= lh - gh:
                     gy += d
                     guias_y.append(linha)
-                gx, gy = self._limitar_movimento_vizinhas(
-                    lamina, indices_grupo, (x0, y0, gw, gh), gx, gy, gw, gh, guias_x, guias_y
-                )
-                gx = min(max(gx, 0.0), lw - gw)
-                gy = min(max(gy, 0.0), lh - gh)
             mx = gx - x0
             my = gy - y0
             for i, (x, y, w, h) in geometrias.items():
@@ -5207,7 +5176,9 @@ class Aplicativo:
                 for lado in ("w", "e"):
                     if lado in alca:
                         v_lado = [esq if lado == "w" else dir_]
-                        d, linha = imantar(lado, v_lado, xs, v_lado, xs_sang)
+                        orig_x = x0 if lado == "w" else x1
+                        ign_x = orig_x if abs(dx) < tolerancia * 1.5 else None
+                        d, linha = imantar(lado, v_lado, xs, v_lado, xs_sang, ignorar_orig=ign_x)
                         if linha is not None:
                             guias_x.append(linha)
                             if lado == "w":
@@ -5217,7 +5188,9 @@ class Aplicativo:
                 for lado in ("n", "s"):
                     if lado in alca:
                         v_lado = [topo if lado == "n" else base]
-                        d, linha = imantar(lado, v_lado, ys, v_lado, ys_sang)
+                        orig_y = y0 if lado == "n" else y1
+                        ign_y = orig_y if abs(dy) < tolerancia * 1.5 else None
+                        d, linha = imantar(lado, v_lado, ys, v_lado, ys_sang, ignorar_orig=ign_y)
                         if linha is not None:
                             guias_y.append(linha)
                             if lado == "n":
@@ -5225,26 +5198,44 @@ class Aplicativo:
                             else:
                                 base += d
 
-            # Limita a caixa do grupo às bordas da lâmina e ao espaçamento das fotos vizinhas
             esq = max(0.0, min(esq, lw - LADO_MINIMO_MM))
             dir_ = min(lw, max(dir_, LADO_MINIMO_MM))
             topo = max(0.0, min(topo, lh - LADO_MINIMO_MM))
             base = min(lh, max(base, LADO_MINIMO_MM))
-            if ima:
-                esq, topo, dir_, base = self._limitar_caixa_vizinhas(
-                    lamina, indices_grupo, (x0, y0, gw, gh), esq, topo, dir_, base, alca, guias_x, guias_y
-                )
 
-            # Faixas (colunas e linhas) do grupo para manter o gap (espacamento_mm) fixo entre as fotos
+            # Faixas (colunas e linhas) do grupo preservando espacamento_mm nas adjacentes
+            # e preservando a distância real quando há margem entre páginas
             colunas_x = self._agrupar_intervalos([(x, x + w) for (x, _y, w, _h) in geometrias.values()])
             linhas_y = self._agrupar_intervalos([(y, y + h) for (_x, y, _w, h) in geometrias.values()])
-            n_gaps_x = max(0, len(colunas_x) - 1)
-            n_gaps_y = max(0, len(linhas_y) - 1)
+
+            gaps_x_orig = []
+            for k_c in range(len(colunas_x) - 1):
+                c_fim = colunas_x[k_c][1]
+                c_ini_prox = colunas_x[k_c + 1][0]
+                g0 = max(0.0, c_ini_prox - c_fim)
+                atravessa_dobra = (c_fim <= meio_x + 2.0 and c_ini_prox >= meio_x - 2.0 and g0 > esp + 1.5)
+                if not atravessa_dobra and abs(g0 - esp) <= max(esp * 1.5, 4.0):
+                    gaps_x_orig.append(esp)
+                else:
+                    gaps_x_orig.append(g0)
+
+            gaps_y_orig = []
+            for k_r in range(len(linhas_y) - 1):
+                r_fim = linhas_y[k_r][1]
+                r_ini_prox = linhas_y[k_r + 1][0]
+                g0 = max(0.0, r_ini_prox - r_fim)
+                if abs(g0 - esp) <= max(esp * 1.5, 4.0):
+                    gaps_y_orig.append(esp)
+                else:
+                    gaps_y_orig.append(g0)
+
+            soma_gaps_x = sum(gaps_x_orig)
+            soma_gaps_y = sum(gaps_y_orig)
             w_util_orig = max(1.0, sum(cx1 - cx0 for cx0, cx1 in colunas_x))
             h_util_orig = max(1.0, sum(ry1 - ry0 for ry0, ry1 in linhas_y))
 
-            min_gw = max(LADO_MINIMO_MM, len(colunas_x) * LADO_MINIMO_MM + n_gaps_x * esp)
-            min_gh = max(LADO_MINIMO_MM, len(linhas_y) * LADO_MINIMO_MM + n_gaps_y * esp)
+            min_gw = max(LADO_MINIMO_MM, len(colunas_x) * LADO_MINIMO_MM + len(gaps_x_orig) * esp)
+            min_gh = max(LADO_MINIMO_MM, len(linhas_y) * LADO_MINIMO_MM + len(gaps_y_orig) * esp)
             if "w" in alca:
                 esq = min(esq, dir_ - min_gw)
             else:
@@ -5256,15 +5247,32 @@ class Aplicativo:
 
             ngw_alvo = max(min_gw, dir_ - esq)
             ngh_alvo = max(min_gh, base - topo)
-            sx = max(0.05, (ngw_alvo - n_gaps_x * esp) / w_util_orig)
-            sy = max(0.05, (ngh_alvo - n_gaps_y * esp) / h_util_orig)
 
-            # Limites máximos respeitando bordas da lâmina e fotos vizinhas a partir da âncora
+            # Se o grupo encolher além do espaço dos gaps grandes (ex.: margem entre páginas), comprime os gaps maiores até esp
+            disp_fotos_x = ngw_alvo - soma_gaps_x
+            if disp_fotos_x < len(colunas_x) * LADO_MINIMO_MM and soma_gaps_x > len(gaps_x_orig) * esp:
+                excesso_possivel = soma_gaps_x - len(gaps_x_orig) * esp
+                falta = len(colunas_x) * LADO_MINIMO_MM - disp_fotos_x
+                fator_red = max(0.0, 1.0 - falta / max(1.0, excesso_possivel))
+                gaps_x = [esp + (g - esp) * fator_red if g > esp else g for g in gaps_x_orig]
+                soma_gaps_x = sum(gaps_x)
+            else:
+                gaps_x = list(gaps_x_orig)
+
+            disp_fotos_y = ngh_alvo - soma_gaps_y
+            if disp_fotos_y < len(linhas_y) * LADO_MINIMO_MM and soma_gaps_y > len(gaps_y_orig) * esp:
+                excesso_possivel = soma_gaps_y - len(gaps_y_orig) * esp
+                falta = len(linhas_y) * LADO_MINIMO_MM - disp_fotos_y
+                fator_red = max(0.0, 1.0 - falta / max(1.0, excesso_possivel))
+                gaps_y = [esp + (g - esp) * fator_red if g > esp else g for g in gaps_y_orig]
+                soma_gaps_y = sum(gaps_y)
+            else:
+                gaps_y = list(gaps_y_orig)
+
+            sx = max(0.05, (ngw_alvo - soma_gaps_x) / w_util_orig)
+            sy = max(0.05, (ngh_alvo - soma_gaps_y) / h_util_orig)
+
             lim_e, lim_t, lim_d, lim_b = (0.0, 0.0, lw, lh)
-            if ima:
-                lim_e, lim_t, lim_d, lim_b = self._limitar_caixa_vizinhas(
-                    lamina, indices_grupo, (x0, y0, gw, gh), 0.0, 0.0, lw, lh, alca, [], []
-                )
             ancora_x = x1 if "w" in alca else (x0 if "e" in alca else (x0 + x1) / 2.0)
             ancora_y = y1 if "n" in alca else (y0 if "s" in alca else (y0 + y1) / 2.0)
             if "w" in alca:
@@ -5280,8 +5288,8 @@ class Aplicativo:
             else:
                 max_gh_disp = max(min_gh, 2.0 * min(ancora_y - lim_t, lim_b - ancora_y))
 
-            max_sx = max(0.05, (max_gw_disp - n_gaps_x * esp) / w_util_orig)
-            max_sy = max(0.05, (max_gh_disp - n_gaps_y * esp) / h_util_orig)
+            max_sx = max(0.05, (max_gw_disp - soma_gaps_x) / w_util_orig)
+            max_sy = max(0.05, (max_gh_disp - soma_gaps_y) / h_util_orig)
 
             igualar = bool(getattr(self, "igualar_no_grupo", None) and self.igualar_no_grupo.get())
             w_medio = sum(w for _x, _y, w, _h in geometrias.values()) / float(len(geometrias))
@@ -5306,8 +5314,8 @@ class Aplicativo:
                 sx = max(min_sx, min(sx, max_sx))
                 sy = max(min_sy, min(sy, max_sy))
 
-            ngw_real = w_util_orig * sx + n_gaps_x * esp
-            ngh_real = h_util_orig * sy + n_gaps_y * esp
+            ngw_real = w_util_orig * sx + soma_gaps_x
+            ngh_real = h_util_orig * sy + soma_gaps_y
             if "w" in alca:
                 ngx0 = ancora_x - ngw_real
             elif "e" in alca:
@@ -5324,18 +5332,20 @@ class Aplicativo:
             ngx0 = min(max(lim_e, ngx0), max(lim_e, lim_d - ngw_real))
             ngy0 = min(max(lim_t, ngy0), max(lim_t, lim_b - ngh_real))
 
-            # Posiciona cada coluna e linha mantendo exatamente espacamento_mm entre elas
+            # Posiciona cada coluna e linha preservando os gaps calculados
             novos_cx0 = []
             cur_x = ngx0
-            for cx0, cx1 in colunas_x:
+            for idx_c, (cx0, cx1) in enumerate(colunas_x):
                 novos_cx0.append(cur_x)
-                cur_x += (cx1 - cx0) * sx + esp
+                gap_c = gaps_x[idx_c] if idx_c < len(gaps_x) else esp
+                cur_x += (cx1 - cx0) * sx + gap_c
 
             novos_ry0 = []
             cur_y = ngy0
-            for ry0, ry1 in linhas_y:
+            for idx_r, (ry0, ry1) in enumerate(linhas_y):
                 novos_ry0.append(cur_y)
-                cur_y += (ry1 - ry0) * sy + esp
+                gap_r = gaps_y[idx_r] if idx_r < len(gaps_y) else esp
+                cur_y += (ry1 - ry0) * sy + gap_r
 
             for i, (x, y, w, h) in geometrias.items():
                 idx_c = 0
@@ -5362,7 +5372,7 @@ class Aplicativo:
                     ny = novos_ry0[idx_r] + (y - ry0_orig) * sy
                 novas[i] = [nx, ny, nw, nh]
 
-            # Garante gap fixo (espacamento_mm) também entre sub-colunas e sub-linhas internas ao grupo
+            # Garante gap fixo (espacamento_mm) apenas entre sub-colunas e sub-linhas adjacentes na mesma página
             ordem_x = sorted(geometrias.keys(), key=lambda idx_k: geometrias[idx_k][0])
             for a_idx in range(len(ordem_x)):
                 i_a = ordem_x[a_idx]
@@ -5370,7 +5380,9 @@ class Aplicativo:
                 for b_idx in range(a_idx + 1, len(ordem_x)):
                     i_b = ordem_x[b_idx]
                     xb, yb, wb, hb = geometrias[i_b]
-                    if min(ya + ha, yb + hb) - max(ya, yb) > 1.0 and abs(xb - (xa + wa)) <= max(esp * 2.2, 6.0):
+                    g0_ab = xb - (xa + wa)
+                    atravessa_ab = ((xa + wa) <= meio_x + 2.0 and xb >= meio_x - 2.0 and g0_ab > esp + 1.5)
+                    if not atravessa_ab and min(ya + ha, yb + hb) - max(ya, yb) > 1.0 and abs(g0_ab - esp) <= max(esp * 1.5, 4.0):
                         novas[i_b][0] = novas[i_a][0] + novas[i_a][2] + esp
 
             ordem_y = sorted(geometrias.keys(), key=lambda idx_k: geometrias[idx_k][1])
@@ -5380,7 +5392,8 @@ class Aplicativo:
                 for b_idx in range(a_idx + 1, len(ordem_y)):
                     i_b = ordem_y[b_idx]
                     xb, yb, wb, hb = geometrias[i_b]
-                    if min(xa + wa, xb + wb) - max(xa, xb) > 1.0 and abs(yb - (ya + ha)) <= max(esp * 2.2, 6.0):
+                    g0_ab = yb - (ya + ha)
+                    if min(xa + wa, xb + wb) - max(xa, xb) > 1.0 and abs(g0_ab - esp) <= max(esp * 1.5, 4.0):
                         novas[i_b][1] = novas[i_a][1] + novas[i_a][3] + esp
 
             min_x = min(v[0] for v in novas.values())
