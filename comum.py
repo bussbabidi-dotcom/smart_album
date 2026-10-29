@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 EXTENSOES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+EXTENSOES_IMAGEM = EXTENSOES
 EXTENSOES_RAW = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".dng", ".pef", ".srw"}
 
 

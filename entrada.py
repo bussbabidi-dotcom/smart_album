@@ -92,7 +92,13 @@ def pasta_comum(fotos):
 
 
 def sugerir_saida(pasta_fotos):
-    return str(Path(pasta_fotos) / "saida") if pasta_fotos else ""
+    """Usa a própria pasta das fotos como base padrão (sem criar subpasta 'saida')."""
+    if not pasta_fotos:
+        return ""
+    p = Path(pasta_fotos)
+    if p.name.lower() in ("saida", "saída") and not p.exists():
+        p = p.parent
+    return str(p)
 
 
 def adivinhar_produto(pasta, fotos):
@@ -126,17 +132,33 @@ def adicionar_recente(tipo, caminho):
 # Foto que mudou de lugar
 # ------------------------------------------------------------
 
-def consertar_caminhos(projeto, nova_pasta):
+def consertar_caminhos(projeto, nova_pasta, forcar_todas=False):
     """
-    Procura as fotos que faltam dentro da nova pasta (pelo nome; com nomes
-    repetidos, vence a que tem mais pastas iguais no caminho) e corrige o
-    projeto inteiro. Devolve (consertadas, ainda faltando).
+    Procura as fotos dentro da nova pasta (pelo nome; com nomes repetidos,
+    vence a que tem mais pastas iguais no caminho) e corrige o projeto inteiro.
+    Se `forcar_todas=True` (ou se não houver fotos faltando mas o usuário pediu
+    para relinkar a pasta), tenta relinkar todas as fotos e fundos do projeto.
+    Devolve (consertadas, ainda faltando).
     """
     por_nome = {}
     for foto in analise.listar_imagens(nova_pasta):
         por_nome.setdefault(foto.name.casefold(), []).append(foto)
+
+    alvos = list(proj.faltando(projeto))
+    if forcar_todas or not alvos:
+        todos = [f["caminho"] for f in projeto.get("fotos", []) if f.get("caminho")]
+        todos += [e["foto"] for e in proj.todos_espacos(projeto) if e.get("foto")]
+        todos += [d["caminho"] for d in proj.fundos_imagem(projeto) if d.get("caminho")]
+        vistos = set()
+        alvos = []
+        for c in todos:
+            ch = normalizar_caminho(c)
+            if ch not in vistos:
+                vistos.add(ch)
+                alvos.append(c)
+
     consertadas = 0
-    for antigo in proj.faltando(projeto):
+    for antigo in alvos:
         candidatos = por_nome.get(Path(antigo).name.casefold())
         if not candidatos:
             continue
@@ -153,6 +175,8 @@ def consertar_caminhos(projeto, nova_pasta):
         melhor = max(candidatos, key=parecidas)
         proj.trocar_caminho(projeto, antigo, melhor)
         consertadas += 1
+    if consertadas > 0:
+        projeto["pasta_fotos"] = str(nova_pasta)
     return consertadas, proj.faltando(projeto)
 
 
