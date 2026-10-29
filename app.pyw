@@ -645,9 +645,10 @@ class Aplicativo:
                 (self.botoes_timeline, "«", lambda: self.mover_lamina_passo(-1), "Mover a lâmina para antes (Ctrl+← ou Ctrl+↑)\n"
                                                                                  "Também dá para arrastar a miniatura.", (6, 1)),
                 (self.botoes_timeline, "»", lambda: self.mover_lamina_passo(1), "Mover a lâmina para depois (Ctrl+→ ou Ctrl+↓)", 1),
+                (self.botoes_tl_edicao, "☑", self.alternar_selecao_todas_laminas, "Selecionar todas as lâminas / limpar seleção em grupo", (4, 1)),
                 (self.botoes_tl_edicao, "+", self.adicionar_lamina, "Nova lâmina depois desta", 1),
-                (self.botoes_tl_edicao, "⧉", self.duplicar_lamina, "Duplicar a lâmina", 1),
-                (self.botoes_tl_edicao, "−", self.remover_lamina, "Apagar a lâmina", 1)):
+                (self.botoes_tl_edicao, "⧉", self.duplicar_lamina, "Duplicar a(s) lâmina(s) selecionada(s)", 1),
+                (self.botoes_tl_edicao, "−", self.remover_lamina, "Apagar todas as lâminas selecionadas de uma vez (Del ou Shift+Del)", 1)):
             botao = self._botao(pai, texto, comando, dica, "Mini.TButton", width=2)
             botao.pack(side="left", padx=espaco)
             self._botoes_nav.append(botao)
@@ -2141,11 +2142,10 @@ class Aplicativo:
             if self.projeto.get("fotos") or self.projeto.get("laminas"):
                 caminho = self.caminho_projeto
                 if not caminho:
-                    pasta_base = self.projeto.get("pasta_saida") or self.projeto.get("pasta_fotos")
+                    pasta_fotos = self.projeto.get("pasta_fotos") or ""
                     nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (self.projeto.get("nome") or "album").strip()) or "album"
-                    if pasta_base and Path(pasta_base).parent.exists():
-                        Path(pasta_base).mkdir(parents=True, exist_ok=True)
-                        caminho = str(Path(pasta_base) / (nome_limpo + proj.EXTENSAO))
+                    if pasta_fotos and Path(pasta_fotos).is_dir():
+                        caminho = str(Path(pasta_fotos) / (nome_limpo + proj.EXTENSAO))
                     else:
                         pasta_auto = PASTA_DADOS / "autosave"
                         pasta_auto.mkdir(parents=True, exist_ok=True)
@@ -2295,7 +2295,7 @@ class Aplicativo:
                 self._definir_produto(produto)
             self.projeto["nome"] = pasta_origem.name if pasta_origem else "Novo álbum"
             self.projeto["pasta_fotos"] = str(pasta_origem) if pasta_origem else ""
-            self.projeto["pasta_saida"] = entrada.sugerir_saida(pasta_origem)
+            self.projeto["pasta_saida"] = str(pasta_origem) if pasta_origem else ""
             if pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
                 entrada.adicionar_recente("pasta", pasta_origem)
             self._carregar_ui_do_projeto()
@@ -3489,6 +3489,20 @@ class Aplicativo:
         self._aplicar_opcao(lamina, escolhida)
 
     def rediagramar_lamina(self):
+        total = len(self.projeto.get("laminas", []))
+        selecionadas = sorted(
+            i for i in getattr(self, "laminas_sel", set())
+            if isinstance(i, int) and 0 <= i < total
+        )
+        if len(selecionadas) > 1:
+            self.marcar_historico()
+            for idx_l in selecionadas:
+                self.relayout(idx_l, marcar=False)
+            self.espaco_sel = None
+            self.espacos_sel.clear()
+            self.atualizar_tudo()
+            self.registrar("%d lâminas selecionadas foram rediagramadas." % len(selecionadas))
+            return
         lamina = self._lamina()
         if lamina is None:
             return
@@ -3651,14 +3665,49 @@ class Aplicativo:
         self.atualizar_tudo()
 
     def remover_lamina(self, indice=None):
-        indice = self.atual if indice is None else indice
-        if not isinstance(indice, int) or self._lamina(indice) is None:
+        """
+        Remove a lâmina indicada ou todas as lâminas selecionadas em grupo (self.laminas_sel) de uma só vez.
+        """
+        total = len(self.projeto.get("laminas", []))
+        if total == 0:
             return
+        selecionadas = sorted(
+            i for i in getattr(self, "laminas_sel", set())
+            if isinstance(i, int) and 0 <= i < total
+        )
+        if indice is not None and isinstance(indice, int) and 0 <= indice < total:
+            if indice in selecionadas and len(selecionadas) > 1:
+                alvos = selecionadas
+            else:
+                alvos = [indice]
+        elif selecionadas:
+            alvos = selecionadas
+        elif isinstance(self.atual, int) and 0 <= self.atual < total:
+            alvos = [self.atual]
+        else:
+            return
+
         self.marcar_historico()
-        del self.projeto["laminas"][indice]
-        self.atual = max(0, min(indice, len(self.projeto["laminas"]) - 1))
+        for idx_del in reversed(alvos):
+            del self.projeto["laminas"][idx_del]
+
+        restantes = len(self.projeto["laminas"])
+        if restantes > 0:
+            novo_atual = max(0, min(alvos[0], restantes - 1))
+            self.atual = novo_atual
+            self.laminas_sel = {novo_atual}
+            self.ultima_lamina_clicada = novo_atual
+        else:
+            self.atual = 0
+            self.laminas_sel = set()
+            self.ultima_lamina_clicada = None
         self.espaco_sel = None
+        self.espacos_sel.clear()
         self.atualizar_tudo()
+        if len(alvos) > 1:
+            self.registrar("%d lâminas selecionadas foram excluídas de uma vez." % len(alvos))
+        else:
+            self.registrar("Lâmina %d excluída." % (alvos[0] + 1))
 
     def mover_lamina(self, de, para):
         laminas = self.projeto["laminas"]
@@ -3667,11 +3716,37 @@ class Aplicativo:
         self.marcar_historico()
         laminas.insert(para, laminas.pop(de))
         self.atual, self.espaco_sel = para, None
+        self.laminas_sel = {para}
+        self.ultima_lamina_clicada = para
         self.atualizar_tudo()
         self._mostrar_na_timeline(para)
         self.registrar("Lâmina movida para a posição %s de %s." % (para + 1, len(laminas)))
 
     def mover_lamina_passo(self, passo):
+        total = len(self.projeto.get("laminas", []))
+        selecionadas = sorted(
+            i for i in getattr(self, "laminas_sel", set())
+            if isinstance(i, int) and 0 <= i < total
+        )
+        if len(selecionadas) > 1 and passo in (-1, 1):
+            if (passo < 0 and selecionadas[0] == 0) or (passo > 0 and selecionadas[-1] >= total - 1):
+                return
+            self.marcar_historico()
+            laminas = self.projeto["laminas"]
+            novas_sel = set()
+            ordem = selecionadas if passo < 0 else list(reversed(selecionadas))
+            for idx_l in ordem:
+                destino = idx_l + passo
+                laminas.insert(destino, laminas.pop(idx_l))
+                novas_sel.add(destino)
+            self.laminas_sel = novas_sel
+            if isinstance(self.atual, int):
+                self.atual = max(0, min(total - 1, self.atual + passo))
+            self.espaco_sel = None
+            self.atualizar_tudo()
+            self._mostrar_na_timeline(self.atual)
+            self.registrar("%d lâminas selecionadas movidas em grupo." % len(novas_sel))
+            return
         if isinstance(self.atual, int) and self._lamina() is not None:
             self.mover_lamina(self.atual, self.atual + passo)
 
@@ -3693,6 +3768,29 @@ class Aplicativo:
         self.mover_lamina(indice, max(0, min(n - 1, int(destino))))
 
     def duplicar_lamina(self, indice=None):
+        total = len(self.projeto.get("laminas", []))
+        selecionadas = sorted(
+            i for i in getattr(self, "laminas_sel", set())
+            if isinstance(i, int) and 0 <= i < total
+        )
+        if len(selecionadas) > 1 and (indice is None or indice in selecionadas):
+            self.marcar_historico()
+            pos_insercao = selecionadas[-1] + 1
+            novas_sel = set()
+            for offset, idx_orig in enumerate(selecionadas):
+                nova = proj.copia(self.projeto["laminas"][idx_orig])
+                nova["id"] = diagramar.novo_id()
+                self.projeto["laminas"].insert(pos_insercao + offset, nova)
+                novas_sel.add(pos_insercao + offset)
+            self.atual = pos_insercao
+            self.laminas_sel = novas_sel
+            self.ultima_lamina_clicada = pos_insercao
+            self.espaco_sel = None
+            self.atualizar_tudo()
+            self._mostrar_na_timeline(self.atual)
+            self.registrar("%d lâminas duplicadas em grupo." % len(selecionadas))
+            return
+
         indice = self.atual if indice is None else indice
         lamina = self._lamina(indice) if isinstance(indice, int) else None
         if lamina is None:
@@ -3702,6 +3800,8 @@ class Aplicativo:
         nova["id"] = diagramar.novo_id()
         self.projeto["laminas"].insert(indice + 1, nova)
         self.atual, self.espaco_sel = indice + 1, None
+        self.laminas_sel = {indice + 1}
+        self.ultima_lamina_clicada = indice + 1
         self.atualizar_tudo()
         self._mostrar_na_timeline(self.atual)
         self.registrar("Lâmina %s duplicada." % (indice + 1))
@@ -5764,8 +5864,10 @@ class Aplicativo:
             self.apagar_molde_selecionado()
         elif alvo:
             self.apagar_espaco_selecionado()
-        else:
+        elif self.espaco_sel is not None or getattr(self, "espacos_sel", None):
             self.tirar_foto_selecionada()
+        elif getattr(self, "laminas_sel", None) and len(self.projeto.get("laminas", [])) > 0:
+            self.remover_lamina()
 
     def apagar_molde_selecionado(self):
         if not self._molde_sel_valido():
@@ -6872,8 +6974,20 @@ class Aplicativo:
         total = len(self.projeto.get("laminas", []))
         if total > 0:
             self.laminas_sel = set(range(total))
+            self.espaco_sel = None
+            self.espacos_sel.clear()
             self.desenhar_timeline()
             self._atualizar_fundo_ui()
+            self.registrar("Todas as %d lâminas selecionadas em grupo." % total)
+
+    def alternar_selecao_todas_laminas(self):
+        total = len(self.projeto.get("laminas", []))
+        if total <= 1:
+            return
+        if len(getattr(self, "laminas_sel", set())) >= total:
+            self.limpar_selecao_laminas()
+        else:
+            self.selecionar_todas_laminas()
 
     def limpar_selecao_laminas(self):
         if isinstance(self.atual, int):
@@ -6895,8 +7009,14 @@ class Aplicativo:
         qtd_sel = len(self.laminas_sel)
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Nova lâmina depois desta", command=self.adicionar_lamina)
-        menu.add_command(label="Duplicar lâmina", command=lambda: self.duplicar_lamina(item))
-        menu.add_command(label="Diagramar de novo", command=self.rediagramar_lamina)
+        menu.add_command(
+            label=("Duplicar as %d lâminas selecionadas" % qtd_sel) if qtd_sel > 1 else "Duplicar lâmina",
+            command=lambda: self.duplicar_lamina(item),
+        )
+        menu.add_command(
+            label=("Diagramar de novo as %d lâminas selecionadas" % qtd_sel) if qtd_sel > 1 else "Diagramar de novo",
+            command=self.rediagramar_lamina,
+        )
         menu.add_separator()
         menu.add_command(
             label="Aplicar fundo atual nas %d lâmina(s) selecionada(s)" % max(1, qtd_sel),
@@ -6911,9 +7031,9 @@ class Aplicativo:
             return "normal" if ok else "disabled"
 
         menu.add_command(label="Mover para antes (Ctrl+←)", state=estado(item > 0),
-                         command=lambda: self.mover_lamina(item, item - 1))
+                         command=lambda: self.mover_lamina_passo(-1) if qtd_sel > 1 else self.mover_lamina(item, item - 1))
         menu.add_command(label="Mover para depois (Ctrl+→)", state=estado(item < n - 1),
-                         command=lambda: self.mover_lamina(item, item + 1))
+                         command=lambda: self.mover_lamina_passo(1) if qtd_sel > 1 else self.mover_lamina(item, item + 1))
         menu.add_command(label="Mover para o início", state=estado(item > 0),
                          command=lambda: self.mover_lamina_para("inicio", item))
         menu.add_command(label="Mover para o fim", state=estado(item < n - 1),
@@ -6921,7 +7041,10 @@ class Aplicativo:
         menu.add_command(label="Mover para a posição...", state=estado(n > 1),
                          command=lambda: self.mover_lamina_para("perguntar", item))
         menu.add_separator()
-        menu.add_command(label="Apagar lâmina", command=lambda: self.remover_lamina(item))
+        menu.add_command(
+            label=("🗑 Apagar as %d lâminas selecionadas de uma vez (Del)" % qtd_sel) if qtd_sel > 1 else "Apagar lâmina (Del)",
+            command=lambda: self.remover_lamina(item),
+        )
         menu.tk_popup(evento.x_root, evento.y_root)
 
     def _mostrar_na_timeline(self, item):
@@ -7761,12 +7884,16 @@ class Aplicativo:
 
     def _restaurar_janela_smart_album(self, modificadas=None, motivo="salvo"):
         """Restaura a janela do Smart Album para o primeiro plano assim que a edição no Photoshop termina (Ctrl+S ou fechar)."""
+        estado_ant = getattr(self, "_estado_janela_antes_ps", "zoomed")
+        maximizar = (estado_ant == "zoomed")
         try:
             self.root.deiconify()
-            self.root.state("normal")
+            self.root.state("zoomed" if maximizar else "normal")
+            self.root.update_idletasks()
+            photoshop.trazer_janela_para_frente(self.root.winfo_id(), maximizar=maximizar)
             self.root.lift()
             self.root.attributes("-topmost", True)
-            self.root.after(250, lambda: self.root.attributes("-topmost", False))
+            self.root.after(300, lambda: self.root.attributes("-topmost", False))
             self.root.focus_force()
         except Exception:
             pass
@@ -7792,6 +7919,12 @@ class Aplicativo:
             return
         for caminho in caminhos:
             self.observador.vigiar(caminho)
+        try:
+            est = self.root.state()
+            if est in ("zoomed", "normal"):
+                self._estado_janela_antes_ps = est
+        except Exception:
+            self._estado_janela_antes_ps = "zoomed"
 
         def trabalho(t):
             photoshop.abrir_para_editar(caminhos)
@@ -7801,7 +7934,7 @@ class Aplicativo:
                 self._restaurar_janela_smart_album()
                 messagebox.showerror("Photoshop", str(erro), parent=self.root)
             else:
-                # Minimiza o Smart Album para dar foco total ao Photoshop e monitora Ctrl+S / fechamento
+                # Minimiza o Smart Album primeiro para liberar o foco do Windows e ativa o Photoshop
                 self._tratamento_oculto_ps = False
                 if self.janela_tratamento is not None and self.janela_tratamento.winfo_exists() and self.janela_tratamento.winfo_ismapped():
                     try:
@@ -7811,6 +7944,7 @@ class Aplicativo:
                         pass
                 try:
                     self.root.iconify()
+                    self.root.update_idletasks()
                 except Exception:
                     pass
                 photoshop.ativar_janela_photoshop()
@@ -7903,8 +8037,10 @@ class Aplicativo:
     def opcoes_exportacao(self):
         op = exportar.opcoes_padrao()
         op.update({k: v for k, v in (self.projeto.get("exportacao") or {}).items() if k in op})
-        if not op["pasta"]:
-            op["pasta"] = self.projeto.get("pasta_saida") or entrada.sugerir_saida(self.projeto.get("pasta_fotos"))
+        pasta_salva = op.get("pasta") or self.projeto.get("pasta_saida") or ""
+        if pasta_salva and Path(pasta_salva).name.lower() in ("saida", "saída") and not Path(pasta_salva).exists():
+            pasta_salva = str(Path(pasta_salva).parent)
+        op["pasta"] = pasta_salva or self.projeto.get("pasta_fotos") or str(Path.home())
         return op
 
     def guardar_opcoes_exportacao(self, op):
@@ -7925,7 +8061,7 @@ class Aplicativo:
     def executar_exportacao(self, op, janela=None):
         """
         Exporta com as opções da janela:
-        - Cria a pasta principal 'Album <TAMANHO>' (ex.: 'Album 30X20')
+        - Cria a pasta principal 'Album <TAMANHO>' (ex.: 'Album 30X20') direto na pasta base (sem etapa de pasta 'saida')
         - Dentro dela cria APENAS as subpastas dos formatos marcados ('JPG', 'PSD', 'PDF').
         """
         if self.tarefa is not None:
@@ -7942,8 +8078,9 @@ class Aplicativo:
             messagebox.showwarning("Exportar", str(e), parent=janela or self.root)
             return False
         if not op.get("pasta"):
-            messagebox.showwarning("Exportar", "Escolha a pasta de saída.", parent=janela or self.root)
-            return False
+            op["pasta"] = self.projeto.get("pasta_fotos") or (
+                str(Path(self.caminho_projeto).parent) if self.caminho_projeto else str(Path.home())
+            )
         pasta_album = janela_exportar.pasta_final(op, self.projeto, self.produto)
         previstos = janela_exportar.arquivos_previstos(op, self.projeto, self.produto, itens)
         existentes = [arq for arq in previstos if (pasta_album / arq).exists()]

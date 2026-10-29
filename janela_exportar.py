@@ -56,12 +56,26 @@ def espaco_livre(pasta):
         return None
 
 
+def _limpar_pasta_saida_legada(caminho_str, projeto=None):
+    """Remove subpasta 'saida' automática de projetos antigos e usa a pasta das fotos diretamente."""
+    texto = (caminho_str or "").strip()
+    if texto:
+        p = Path(texto)
+        if p.name.lower() in ("saida", "saída") and not p.exists():
+            p = p.parent
+        return str(p)
+    pasta_fotos = (projeto or {}).get("pasta_fotos") or ""
+    if pasta_fotos:
+        return str(Path(pasta_fotos))
+    return str(Path.home())
+
+
 def pasta_final(opcoes, projeto=None, produto=None):
     """
-    Pasta raiz do álbum exportado: '<pasta_escolhida>/Album <TAMANHO>' (ex.: 'Album 30X20').
+    Pasta raiz do álbum exportado: '<pasta_base>/Album <TAMANHO>' (ex.: 'Album 30X20').
     Se a pasta escolhida já terminar com 'Album <TAMANHO>', não duplica.
     """
-    base = Path(opcoes.get("pasta") or "")
+    base = Path(_limpar_pasta_saida_legada((opcoes or {}).get("pasta"), projeto))
     nome_album = exportar.nome_pasta_album(produto)
     if base.name.casefold() == nome_album.casefold():
         return base
@@ -162,7 +176,7 @@ class JanelaExportar(tk.Toplevel):
             ),
             "marcas_registro": tk.BooleanVar(value=bool(op.get("marcas_registro", False))),
             "pdf_unico": tk.BooleanVar(value=bool(op.get("pdf_unico", True))),
-            "pasta": tk.StringVar(value=op.get("pasta", "")),
+            "pasta": tk.StringVar(value=_limpar_pasta_saida_legada(op.get("pasta"), app.projeto)),
             "laminas": tk.StringVar(value=op.get("laminas", "todas")),
             "intervalo": tk.StringVar(value=op.get("intervalo", "")),
             "padrao": tk.StringVar(value=op.get("padrao", exportar.PADRAO_NOME)),
@@ -408,7 +422,7 @@ class JanelaExportar(tk.Toplevel):
             op["perfil_cor"] = "sRGB"
         op["marcas_registro"] = bool(op.get("marcas_registro"))
         op["pdf_unico"] = bool(op.get("pdf_unico", True))
-        op["pasta"] = op["pasta"].strip()
+        op["pasta"] = _limpar_pasta_saida_legada(op.get("pasta"), self.app.projeto)
         op["subpasta"] = True
         return op
 
