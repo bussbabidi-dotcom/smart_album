@@ -170,27 +170,55 @@ def geometria_valida(texto, root):
 
 
 class Pintor:
-    """Uma thread que monta as prévias. Pedido novo com a mesma chave substitui o antigo."""
+    """
+    Motor de renderização em segundo plano com duas filas independentes:
+    - Fila prioritária dedicada para a lâmina principal ("principal" e "frente"), garantindo resposta imediata nas opções.
+    - Pool de threads separado para miniaturas da linha do tempo ("tl:*"), sem nunca bloquear o canvas central.
+    """
 
     def __init__(self):
-        self.pedidos = OrderedDict()
-        self.cond = threading.Condition()
-        threading.Thread(target=self._rodar, daemon=True).start()
+        self.pedidos_principal = OrderedDict()
+        self.pedidos_tl = OrderedDict()
+        self.cond_principal = threading.Condition()
+        self.cond_tl = threading.Condition()
+        threading.Thread(target=self._rodar_principal, daemon=True).start()
+        for _ in range(2):
+            threading.Thread(target=self._rodar_tl, daemon=True).start()
 
     def pedir(self, chave, funcao):
-        with self.cond:
-            self.pedidos.pop(chave, None)
-            self.pedidos[chave] = funcao
-            if chave == "principal":
-                self.pedidos.move_to_end(chave, last=False)
-            self.cond.notify()
+        eh_principal = chave in ("principal", "frente")
+        if eh_principal:
+            with self.cond_principal:
+                self.pedidos_principal.pop(chave, None)
+                self.pedidos_principal[chave] = funcao
+                if chave == "principal":
+                    self.pedidos_principal.move_to_end(chave, last=False)
+                self.cond_principal.notify()
+        else:
+            with self.cond_tl:
+                self.pedidos_tl.pop(chave, None)
+                self.pedidos_tl[chave] = funcao
+                while len(self.pedidos_tl) > 36:
+                    self.pedidos_tl.popitem(last=False)
+                self.cond_tl.notify()
 
-    def _rodar(self):
+    def _rodar_principal(self):
         while True:
-            with self.cond:
-                while not self.pedidos:
-                    self.cond.wait()
-                _chave, funcao = self.pedidos.popitem(last=False)
+            with self.cond_principal:
+                while not self.pedidos_principal:
+                    self.cond_principal.wait()
+                _chave, funcao = self.pedidos_principal.popitem(last=False)
+            try:
+                funcao()
+            except Exception:
+                traceback.print_exc()
+
+    def _rodar_tl(self):
+        while True:
+            with self.cond_tl:
+                while not self.pedidos_tl:
+                    self.cond_tl.wait()
+                _chave, funcao = self.pedidos_tl.popitem(last=True)
             try:
                 funcao()
             except Exception:
@@ -880,7 +908,7 @@ class Aplicativo:
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
         self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
         for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
-            var.trace_add("write", lambda *a: self.agendar("config", 500, self._mudou_config))
+            var.trace_add("write", lambda *a: self.agendar("config", 160, self._mudou_config))
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
@@ -1350,8 +1378,8 @@ class Aplicativo:
         self._desenhar_espacos()
         if self._geo:
             dw, dh = self._geo[:2]
-            self.agendar("moldura_render", 80, lambda: self._pedir_render(dw, dh))
-        self.agendar("moldura_timeline", 160, self.desenhar_timeline)
+            self.agendar("moldura_render", 16, lambda: self._pedir_render(dw, dh))
+        self.agendar("moldura_timeline", 140, self.desenhar_timeline)
 
     def _atualizar_moldura_ui(self):
         if not hasattr(self, "moldura_ativa"):
@@ -1675,9 +1703,9 @@ class Aplicativo:
         self._marcar_modificado()
         if self._geo:
             dw, dh = self._geo[:2]
-            self.agendar("degrade_render", 25 if not final else 5, lambda: self._pedir_render(dw, dh))
+            self.agendar("degrade_render", 14 if not final else 4, lambda: self._pedir_render(dw, dh))
         if final or marcar:
-            self.agendar("degrade_timeline", 180, self.desenhar_timeline)
+            self.agendar("degrade_timeline", 140, self.desenhar_timeline)
 
     def _preset_degrade(self, inicio, fim, op_fim):
         self.degrade_ativo.set(True)
@@ -1918,13 +1946,24 @@ class Aplicativo:
     def agendar(self, chave, ms, funcao):
         anterior = self._agendados.pop(chave, None)
         if anterior:
-            self.root.after_cancel(anterior)
+            try:
+                self.root.after_cancel(anterior)
+            except tk.TclError:
+                pass
 
         def rodar():
             self._agendados.pop(chave, None)
-            funcao()
+            try:
+                funcao()
+            except tk.TclError:
+                pass
+            except Exception:
+                traceback.print_exc()
 
-        self._agendados[chave] = self.root.after(ms, rodar)
+        try:
+            self._agendados[chave] = self.root.after(max(1, int(ms)), rodar)
+        except tk.TclError:
+            pass
 
     def cancelar_agendado(self, chave):
         anterior = self._agendados.pop(chave, None)
@@ -2033,20 +2072,28 @@ class Aplicativo:
             self.registrar("Parando...")
 
     def _ler_fila(self):
+        inicio_tick = time.perf_counter()
+        ultimo_progresso = None
+        ultimo_render = None
         try:
-            while True:
+            while (time.perf_counter() - inicio_tick) < 0.012:
                 msg = self.fila.get_nowait()
                 tipo = msg[0]
+                if tipo == "progresso":
+                    ultimo_progresso = msg
+                    continue
+                if tipo == "render":
+                    ultimo_render = msg
+                    continue
                 janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
                 if tipo == "aviso":
                     self.registrar(msg[1])
                     if janela:
                         janela.aviso(msg[1])
-                elif tipo == "progresso":
-                    self.barra.configure(maximum=max(1, msg[2]), value=msg[1])
-                    if janela:
-                        janela.progresso(msg[1], msg[2])
                 elif tipo == "fim":
+                    if ultimo_progresso is not None:
+                        self.barra.configure(maximum=max(1, ultimo_progresso[2]), value=ultimo_progresso[1])
+                        ultimo_progresso = None
                     _t, ao_fim, resultado, erro = msg
                     self.tarefa = None
                     self.janela_tarefa = None
@@ -2060,8 +2107,6 @@ class Aplicativo:
                             messagebox.showerror("Erro", str(e), parent=self.root)
                     elif erro:
                         messagebox.showerror("Erro", str(erro), parent=self.root)
-                elif tipo == "render":
-                    self._receber_render(*msg[1:])
                 elif tipo == "miniatura_timeline":
                     self._receber_timeline(*msg[1:])
                 elif tipo == "foto_trocada":
@@ -2072,10 +2117,28 @@ class Aplicativo:
                     self.info[normalizar_caminho(msg[1])] = msg[2]
                     self._depois_de_trocar_foto(msg[1])
                 elif tipo == "chamar":
-                    msg[1]()
+                    try:
+                        msg[1]()
+                    except Exception:
+                        traceback.print_exc()
         except queue.Empty:
             pass
-        self.root.after(80, self._ler_fila)
+        except tk.TclError:
+            pass
+        try:
+            if ultimo_progresso is not None:
+                janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
+                self.barra.configure(maximum=max(1, ultimo_progresso[2]), value=ultimo_progresso[1])
+                if janela:
+                    janela.progresso(ultimo_progresso[1], ultimo_progresso[2])
+            if ultimo_render is not None:
+                self._receber_render(*ultimo_render[1:])
+        except tk.TclError:
+            pass
+        try:
+            self.root.after(18, self._ler_fila)
+        except tk.TclError:
+            pass
 
     # ==================================================================
     # Projeto
@@ -3805,15 +3868,19 @@ class Aplicativo:
             return
         try:
             cfg = {
-                "margem_mm": float(self.margem_var.get()),
-                "espacamento_mm": float(self.espacamento_var.get()),
-                "fotos_por_lamina": int(self.fotos_lamina_var.get()),
+                "margem_mm": max(0.0, float(self.margem_var.get())),
+                "espacamento_mm": max(0.0, float(self.espacamento_var.get())),
+                "fotos_por_lamina": max(1, int(self.fotos_lamina_var.get())),
                 "auto_salvar_minutos": max(0, int(self.auto_salvar_var.get())),
             }
         except (tk.TclError, ValueError):
             return
         atual = self._cfg()
         mudou_auto = int(cfg["auto_salvar_minutos"]) != int(atual.get("auto_salvar_minutos", 5))
+        mudou_geometria = (
+            abs(float(cfg["margem_mm"]) - float(atual.get("margem_mm", 0))) > 1e-6
+            or abs(float(cfg["espacamento_mm"]) - float(atual.get("espacamento_mm", 0))) > 1e-6
+        )
         if any(abs(float(cfg[k]) - float(atual.get(k, 0))) > 1e-9 for k in cfg):
             self.projeto.setdefault("config", {}).update(cfg)
             self._marcar_modificado()
@@ -3823,6 +3890,12 @@ class Aplicativo:
                     self.registrar("Auto-salvamento do .album.json definido para cada %d min." % cfg["auto_salvar_minutos"])
                 else:
                     self.registrar("Auto-salvamento do .album.json desativado.")
+            if mudou_geometria:
+                lamina = self._lamina()
+                if lamina is not None and not self.editar_layout.get() and lamina.get("espacos"):
+                    diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+                self.desenhar_lamina()
+                self.agendar("config_timeline", 180, self.desenhar_timeline)
             self.atualizar_sugestoes()
 
     def colocar_foto(self, caminho, li, ei, marcar=True):
@@ -4377,10 +4450,10 @@ class Aplicativo:
 
     def _copia_para_render(self):
         n = len(self.projeto["laminas"])
-        mini = {"capa": None, "laminas": [None] * n}
+        laminas_dict = {}
         if isinstance(self.atual, int) and 0 <= self.atual < n:
-            mini["laminas"][self.atual] = json.loads(json.dumps(self.projeto["laminas"][self.atual]))
-        return mini
+            laminas_dict[self.atual] = copy.deepcopy(self.projeto["laminas"][self.atual])
+        return {"capa": None, "laminas": laminas_dict}
 
     def _assinatura_lamina_render(self, item, dw, dh):
         if not (isinstance(item, int) and 0 <= item < len(self.projeto["laminas"])):
@@ -6076,9 +6149,7 @@ class Aplicativo:
             self._arrasto = None
 
     def _cancelar_agendado(self, chave):
-        anterior = self._agendados.pop(chave, None)
-        if anterior:
-            self.root.after_cancel(anterior)
+        self.cancelar_agendado(chave)
 
     def _mudar_espacos(self, funcao, texto=None):
         """Uma mudança nos espaços da lâmina atual, com desfazer, modelo esquecido e animação suave."""
@@ -6356,12 +6427,27 @@ class Aplicativo:
         ed = espaco.get("edicao") or {}
         lw, lh = self._mm()
         aspecto = max(0.1, (espaco["w"] * lw) / max(1.0, espaco["h"] * lh))
-        try:
-            img_base = analise.miniatura(foto).copy()
-            img_t = recorte.transformar(img_base, ed)
+        ch_cache = (
+            normalizar_caminho(foto),
+            self.versao_fotos,
+            int(ed.get("rot", 0)) % 360,
+            bool(ed.get("espelhar", False)),
+            bool(ed.get("espelhar_v", False)),
+        )
+        cache_enq = getattr(self, "_cache_img_enq_inline", None)
+        if cache_enq and cache_enq[0] == ch_cache:
+            img_t = cache_enq[1]
             W, H = img_t.size
-        except Exception:
-            return {"cx": 0.5, "cy": 0.5, "zoom": 1.0}, None, aspecto
+        else:
+            try:
+                img_base = analise.miniatura(foto)
+                img_t = recorte.transformar(img_base, ed)
+                if img_t is img_base:
+                    img_t = img_base.copy()
+                self._cache_img_enq_inline = (ch_cache, img_t)
+                W, H = img_t.size
+            except Exception:
+                return {"cx": 0.5, "cy": 0.5, "zoom": 1.0}, None, aspecto
         dobra_x = None
         if espaco["x"] < 0.5 < espaco["x"] + espaco["w"] and espaco["w"] > 0.05:
             dobra_x = (0.5 - espaco["x"]) / float(espaco["w"])
@@ -6473,7 +6559,7 @@ class Aplicativo:
             self.atualizar_lamina_atual(timeline=True)
         elif self._geo:
             dw, dh = self._geo[:2]
-            self.agendar("render_enq_inline", 30, lambda: self._pedir_render(dw, dh))
+            self.agendar("render_enq_inline", 16, lambda: self._pedir_render(dw, dh))
 
     def _mudou_enquadramento_slider(self, _chave, final=False):
         if getattr(self, "_carregando_enq", False):
@@ -6841,17 +6927,14 @@ class Aplicativo:
         return img
 
     def _miniatura_tk(self, caminho, usada=False):
-        chave = normalizar_caminho(caminho)
+        norm = normalizar_caminho(caminho)
         lado = self._celula[2]
-        try:
-            chave = (chave, os.stat(caminho).st_mtime_ns, lado, bool(usada))
-        except OSError:
-            return None
+        chave = (norm, self.versao_fotos, lado, bool(usada))
         guardada = self._tk_miniaturas.get(chave)
         if guardada is not None:
             self._tk_miniaturas.move_to_end(chave)
             return guardada
-        if normalizar_caminho(caminho) not in self.info:
+        if norm not in self.info:
             return None
         try:
             img = self._miniatura_pil(caminho, lado, usada)
@@ -6859,7 +6942,7 @@ class Aplicativo:
             return None
         foto = ImageTk.PhotoImage(img)
         self._tk_miniaturas[chave] = foto
-        while len(self._tk_miniaturas) > 900:
+        while len(self._tk_miniaturas) > 1200:
             self._tk_miniaturas.popitem(last=False)
         return foto
 
@@ -7330,15 +7413,36 @@ class Aplicativo:
     # ---------------- sugestões e modelos ----------------
 
     def atualizar_sugestoes(self):
-        self.agendar("sugestoes", 150, self._calcular_sugestoes)
+        self.agendar("sugestoes", 60, self._calcular_sugestoes)
 
     def _calcular_sugestoes(self):
         lamina = self._lamina()
-        self._sugestoes = []
-        if lamina is not None:
-            fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
-            if fotos:
-                self._sugestoes = diagramar.opcoes_lamina(fotos, self.produto, self._cfg(), self._modelos(), maximo=12)
+        if lamina is None:
+            self._sugestoes = []
+            self._chave_cache_sugestoes = None
+        else:
+            caminhos_f = tuple(
+                (normalizar_caminho(e["foto"]), int((e.get("edicao") or {}).get("rot", 0)) % 360)
+                for e in lamina.get("espacos", [])
+                if e.get("foto")
+            )
+            cfg_atual = self._cfg()
+            chave_sug = (
+                self. produto["nome"],
+                caminhos_f,
+                round(float(cfg_atual.get("margem_mm", 0)), 2),
+                round(float(cfg_atual.get("espacamento_mm", 0)), 2),
+                len(self._modelos()),
+                self.versao_fotos,
+            )
+            if getattr(self, "_chave_cache_sugestoes", None) != chave_sug:
+                self._chave_cache_sugestoes = chave_sug
+                fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
+                self._sugestoes = (
+                    diagramar.opcoes_lamina(fotos, self.produto, cfg_atual, self._modelos(), maximo=12)
+                    if fotos
+                    else []
+                )
         self.desenhar_sugestoes()
         self.desenhar_modelos()
         self._atualizar_fundo_ui()
@@ -7446,11 +7550,35 @@ class Aplicativo:
                 txt_info += " (%d no meio preservada)" % atravessadas
             self.rotulo_info_pagina_modelo.configure(text=txt_info)
 
-        self._opcoes_pagina_modelos = (
-            diagramar.opcoes_pagina_unica(fotos_pag, self.produto, pagina, self._cfg(), maximo=14, espacos_fixos=ficam)
-            if lamina is not None
-            else []
-        )
+        if lamina is None:
+            self._opcoes_pagina_modelos = []
+            self._chave_cache_modelos_pag = None
+        else:
+            cfg_m = self._cfg()
+            chave_mod = (
+                self.produto["nome"],
+                pagina,
+                bool(self.so_compativeis.get()),
+                round(float(cfg_m.get("margem_mm", 0)), 2),
+                round(float(cfg_m.get("espacamento_mm", 0)), 2),
+                tuple(
+                    (
+                        normalizar_caminho(f.get("caminho") or ""),
+                        round(float(f.get("proporcao", 1.5)), 3),
+                        int((f.get("edicao") or {}).get("rot", 0)) % 360,
+                    )
+                    for f in fotos_pag
+                ),
+                tuple(
+                    (round(float(ef["x"]), 3), round(float(ef["y"]), 3), round(float(ef["w"]), 3), round(float(ef["h"]), 3))
+                    for ef in ficam
+                ),
+            )
+            if getattr(self, "_chave_cache_modelos_pag", None) != chave_mod:
+                self._chave_cache_modelos_pag = chave_mod
+                self._opcoes_pagina_modelos = diagramar.opcoes_pagina_unica(
+                    fotos_pag, self.produto, pagina, cfg_m, maximo=14, espacos_fixos=ficam
+                )
 
         self._areas_modelos = []
         largura = max(105, (c.winfo_width() - 18) // 2)
@@ -7885,17 +8013,17 @@ class Aplicativo:
         """O fundo mudou por um controle: prévia rápida agora e o desenho completo quando parar."""
         self._marcar_modificado()
         if final:
-            self._cancelar_agendado("lamina_fundo")
+            self.cancelar_agendado("lamina_fundo")
             self._cancelar_previa_fundo()
             self._atualizar_fundo_ui()
             self.desenhar_lamina()
         else:
             self._pedir_previa_fundo()
-            self.agendar("lamina_fundo", 450, self.desenhar_lamina)
-        self.agendar("timeline_fundo", 800, self.desenhar_timeline)
+            self.agendar("lamina_fundo", 280, self.desenhar_lamina)
+        self.agendar("timeline_fundo", 500, self.desenhar_timeline)
 
     def _pedir_previa_fundo(self):
-        espera = 0.03 - (time.perf_counter() - self._previa_fundo_ultima)
+        espera = 0.016 - (time.perf_counter() - self._previa_fundo_ultima)
         if espera <= 0:
             self._cancelar_previa_fundo()
             self._previa_fundo_rapida()
@@ -7904,7 +8032,10 @@ class Aplicativo:
 
     def _cancelar_previa_fundo(self):
         if self._previa_fundo_agendada is not None:
-            self.root.after_cancel(self._previa_fundo_agendada)
+            try:
+                self.root.after_cancel(self._previa_fundo_agendada)
+            except tk.TclError:
+                pass
             self._previa_fundo_agendada = None
 
     def _chave_frente(self):

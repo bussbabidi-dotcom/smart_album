@@ -199,6 +199,11 @@ class Galeria:
                 self._prontas.append((caminho, largura + 10, img))
 
     def _receber(self):
+        try:
+            if not self.canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
         with self._trava:
             prontas, self._prontas = self._prontas, []
         for caminho, cw, img in prontas:
@@ -208,7 +213,7 @@ class Galeria:
         if prontas:
             self._agendar()
         try:
-            self.canvas.after(80, self._receber)
+            self.canvas.after(25, self._receber)
         except tk.TclError:
             pass
 

@@ -17,7 +17,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from comum import (
     EXTENSOES, chave_natural, gravar_json, ler_json, modelo_rosto, normalizar_caminho, pasta_dados,
@@ -46,28 +48,33 @@ _cache_sujo = False
 
 def abrir_imagem(caminho):
     """Imagem inteira em RGB, já na orientação do EXIF. Devolve (img, icc, dpi)."""
-    img = Image.open(caminho)
-    icc = img.info.get("icc_profile")
-    dpi = img.info.get("dpi")
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+    with Image.open(caminho) as raw:
+        icc = raw.info.get("icc_profile")
+        dpi = raw.info.get("dpi")
+        img = ImageOps.exif_transpose(raw)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        else:
+            img = img.copy()
     return img, icc, dpi
 
 
 def _abrir_reduzida(caminho, lado):
     """Decodifica o JPEG já reduzido (draft), bem mais rápido que abrir inteiro."""
-    img = Image.open(caminho)
-    try:
-        img.draft("RGB", (lado, lado))
-    except Exception:
-        pass
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+    with Image.open(caminho) as raw:
+        try:
+            raw.draft("RGB", (lado, lado))
+        except Exception:
+            pass
+        img = ImageOps.exif_transpose(raw)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        else:
+            img = img.copy()
     if max(img.size) > lado:
         escala = lado / float(max(img.size))
-        img = img.resize((max(1, round(img.width * escala)), max(1, round(img.height * escala))), Image.LANCZOS)
+        filtro = Image.BILINEAR if lado <= LADO_MINIATURA else Image.LANCZOS
+        img = img.resize((max(1, round(img.width * escala)), max(1, round(img.height * escala))), filtro)
     return img
 
 
@@ -103,24 +110,26 @@ class _Lru:
                 self.itens.pop(chave, None)
 
 
-_memoria_previa = _Lru(48)
-_memoria_miniatura = _Lru(3000)
+_memoria_previa = _Lru(140)
+_memoria_miniatura = _Lru(3500)
 
 
 def miniatura(caminho, lado=LADO_MINIATURA):
     """
     Foto reduzida guardada em disco e na memória. lado=LADO_MINIATURA para o
     painel de fotos, LADO_PREVIA para a lâmina e a tela de edição.
+    Consulta primeiro a memória RAM sem I/O de disco (stat) para resposta instantânea.
     """
     memoria = _memoria_miniatura if lado <= LADO_MINIATURA else _memoria_previa
+    ch_norm = normalizar_caminho(caminho)
+    chave_rapida = (ch_norm, lado)
+    guardada = memoria.pegar(chave_rapida)
+    if guardada is not None:
+        return guardada
     try:
         destino = _arquivo_miniatura(caminho, lado)
     except OSError:
         destino = None
-    chave = (normalizar_caminho(caminho), destino.name if destino else "", lado)
-    guardada = memoria.pegar(chave)
-    if guardada is not None:
-        return guardada
     img = None
     if destino is not None and destino.is_file():
         try:
@@ -138,7 +147,7 @@ def miniatura(caminho, lado=LADO_MINIATURA):
                 os.replace(temp, destino)
             except OSError:
                 pass
-    memoria.por(chave, img)
+    memoria.por(chave_rapida, img)
     return img
 
 
@@ -353,9 +362,13 @@ def analisar_foto(caminho):
     return dados
 
 
-def analisar_fotos(caminhos, ao_progresso=None, parar=lambda: False, trabalhadores=4):
+def analisar_fotos(caminhos, ao_progresso=None, parar=lambda: False, trabalhadores=None):
     """{caminho normalizado: dados}. Fotos com erro ficam de fora (e vão para erros)."""
     caminhos = list(caminhos)
+    if not caminhos:
+        return {}, {}
+    if trabalhadores is None:
+        trabalhadores = min(6, max(4, (os.cpu_count() or 4)))
     info = {}
     erros = {}
     feitos = [0]

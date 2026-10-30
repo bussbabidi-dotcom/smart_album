@@ -269,8 +269,12 @@ def abrir(caminho):
 
 
 def foto_retrato(projeto):
-    """Cópia do estado que pode ser desfeito."""
-    return json.dumps({k: projeto.get(k) for k in ("fotos", "laminas", "capa", "config")}, ensure_ascii=False)
+    """Cópia compacta e rápida do estado que pode ser desfeito."""
+    return json.dumps(
+        {k: projeto.get(k) for k in ("fotos", "laminas", "capa", "config")},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def restaurar_retrato(projeto, retrato):

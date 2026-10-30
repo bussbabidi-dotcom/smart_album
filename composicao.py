@@ -2,7 +2,9 @@
 """Monta a imagem de uma lâmina: fundo (inteiro, por página ou misturado com fusão), fotos nos espaços e moldes PNG por cima."""
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from collections import OrderedDict
 import math
+import threading
 
 import analise
 from comum import cor_rgb, normalizar_caminho
@@ -13,6 +15,11 @@ MODOS_FUNDO = ("preencher", "esticar", "ajustar", "repetir")
 DIRECOES_DEGRADE = ("direita", "esquerda", "baixo", "cima", "radial", "bordas_h")
 LADRILHOS_NA_ALTURA = 2
 AJUSTES_FUNDO_PADRAO = {"brilho": 0, "contraste": 0, "saturacao": 0, "matiz": 0, "tingir_cor": "#c08a4a", "tingir_forca": 0}
+
+_CACHE_MASCARAS_DEG = OrderedDict()
+_CACHE_MASCARAS_FUSAO = OrderedDict()
+_CACHE_FUNDO_POS = OrderedDict()
+_TRAVA_COMP_CACHE = threading.Lock()
 
 
 def degrade_padrao():
@@ -40,20 +47,31 @@ def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
     Retorna None se opacidade for 100% e o degradê estiver desativado.
     """
     W, H = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
-    op_geral = max(0.0, min(100.0, float(opacidade_geral if opacidade_geral is not None else 100.0))) / 100.0
+    op_int = int(round(max(0.0, min(100.0, float(opacidade_geral if opacidade_geral is not None else 100.0)))))
+    op_geral = op_int / 100.0
     d = degrade_padrao()
     if isinstance(degrade, dict):
         d.update(degrade)
     ativo = bool(d.get("ativo", False))
-    if not ativo and op_geral >= 0.999:
+    if not ativo and op_int >= 100:
         return None
     if not ativo:
         return Image.new("L", (W, H), int(round(op_geral * 255.0)))
 
     direcao = d.get("direcao") if d.get("direcao") in DIRECOES_DEGRADE else "direita"
-    inicio = max(0.0, min(98.0, float(d.get("inicio", 30)))) / 100.0
-    fim = max(inicio + 0.02, min(100.0, float(d.get("fim", 100))) / 100.0)
-    op_fim = max(0.0, min(100.0, float(d.get("opacidade_fim", 0)))) / 100.0
+    ini_int = int(round(max(0.0, min(98.0, float(d.get("inicio", 30))))))
+    fim_int = int(round(max(ini_int + 2, min(100.0, float(d.get("fim", 100))))))
+    op_fim_int = int(round(max(0.0, min(100.0, float(d.get("opacidade_fim", 0))))))
+    chave_m = (W, H, direcao, ini_int, fim_int, op_fim_int, op_int)
+    with _TRAVA_COMP_CACHE:
+        guardada = _CACHE_MASCARAS_DEG.get(chave_m)
+        if guardada is not None:
+            _CACHE_MASCARAS_DEG.move_to_end(chave_m)
+            return guardada
+
+    inicio = ini_int / 100.0
+    fim = fim_int / 100.0
+    op_fim = op_fim_int / 100.0
     span = max(0.001, fim - inicio)
 
     def valor_alfa(pos):
@@ -77,9 +95,8 @@ def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
             elif direcao == "bordas_h":
                 u = abs(u - 0.5) * 2.0
             px[x, 0] = valor_alfa(u)
-        return linha.resize((W, H), Image.NEAREST)
-
-    if direcao in ("baixo", "cima"):
+        res = linha.resize((W, H), Image.NEAREST)
+    elif direcao in ("baixo", "cima"):
         coluna = Image.new("L", (1, H))
         px = coluna.load()
         for y in range(H):
@@ -87,21 +104,27 @@ def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
             if direcao == "cima":
                 v = 1.0 - v
             px[0, y] = valor_alfa(v)
-        return coluna.resize((W, H), Image.NEAREST)
+        res = coluna.resize((W, H), Image.NEAREST)
+    else:
+        # Radial (opaco no centro, transparente nas bordas)
+        grade_w, grade_h = min(W, 128), min(H, 128)
+        rad = Image.new("L", (grade_w, grade_h))
+        px = rad.load()
+        cx = (grade_w - 1) / 2.0 or 1.0
+        cy = (grade_h - 1) / 2.0 or 1.0
+        for y in range(grade_h):
+            dy = (y - cy) / max(1.0, cy)
+            for x in range(grade_w):
+                dx = (x - cx) / max(1.0, cx)
+                dist = min(1.0, math.sqrt(dx * dx + dy * dy))
+                px[x, y] = valor_alfa(dist)
+        res = rad.resize((W, H), Image.BILINEAR)
 
-    # Radial (opaco no centro, transparente nas bordas)
-    grade_w, grade_h = min(W, 128), min(H, 128)
-    rad = Image.new("L", (grade_w, grade_h))
-    px = rad.load()
-    cx = (grade_w - 1) / 2.0 or 1.0
-    cy = (grade_h - 1) / 2.0 or 1.0
-    for y in range(grade_h):
-        dy = (y - cy) / max(1.0, cy)
-        for x in range(grade_w):
-            dx = (x - cx) / max(1.0, cx)
-            dist = min(1.0, math.sqrt(dx * dx + dy * dy))
-            px[x, y] = valor_alfa(dist)
-    return rad.resize((W, H), Image.BILINEAR)
+    with _TRAVA_COMP_CACHE:
+        _CACHE_MASCARAS_DEG[chave_m] = res
+        while len(_CACHE_MASCARAS_DEG) > 120:
+            _CACHE_MASCARAS_DEG.popitem(last=False)
+    return res
 
 
 def rosto_de(info, caminho):
@@ -182,24 +205,47 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
     escala_zoom = max(1.0, min(3.0, float(dados.get("escala") or 1.0)))
     cx = max(0.0, min(1.0, float(dados.get("cx", 0.5) if dados.get("cx") is not None else 0.5)))
     cy = max(0.0, min(1.0, float(dados.get("cy", 0.5) if dados.get("cy") is not None else 0.5)))
+    modo = dados.get("modo") if dados.get("modo") in MODOS_FUNDO else "preencher"
+    giro = int(dados.get("giro") or 0) % 360
+    esp_h = bool(dados.get("espelhar_h"))
+    esp_v = bool(dados.get("espelhar_v"))
+    pb = bool(dados.get("pb"))
+
     if rapido:
         fonte = analise.imagem_para(dados["caminho"], int(round(max(W, H) * max(1.0, min(2.0, escala_zoom)))))
+        chave_fp = (
+            normalizar_caminho(dados["caminho"]),
+            id(fonte),
+            W,
+            H,
+            modo,
+            giro,
+            esp_h,
+            esp_v,
+            pb,
+            round(escala_zoom, 3),
+            round(cx, 3),
+            round(cy, 3),
+        )
+        with _TRAVA_COMP_CACHE:
+            guardado = _CACHE_FUNDO_POS.get(chave_fp)
+            if guardado is not None:
+                _CACHE_FUNDO_POS.move_to_end(chave_fp)
+                return guardado.copy()
     else:
         fonte = analise.abrir_imagem(dados["caminho"])[0]
-    if dados.get("espelhar_h"):
+
+    if esp_h:
         fonte = ImageOps.mirror(fonte)
-    if dados.get("espelhar_v"):
+    if esp_v:
         fonte = ImageOps.flip(fonte)
-    giro = int(dados.get("giro") or 0) % 360
     if giro in (90, 180, 270):
         fonte = fonte.rotate(-giro, expand=True)
-    if dados.get("pb"):
+    if pb:
         fonte = ImageOps.grayscale(fonte).convert("RGB")
     filtro = Image.BILINEAR if rapido else Image.LANCZOS
     camada = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    modo = dados.get("modo") if dados.get("modo") in MODOS_FUNDO else "preencher"
     if modo == "esticar":
-        # Distorce para caber exatamente na área (ou ampliado por escala_zoom) sem preservar proporção
         nw = max(W, int(round(W * escala_zoom)))
         nh = max(H, int(round(H * escala_zoom)))
         redim = fonte.resize((nw, nh), filtro)
@@ -222,7 +268,6 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
             for x in range(0, W, w):
                 camada.paste(ladrilho, (x, y))
     else:
-        # "preencher" (Cortar sem distorcer) com zoom e deslocamento (cx, cy)
         escala_cover = max(W / float(max(1, fonte.width)), H / float(max(1, fonte.height))) * escala_zoom
         nw = max(W, int(round(fonte.width * escala_cover)))
         nh = max(H, int(round(fonte.height * escala_cover)))
@@ -230,6 +275,13 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
         ox = max(0, min(nw - W, int(round((nw - W) * cx))))
         oy = max(0, min(nh - H, int(round((nh - H) * cy))))
         camada.paste(redim.crop((ox, oy, ox + W, oy + H)), (0, 0))
+
+    if rapido:
+        with _TRAVA_COMP_CACHE:
+            _CACHE_FUNDO_POS[chave_fp] = camada
+            while len(_CACHE_FUNDO_POS) > 48:
+                _CACHE_FUNDO_POS.popitem(last=False)
+        return camada.copy()
     return camada
 
 
@@ -244,7 +296,7 @@ def raio_desfoque_fundo(desfoque, largura):
     return ((d / 50.0) ** 1.25) * (float(largura) * 0.011)
 
 
-def acabar_fundo(camada, fundo_imagem):
+def acabar_fundo(camada, fundo_imagem, rapido=False):
     """Ajustes de cor, desfoque suave calibrado, opacidade e máscara de degradê sobre a camada posicionada."""
     dados = fundo_imagem_padrao()
     dados.update(fundo_imagem or {})
@@ -252,7 +304,13 @@ def acabar_fundo(camada, fundo_imagem):
     camada = ajustar_cores(camada, ajustes_fundo(dados))
     raio = raio_desfoque_fundo(dados.get("desfoque"), camada.width)
     if raio >= 0.4:
-        camada = camada.filter(ImageFilter.GaussianBlur(raio))
+        if rapido and raio >= 2.2 and camada.width > 160 and camada.height > 80:
+            # Na prévia interativa, aplica GaussianBlur em meia resolução para 4x mais velocidade (60fps)
+            tam_orig = camada.size
+            reduzida = camada.resize((max(1, tam_orig[0] // 2), max(1, tam_orig[1] // 2)), Image.BILINEAR)
+            camada = reduzida.filter(ImageFilter.GaussianBlur(raio * 0.5)).resize(tam_orig, Image.BILINEAR)
+        else:
+            camada = camada.filter(ImageFilter.GaussianBlur(raio))
     opacidade = max(0, min(100, int(dados.get("opacidade", 100))))
     degrade = dados.get("degrade")
     mascara_deg = gerar_mascara_degrade(camada.size, degrade, opacidade)
@@ -272,7 +330,7 @@ def imagem_de_fundo(fundo_imagem, tamanho, rapido=False):
     camada = fundo_posicionado(fundo_imagem, tamanho, rapido)
     if camada is None:
         return None
-    return acabar_fundo(camada, fundo_imagem)
+    return acabar_fundo(camada, fundo_imagem, rapido=rapido)
 
 
 def _mascara_fusao_horizontal(W, H, fusao):
@@ -281,8 +339,15 @@ def _mascara_fusao_horizontal(W, H, fusao):
     Quando fusao == 0, corte seco no meio (W // 2).
     Quando fusao > 0 (até 100), degradê suave centrado na dobra (W / 2).
     """
+    fusao_int = int(round(max(0.0, min(100.0, float(fusao or 0)))))
+    chave_f = (W, H, fusao_int)
+    with _TRAVA_COMP_CACHE:
+        guardada = _CACHE_MASCARAS_FUSAO.get(chave_f)
+        if guardada is not None:
+            _CACHE_MASCARAS_FUSAO.move_to_end(chave_f)
+            return guardada
     meio = W / 2.0
-    zona = max(0.0, min(100.0, float(fusao or 0))) / 100.0 * (W * 0.36)
+    zona = (fusao_int / 100.0) * (W * 0.36)
     linha = Image.new("L", (W, 1))
     px = linha.load()
     if zona < 1.0:
@@ -301,7 +366,12 @@ def _mascara_fusao_horizontal(W, H, fusao):
                 t = (x - x0) / larg_z
                 suave = t * t * (3.0 - 2.0 * t)
                 px[x, 0] = int(round(suave * 255.0))
-    return linha.resize((W, H), Image.NEAREST)
+    res = linha.resize((W, H), Image.NEAREST)
+    with _TRAVA_COMP_CACHE:
+        _CACHE_MASCARAS_FUSAO[chave_f] = res
+        while len(_CACHE_MASCARAS_FUSAO) > 40:
+            _CACHE_MASCARAS_FUSAO.popitem(last=False)
+    return res
 
 
 def _renderizar_lado_em_lamina(cor_base, fundo_img_lamina, cor_lado, fundo_img_lado, tamanho, lado, fusao, rapido=False):

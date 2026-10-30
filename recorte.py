@@ -12,12 +12,15 @@ para servir tanto na miniatura da prévia quanto na foto inteira:
   Efeitos: nitidez (0 a 100), vinheta (-100 a 100)
 """
 
+import functools
 import math
+import threading
+from collections import OrderedDict
 
 from PIL import Image, ImageChops, ImageEnhance, ImageOps
 
 import analise
-from comum import cor_rgb
+from comum import cor_rgb, normalizar_caminho
 
 OLHOS_NO_CORTE = 0.38
 ZOOM_MAXIMO = 6.0
@@ -29,6 +32,9 @@ CHAVES_AJUSTES = (
 )
 
 _CACHE_VINHETA_BASE = None
+_CACHE_ESPACO_RAPIDO = OrderedDict()
+_TRAVA_CACHE_ESPACO = threading.Lock()
+_LIMITE_CACHE_ESPACO = 240
 
 
 def edicao_padrao():
@@ -47,6 +53,34 @@ def _ed(edicao):
     ed = edicao_padrao()
     ed.update(edicao or {})
     return ed
+
+
+def _chave_edicao_cache(edicao, rosto, dobra_x):
+    if not edicao and not rosto and dobra_x is None:
+        return (0, False, 0.0, None, None, None, False)
+    ed = edicao or {}
+    corte = ed.get("corte")
+    corte_t = (
+        round(float(corte.get("cx", 0.5)), 4),
+        round(float(corte.get("cy", 0.5)), 4),
+        round(float(corte.get("zoom", 1.0)), 4),
+    ) if isinstance(corte, dict) else None
+    rosto_t = (
+        round(float(rosto.get("cx", 0.5)), 4),
+        round(float(rosto.get("cy", 0.5)), 4),
+    ) if isinstance(rosto, dict) else None
+    ajustes_t = tuple(round(float(ed.get(k) or 0), 1) for k in CHAVES_AJUSTES)
+    return (
+        int(ed.get("rot") or 0) % 360,
+        bool(ed.get("espelhar")),
+        round(float(ed.get("angulo") or 0), 2),
+        corte_t,
+        rosto_t,
+        round(float(dobra_x), 4) if dobra_x is not None else None,
+        bool(ed.get("pb")),
+        bool(ed.get("ignorar_rosto")),
+        ajustes_t,
+    )
 
 
 # ------------------------------------------------------------
@@ -206,10 +240,10 @@ def caixa_corte(W, H, aspecto, corte):
 
 def recortar(img, caixa, tamanho, fundo=(255, 255, 255), rapido=False):
     """Recorta a caixa (que pode passar da foto) e redimensiona para o tamanho exato."""
-    tw, th = int(tamanho[0]), int(tamanho[1])
+    tw, th = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
     l, t, r, b = caixa
-    escala_x = tw / float(r - l)
-    escala_y = th / float(b - t)
+    escala_x = tw / float(max(1e-6, r - l))
+    escala_y = th / float(max(1e-6, b - t))
     filtro = Image.BILINEAR if rapido else Image.LANCZOS
     il, it = max(0.0, l), max(0.0, t)
     ir, ib = min(float(img.width), r), min(float(img.height), b)
@@ -229,6 +263,7 @@ def recortar(img, caixa, tamanho, fundo=(255, 255, 255), rapido=False):
 # Tratamento de cor e luz estilo Lightroom
 # ------------------------------------------------------------
 
+@functools.lru_cache(maxsize=256)
 def _lut_tonal_e_balanco(exposicao, brilho, contraste, realces, sombras, temperatura, matiz):
     """
     Gera tabela LUT de 768 entradas (R, G, B) combinando Exposição, Brilho,
@@ -252,7 +287,6 @@ def _lut_tonal_e_balanco(exposicao, brilho, contraste, realces, sombras, tempera
         x = i / 255.0
         # 1. Exposição fotográfica com compressão suave no topo
         if exposicao > 0:
-            x = 1.0 - math.exp(-x * fator_exp * 1.45) / (1.0 - math.exp(-1.45) + 1e-9) * (1.0 - x) + (x * fator_exp - x) * (1.0 - x * 0.65)
             x = min(1.0, max(0.0, (i / 255.0) * fator_exp / (1.0 + ((i / 255.0) * (fator_exp - 1.0) * 0.35))))
         elif exposicao < 0:
             x = x * fator_exp
@@ -299,7 +333,6 @@ def _mascara_vinheta_base():
         for x in range(tamanho):
             dx = (x - centro) / centro
             dist = math.sqrt(dx * dx + dy * dy)
-            # Começa suave a partir de r=0.35 até r=1.35
             t = min(1.0, max(0.0, (dist - 0.32) / 0.98))
             curva = t * t * (3.0 - 2.0 * t)
             px[x, y] = int(round(curva * 255.0))
@@ -312,19 +345,19 @@ def aplicar_ajustes(img, edicao):
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    exposicao = float(ed.get("exposicao") or 0)
-    brilho = float(ed.get("brilho") or 0)
-    contraste = float(ed.get("contraste") or 0)
-    realces = float(ed.get("realces") or 0)
-    sombras = float(ed.get("sombras") or 0)
-    temperatura = float(ed.get("temperatura") or 0)
-    matiz = float(ed.get("matiz") or 0)
-    vibracao = float(ed.get("vibracao") or 0)
-    saturacao = float(ed.get("saturacao") or 0)
-    nitidez = float(ed.get("nitidez") or 0)
-    vinheta = float(ed.get("vinheta") or 0)
+    exposicao = round(float(ed.get("exposicao") or 0), 1)
+    brilho = round(float(ed.get("brilho") or 0), 1)
+    contraste = round(float(ed.get("contraste") or 0), 1)
+    realces = round(float(ed.get("realces") or 0), 1)
+    sombras = round(float(ed.get("sombras") or 0), 1)
+    temperatura = round(float(ed.get("temperatura") or 0), 1)
+    matiz = round(float(ed.get("matiz") or 0), 1)
+    vibracao = round(float(ed.get("vibracao") or 0), 1)
+    saturacao = round(float(ed.get("saturacao") or 0), 1)
+    nitidez = round(float(ed.get("nitidez") or 0), 1)
+    vinheta = round(float(ed.get("vinheta") or 0), 1)
 
-    # 1. Luz + Balanço de branco (LUT único de alta velocidade)
+    # 1. Luz + Balanço de branco (LUT único de alta velocidade com cache)
     if any((exposicao, brilho, contraste, realces, sombras, temperatura, matiz)):
         lut = _lut_tonal_e_balanco(exposicao, brilho, contraste, realces, sombras, temperatura, matiz)
         img = img.point(lut)
@@ -338,7 +371,6 @@ def aplicar_ajustes(img, edicao):
             diff = ImageOps.grayscale(ImageChops.difference(img, cinza))
             forca = abs(vibracao) / 100.0
             if vibracao > 0:
-                # Realça mais os tons pouco saturados sem estourar pele/cores já vivas
                 saturada = ImageEnhance.Color(img).enhance(1.0 + forca * 1.35)
                 mascara = diff.point(lambda d: int(round(((1.0 - (d / 255.0)) ** 0.85) * forca * 255)))
                 img = Image.composite(saturada, img, mascara)
@@ -366,16 +398,40 @@ def aplicar_ajustes(img, edicao):
 def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapido=False, dobra_x=None):
     """
     A foto pronta para o espaço, com o tamanho exato em pixels.
-    rapido usa a miniatura (prévia); senão abre a foto inteira (exportação).
+    rapido usa a miniatura (prévia) com cache em memória; senão abre a foto inteira (exportação).
     """
     tw, th = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
     if rapido:
         fonte = analise.imagem_para(caminho, max(tw, th) * 1.5)
+        cor_f = cor_rgb(fundo)
+        chave_cache = (
+            normalizar_caminho(caminho),
+            id(fonte),
+            tw,
+            th,
+            cor_f,
+            _chave_edicao_cache(edicao, rosto, dobra_x),
+        )
+        with _TRAVA_CACHE_ESPACO:
+            guardada = _CACHE_ESPACO_RAPIDO.get(chave_cache)
+            if guardada is not None:
+                _CACHE_ESPACO_RAPIDO.move_to_end(chave_cache)
+                return guardada.copy()
     else:
         fonte, _icc, _dpi = analise.abrir_imagem(caminho)
+
     img = transformar(fonte, edicao)
     W, H = img.size
     aspecto = tw / float(th)
     corte = corte_do_espaco(W, H, aspecto, edicao, rosto, dobra_x=dobra_x)
     saida = recortar(img, caixa_corte(W, H, aspecto, corte), (tw, th), fundo, rapido)
-    return aplicar_ajustes(saida, edicao)
+    pronta = aplicar_ajustes(saida, edicao)
+
+    if rapido:
+        with _TRAVA_CACHE_ESPACO:
+            _CACHE_ESPACO_RAPIDO[chave_cache] = pronta
+            _CACHE_ESPACO_RAPIDO.move_to_end(chave_cache)
+            while len(_CACHE_ESPACO_RAPIDO) > _LIMITE_CACHE_ESPACO:
+                _CACHE_ESPACO_RAPIDO.popitem(last=False)
+        return pronta.copy()
+    return pronta
