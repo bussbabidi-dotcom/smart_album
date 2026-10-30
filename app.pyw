@@ -9,6 +9,8 @@ passadas ao abrir o programa (arrastar a pasta em cima do iniciar.bat).
 """
 
 import atexit
+import bisect
+import copy
 import hashlib
 import json
 import math
@@ -278,6 +280,8 @@ class Aplicativo:
         self.pasta_filtro = tk.StringVar(value="todas")
         self.pastas_recolhidas = set()
         self._itens_painel_fotos = []
+        self._xs_painel_fotos = []
+        self._miniaturas_pendentes = set()
         self.igualar_no_grupo = tk.BooleanVar(value=False)
         self.guias = tk.BooleanVar(value=True)
         self.zoom = 1.0
@@ -300,8 +304,8 @@ class Aplicativo:
         self._anim_layout_id = None
         self._anim_tks = []
         self._tk_miniaturas = OrderedDict()
-        self._tl_pil = {}
-        self._tl_tk = {}
+        self._tl_pil = OrderedDict()
+        self._tl_tk = OrderedDict()
         self._tl_itens = []
         self._arrasto = None
         self._fantasma = None
@@ -685,8 +689,12 @@ class Aplicativo:
         self.canvas_timeline = tk.Canvas(caixa, height=90, width=180, bg=tema.PAINEL, highlightthickness=0)
         self.barra_tl_h.configure(command=self.canvas_timeline.xview)
         self.barra_tl_v.configure(command=self.canvas_timeline.yview)
-        self.canvas_timeline.configure(xscrollcommand=self.barra_tl_h.set, yscrollcommand=self.barra_tl_v.set,
-                                       xscrollincrement=20, yscrollincrement=20)
+        self.canvas_timeline.configure(
+            xscrollcommand=lambda a, b: (self.barra_tl_h.set(a, b), self.agendar("timeline", 14, self.desenhar_timeline)),
+            yscrollcommand=lambda a, b: (self.barra_tl_v.set(a, b), self.agendar("timeline", 14, self.desenhar_timeline)),
+            xscrollincrement=20,
+            yscrollincrement=20,
+        )
         self._tl_vertical = None
         self.canvas_timeline.bind("<Configure>", self._mudou_tamanho_timeline)
         self.canvas_timeline.bind("<MouseWheel>", self._timeline_roda)
@@ -2109,6 +2117,8 @@ class Aplicativo:
                         messagebox.showerror("Erro", str(erro), parent=self.root)
                 elif tipo == "miniatura_timeline":
                     self._receber_timeline(*msg[1:])
+                elif tipo == "miniatura_foto":
+                    self._receber_miniatura_foto(*msg[1:])
                 elif tipo == "foto_trocada":
                     self._foto_trocada(msg[1], msg[2])
                 elif tipo == "arquivo_mudou":
@@ -6870,6 +6880,7 @@ class Aplicativo:
                     })
                     x_cursor += cw
         self._itens_painel_fotos = itens
+        self._xs_painel_fotos = [it["x0"] for it in itens]
         self._largura_total_fotos = max(1, x_cursor)
 
     def atualizar_fotos(self):
@@ -6936,30 +6947,73 @@ class Aplicativo:
             return guardada
         if norm not in self.info:
             return None
+        # Se a miniatura base já estiver em RAM no cache do módulo analise, gera rápido;
+        # caso contrário, agenda em segundo plano via Pintor para não travar a rolagem em álbuns grandes
+        ja_em_ram = False
         try:
-            img = self._miniatura_pil(caminho, lado, usada)
-        except OSError:
-            return None
-        foto = ImageTk.PhotoImage(img)
-        self._tk_miniaturas[chave] = foto
-        while len(self._tk_miniaturas) > 1200:
-            self._tk_miniaturas.popitem(last=False)
-        return foto
+            with analise._trava:
+                ja_em_ram = norm in analise._cache_miniaturas
+        except Exception:
+            ja_em_ram = False
+        if ja_em_ram:
+            try:
+                img = self._miniatura_pil(caminho, lado, usada)
+                foto = ImageTk.PhotoImage(img)
+                self._tk_miniaturas[chave] = foto
+                while len(self._tk_miniaturas) > 1200:
+                    self._tk_miniaturas.popitem(last=False)
+                return foto
+            except Exception:
+                return None
+        self._pedir_miniatura_foto(caminho, chave, lado, bool(usada))
+        return None
+
+    def _pedir_miniatura_foto(self, caminho, chave, lado, usada):
+        if chave in self._miniaturas_pendentes:
+            return
+        self._miniaturas_pendentes.add(chave)
+
+        def trabalho():
+            try:
+                img = self._miniatura_pil(caminho, lado, usada)
+                self.fila.put(("miniatura_foto", chave, img))
+            except Exception:
+                self.fila.put(("miniatura_foto", chave, None))
+
+        self.pintor.pedir("ft:" + str(chave[0]) + ":" + str( int(usada) ), trabalho)
+
+    def _receber_miniatura_foto(self, chave, img):
+        self._miniaturas_pendentes.discard(chave)
+        if img is not None:
+            try:
+                self._tk_miniaturas[chave] = ImageTk.PhotoImage(img)
+                while len(self._tk_miniaturas) > 1200:
+                    self._tk_miniaturas.popitem(last=False)
+                self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
+            except tk.TclError:
+                pass
 
     def _desenhar_fotos_visiveis(self):
         c = self.canvas_fotos
         c.delete("all")
         itens = getattr(self, "_itens_painel_fotos", [])
+        xs = getattr(self, "_xs_painel_fotos", [])
         cw, ch, lado = self._celula
         if not itens:
             c.create_text(12, ch // 2, anchor="w", fill=tema.TEXTO_FRACO,
                           text="Sem fotos aqui. Arraste fotos ou várias pastas do Explorer (elas não se misturam).")
             return
         x0 = c.canvasx(0)
-        x1 = x0 + c.winfo_width()
+        larg_visivel = max(200, c.winfo_width())
+        x1 = x0 + larg_visivel
         letras = max(10, (cw - 6) // 6)
-        for item in itens:
-            if item["x1"] < x0 - cw or item["x0"] > x1 + cw:
+        # Virtualização via busca binária O(log N): percorre apenas a janela visível + overscan de 3 células
+        margem_overscan = max(cw * 3, 180)
+        idx_ini = max(0, bisect.bisect_right(xs, x0 - margem_overscan) - 1) if xs else 0
+        idx_fim = min(len(itens), bisect.bisect_right(xs, x1 + margem_overscan) + 1) if xs else len(itens)
+        for idx_it in range(idx_ini, idx_fim):
+            item = itens[idx_it]
+            if item["x1"] < x0 - margem_overscan or item["x0"] > x1 + margem_overscan:
                 continue
             if item["tipo"] == "pasta":
                 ix0, ix1 = item["x0"], item["x1"]
@@ -7005,7 +7059,18 @@ class Aplicativo:
 
     def _item_painel_fotos_em(self, evento):
         x = self.canvas_fotos.canvasx(evento.x)
-        for item in getattr(self, "_itens_painel_fotos", []):
+        itens = getattr(self, "_itens_painel_fotos", [])
+        xs = getattr(self, "_xs_painel_fotos", [])
+        if not itens:
+            return None
+        if xs:
+            idx = bisect.bisect_right(xs, x) - 1
+            if 0 <= idx < len(itens):
+                item = itens[idx]
+                if item["x0"] <= x < item["x1"]:
+                    return item
+            return None
+        for item in itens:
             if item["x0"] <= x < item["x1"]:
                 return item
         return None
@@ -7178,13 +7243,25 @@ class Aplicativo:
         self._tl_larg, self._tl_alt, self._tl_altura = larg, alt, altura
         self._tl_passo_v = alt + 28
         self._tl_dim = c.winfo_width() if vertical else altura
-        passo = self._tl_passo()
+        passo = max(1, self._tl_passo())
         if vertical:
             largura = max(larg + 16, c.winfo_width())
-            c.configure(scrollregion=(0, 0, largura, max(1, len(itens) * passo)))
+            area_tl = (0, 0, largura, max(1, len(itens) * passo))
+            v0 = c.canvasy(0)
+            v1 = v0 + max(160, c.winfo_height())
         else:
-            c.configure(scrollregion=(0, 0, max(1, len(itens) * passo), altura))
-        for posicao, item in enumerate(itens):
+            area_tl = (0, 0, max(1, len(itens) * passo), altura)
+            v0 = c.canvasx(0)
+            v1 = v0 + max(240, c.winfo_width())
+        c.configure(scrollregion=area_tl)
+
+        # Virtualização da linha do tempo: renderiza e pede miniaturas apenas para a janela visível (+ overscan de 3 lâminas)
+        overscan = 3
+        pos_ini = max(0, int(v0 // passo) - overscan)
+        pos_fim = min(len(itens), int(v1 // passo) + 1 + overscan)
+
+        for posicao in range(pos_ini, pos_fim):
+            item = itens[posicao]
             if vertical:
                 x, y = 8, posicao * passo + 6
             else:
@@ -7207,8 +7284,13 @@ class Aplicativo:
             assinatura = "%s:%d" % (self._assinatura(item), w)
             pronta = self._tl_pil.get(chave)
             if pronta and pronta[0] == assinatura:
+                self._tl_pil.move_to_end(chave)
                 if chave not in self._tl_tk or self._tl_tk[chave][0] != assinatura:
                     self._tl_tk[chave] = (assinatura, ImageTk.PhotoImage(pronta[1]))
+                    while len(self._tl_tk) > 240:
+                        self._tl_tk.popitem(last=False)
+                else:
+                    self._tl_tk.move_to_end(chave)
                 c.create_image(xi, yi, image=self._tl_tk[chave][1], anchor="nw")
             else:
                 c.create_rectangle(xi, yi, xi + w, yi + h, fill="#ffffff", outline="")
@@ -7245,7 +7327,7 @@ class Aplicativo:
 
     def _mudou_tamanho_timeline(self, evento):
         if (evento.width if self._tl_vertical else evento.height) != self._tl_dim:
-            self.agendar("timeline", 80, self.desenhar_timeline)
+            self.agendar("timeline", 50, self.desenhar_timeline)
 
     def _timeline_roda(self, evento):
         passos = -int(evento.delta / 40)
@@ -7253,9 +7335,10 @@ class Aplicativo:
             self.canvas_timeline.yview_scroll(passos, "units")
         else:
             self.canvas_timeline.xview_scroll(passos, "units")
+        self.agendar("timeline", 14, self.desenhar_timeline)
 
     def _pedir_timeline(self, item, chave, assinatura, largura):
-        mini = {"capa": None, "laminas": {item: json.loads(json.dumps(self.projeto["laminas"][item]))}}
+        mini = {"capa": None, "laminas": {item: copy.deepcopy(self.projeto["laminas"][item])}}
         produto, info = self.produto, self.info
 
         def trabalho():
@@ -7266,7 +7349,10 @@ class Aplicativo:
 
     def _receber_timeline(self, chave, assinatura, img):
         self._tl_pil[chave] = (assinatura, img)
-        self.agendar("timeline", 120, self.desenhar_timeline)
+        self._tl_pil.move_to_end(chave)
+        while len(self._tl_pil) > 240:
+            self._tl_pil.popitem(last=False)
+        self.agendar("timeline", 45, self.desenhar_timeline)
 
     def _timeline_em(self, x):
         passo = self._tl_passo()
