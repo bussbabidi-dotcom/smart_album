@@ -157,7 +157,167 @@ def criar_cabecalho_janela(pai, titulo, subtitulo=None, icone="◆"):
     if subtitulo is not None:
         lbl_sub = tk.Label(interno, text=subtitulo, bg=CABECALHO, fg=TEXTO_FRACO, font=FONTE_PEQUENA, anchor="w", justify="left")
         lbl_sub.pack(fill="x", padx=(22, 0), pady=(2, 0))
+        faixa.bind(
+            "<Configure>",
+            lambda e, lb=lbl_sub: lb.configure(wraplength=max(220, e.width - 52)),
+            add="+",
+        )
     return faixa, lbl_titulo, lbl_sub
+
+
+def criar_corpo_rolavel(pai, padding=12, bg=PAINEL):
+    """
+    Cria uma área central com rolagem vertical automática quando a janela secundária é
+    redimensionada para uma altura menor que o conteúdo, e expande o conteúdo quando ampliada.
+    Retorna (quadro_interno, container_externo, canvas).
+    """
+    container = tk.Frame(pai, bg=bg, highlightthickness=0, bd=0)
+    container.pack(fill="both", expand=True)
+
+    barra = ttk.Scrollbar(container, orient="vertical")
+    canvas = tk.Canvas(container, bg=bg, highlightthickness=0, bd=0, yscrollcommand=barra.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    barra.configure(command=canvas.yview)
+
+    interno = ttk.Frame(canvas, padding=padding)
+    id_janela = canvas.create_window((0, 0), window=interno, anchor="nw")
+    estado = {"barra_visivel": False}
+
+    def _atualizar_rolagem(_evento=None):
+        try:
+            if not canvas.winfo_exists():
+                return
+            cw = max(120, canvas.winfo_width())
+            ch = max(80, canvas.winfo_height())
+            canvas.itemconfigure(id_janela, width=cw)
+            req_h = interno.winfo_reqheight()
+            precisa_barra = req_h > ch + 4
+            if precisa_barra and not estado["barra_visivel"]:
+                barra.pack(side="right", fill="y", before=canvas)
+                estado["barra_visivel"] = True
+            elif not precisa_barra and estado["barra_visivel"]:
+                barra.pack_forget()
+                estado["barra_visivel"] = False
+                canvas.yview_moveto(0.0)
+            canvas.configure(scrollregion=(0, 0, cw, max(ch, req_h)))
+        except tk.TclError:
+            pass
+
+    interno.bind("<Configure>", _atualizar_rolagem, add="+")
+    canvas.bind("<Configure>", _atualizar_rolagem, add="+")
+
+    def _roda_mouse(evento):
+        try:
+            if not estado["barra_visivel"] or not canvas.winfo_exists():
+                return
+            foco = canvas.focus_get()
+            if foco is not None and foco.winfo_class() in ("Text", "TCombobox", "Listbox"):
+                return
+            passos = -int(evento.delta / 120) if getattr(evento, "delta", 0) else 0
+            if passos:
+                canvas.yview_scroll(passos, "units")
+        except tk.TclError:
+            pass
+
+    janela_top = pai.winfo_toplevel()
+    janela_top.bind("<MouseWheel>", _roda_mouse, add="+")
+    return interno, container, canvas
+
+
+def configurar_janela_secundaria(
+    janela,
+    pai=None,
+    chave=None,
+    largura=None,
+    altura=None,
+    min_largura=420,
+    min_altura=260,
+    centralizar=True,
+):
+    """
+    Habilita redimensionamento completo (horizontal e vertical) em qualquer janela secundária,
+    adiciona alça de redimensionamento (Sizegrip) no canto inferior direito, respeita os limites
+    da tela e memoriza o tamanho personalizado escolhido pelo usuário.
+    """
+    janela.resizable(True, True)
+    janela.minsize(int(min_largura), int(min_altura))
+
+    # Localiza o dicionário de arranjo na aplicação principal, se existir
+    dono_arranjo = None
+    for candidato in (getattr(janela, "app", None), pai, getattr(pai, "app", None)):
+        if candidato is not None and isinstance(getattr(candidato, "arranjo", None), dict):
+            dono_arranjo = candidato.arranjo
+            break
+
+    # Adiciona alça visual de redimensionamento no canto inferior direito
+    try:
+        grip = ttk.Sizegrip(janela)
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        janela._sizegrip = grip
+    except tk.TclError:
+        grip = None
+
+    janela.update_idletasks()
+    sw = max(800, janela.winfo_screenwidth())
+    sh = max(600, janela.winfo_screenheight())
+    max_w = max(int(min_largura), sw - 36)
+    max_h = max(int(min_altura), sh - 68)
+
+    w_req = max(int(min_largura), int(largura or janela.winfo_reqwidth() or min_largura))
+    h_req = max(int(min_altura), int(altura or janela.winfo_reqheight() or min_altura))
+
+    # Restaura tamanho salvo pelo usuário se disponível
+    if dono_arranjo is not None and chave:
+        mapa_janelas = dono_arranjo.get("janelas_secundarias")
+        if isinstance(mapa_janelas, dict) and isinstance(mapa_janelas.get(chave), dict):
+            salvo = mapa_janelas[chave]
+            if isinstance(salvo.get("w"), int) and isinstance(salvo.get("h"), int):
+                w_req = max(int(min_largura), salvo["w"])
+                h_req = max(int(min_altura), salvo["h"])
+
+    w_final = min(max_w, w_req)
+    h_final = min(max_h, h_req)
+
+    ref = pai if (pai is not None and hasattr(pai, "winfo_rootx")) else getattr(getattr(janela, "app", None), "root", None)
+    if centralizar and ref is not None:
+        try:
+            rx = ref.winfo_rootx()
+            ry = ref.winfo_rooty()
+            rw = max(200, ref.winfo_width())
+            rh = max(200, ref.winfo_height())
+            px = rx + (rw - w_final) // 2
+            py = ry + (rh - h_final) // 2
+        except tk.TclError:
+            px = (sw - w_final) // 2
+            py = (sh - h_final) // 2
+    else:
+        px = (sw - w_final) // 2
+        py = (sh - h_final) // 2
+
+    px = max(12, min(px, sw - w_final - 12))
+    py = max(18, min(py, sh - h_final - 42))
+    janela.geometry("%dx%d+%d+%d" % (w_final, h_final, px, py))
+
+    def _ao_configurar(evento):
+        if evento.widget is not janela:
+            return
+        if grip is not None:
+            try:
+                grip.lift()
+            except tk.TclError:
+                pass
+        if dono_arranjo is not None and chave and evento.width >= min_largura and evento.height >= min_altura:
+            mapa = dono_arranjo.setdefault("janelas_secundarias", {})
+            if isinstance(mapa, dict):
+                mapa[chave] = {"w": int(evento.width), "h": int(evento.height)}
+
+    janela.bind("<Configure>", _ao_configurar, add="+")
+    if grip is not None:
+        try:
+            grip.lift()
+        except tk.TclError:
+            pass
+    return janela
 
 
 class Dica:
@@ -394,10 +554,12 @@ class DialogoCorPhotoshop(tk.Toplevel):
         self.s = s0 * 100.0
         self.v = v0 * 100.0
 
+        self._lado_sv = self.LADO_SV
+        self._agendado_redim = None
+
         self.title(titulo)
         self.configure(bg=PAINEL)
         self.transient(pai)
-        self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.cancelar)
         self.bind("<Escape>", lambda _e: self.cancelar())
         self.bind("<Return>", lambda _e: self.confirmar())
@@ -406,10 +568,15 @@ class DialogoCorPhotoshop(tk.Toplevel):
         self._gerar_barra_hue()
         self._atualizar_tudo()
 
-        self.update_idletasks()
-        px = pai.winfo_rootx() + max(20, (pai.winfo_width() - self.winfo_reqwidth()) // 2)
-        py = pai.winfo_rooty() + max(20, (pai.winfo_height() - self.winfo_reqheight()) // 2)
-        self.geometry("+%d+%d" % (px, py))
+        configurar_janela_secundaria(
+            self,
+            pai=pai,
+            chave="seletor_cor_photoshop",
+            largura=540,
+            altura=410,
+            min_largura=490,
+            min_altura=370,
+        )
         self.grab_set()
         self.focus_set()
 
@@ -426,26 +593,29 @@ class DialogoCorPhotoshop(tk.Toplevel):
 
         grade = ttk.Frame(corpo)
         grade.pack(fill="both", expand=True)
+        grade.columnconfigure(0, weight=1)
+        grade.rowconfigure(0, weight=1)
 
-        # 1. Campo 2D Saturação / Brilho
+        # 1. Campo 2D Saturação / Brilho (redimensionável junto com a janela)
         quadro_sv = tk.Frame(grade, bg=BORDA, padx=1, pady=1)
-        quadro_sv.grid(row=0, column=0, sticky="nw")
+        quadro_sv.grid(row=0, column=0, sticky="nsew")
         self.canvas_sv = tk.Canvas(
-            quadro_sv, width=self.LADO_SV, height=self.LADO_SV,
+            quadro_sv, width=self._lado_sv, height=self._lado_sv,
             bg="#000000", highlightthickness=0, cursor="crosshair"
         )
-        self.canvas_sv.pack()
+        self.canvas_sv.pack(fill="both", expand=True)
         self.canvas_sv.bind("<ButtonPress-1>", self._evento_sv)
         self.canvas_sv.bind("<B1-Motion>", self._evento_sv)
+        self.canvas_sv.bind("<Configure>", self._ao_redimensionar_sv)
 
         # 2. Barra vertical de Matiz (Hue)
         quadro_h = tk.Frame(grade, bg=BORDA, padx=1, pady=1)
-        quadro_h.grid(row=0, column=1, sticky="nw", padx=(10, 14))
+        quadro_h.grid(row=0, column=1, sticky="ns", padx=(10, 14))
         self.canvas_h = tk.Canvas(
-            quadro_h, width=self.LARG_H, height=self.LADO_SV,
+            quadro_h, width=self.LARG_H, height=self._lado_sv,
             bg="#000000", highlightthickness=0, cursor="sb_v_double_arrow"
         )
-        self.canvas_h.pack()
+        self.canvas_h.pack(fill="y", expand=True)
         self.canvas_h.bind("<ButtonPress-1>", self._evento_h)
         self.canvas_h.bind("<B1-Motion>", self._evento_h)
 
@@ -539,8 +709,28 @@ class DialogoCorPhotoshop(tk.Toplevel):
             am.pack(side="left", padx=2)
             am.bind("<Button-1>", lambda _e, c=c_hex: self._definir_hex(c))
 
+    def _ao_redimensionar_sv(self, evento):
+        novo_lado = max(170, min(int(evento.width), int(evento.height)))
+        if abs(novo_lado - self._lado_sv) < 4:
+            return
+        self._lado_sv = novo_lado
+        self._matiz_cache_img = None
+        if self._agendado_redim is not None:
+            try:
+                self.after_cancel(self._agendado_redim)
+            except tk.TclError:
+                pass
+        self._agendado_redim = self.after(25, self._aplicar_redim_sv)
+
+    def _aplicar_redim_sv(self):
+        self._agendado_redim = None
+        if not self.winfo_exists():
+            return
+        self._gerar_barra_hue()
+        self._atualizar_tudo()
+
     def _gerar_barra_hue(self):
-        alt = self.LADO_SV
+        alt = max(170, int(self._lado_sv))
         larg = self.LARG_H
         img = Image.new("RGB", (larg, alt))
         px = img.load()
@@ -553,8 +743,9 @@ class DialogoCorPhotoshop(tk.Toplevel):
         self._tk_hue = ImageTk.PhotoImage(img)
 
     def _gerar_campo_sv(self):
+        lado = max(170, int(self._lado_sv))
         h_norm = (self.h % 360.0) / 360.0
-        if self._matiz_cache_img is not None and self._matiz_cache_val == round(h_norm, 4):
+        if self._matiz_cache_img is not None and self._matiz_cache_val == (round(h_norm, 4), lado):
             return self._matiz_cache_img
         tam = 105
         img = Image.new("RGB", (tam, tam))
@@ -565,8 +756,8 @@ class DialogoCorPhotoshop(tk.Toplevel):
                 s = x / float(tam - 1)
                 r, g, b = colorsys.hsv_to_rgb(h_norm, s, v)
                 px[x, y] = (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
-        img_grande = img.resize((self.LADO_SV, self.LADO_SV), Image.BILINEAR)
-        self._matiz_cache_val = round(h_norm, 4)
+        img_grande = img.resize((lado, lado), Image.BILINEAR)
+        self._matiz_cache_val = (round(h_norm, 4), lado)
         self._matiz_cache_img = img_grande
         return img_grande
 
@@ -580,21 +771,22 @@ class DialogoCorPhotoshop(tk.Toplevel):
     def _atualizar_tudo(self):
         self._sincronizando = True
         try:
+            lado = max(170, int(self._lado_sv))
             # Desenha campo 2D S/B
             img_sv = self._gerar_campo_sv()
             self._tk_sv = ImageTk.PhotoImage(img_sv)
             self.canvas_sv.delete("all")
             self.canvas_sv.create_image(0, 0, image=self._tk_sv, anchor="nw")
-            cx = int(round((self.s / 100.0) * (self.LADO_SV - 1)))
-            cy = int(round((1.0 - self.v / 100.0) * (self.LADO_SV - 1)))
+            cx = int(round((self.s / 100.0) * (lado - 1)))
+            cy = int(round((1.0 - self.v / 100.0) * (lado - 1)))
             cor_anel = "#000000" if (self.v > 65 and self.s < 50) else "#ffffff"
             self.canvas_sv.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, outline=cor_anel, width=2)
 
             # Desenha barra Hue
             self.canvas_h.delete("all")
             self.canvas_h.create_image(0, 0, image=self._tk_hue, anchor="nw")
-            hy = int(round((1.0 - (self.h % 360.0) / 360.0) * (self.LADO_SV - 1)))
-            self.canvas_h.create_rectangle(0, max(0, hy - 2), self.LARG_H, min(self.LADO_SV, hy + 2),
+            hy = int(round((1.0 - (self.h % 360.0) / 360.0) * (lado - 1)))
+            self.canvas_h.create_rectangle(0, max(0, hy - 2), self.LARG_H, min(lado, hy + 2),
                                            outline="#ffffff", width=2)
 
             r, g, b = self._rgb_atual()
@@ -613,15 +805,17 @@ class DialogoCorPhotoshop(tk.Toplevel):
             self._sincronizando = False
 
     def _evento_sv(self, evento):
-        x = max(0, min(self.LADO_SV - 1, evento.x))
-        y = max(0, min(self.LADO_SV - 1, evento.y))
-        self.s = (x / float(self.LADO_SV - 1)) * 100.0
-        self.v = (1.0 - (y / float(self.LADO_SV - 1))) * 100.0
+        lado = max(170, int(self._lado_sv))
+        x = max(0, min(lado - 1, evento.x))
+        y = max(0, min(lado - 1, evento.y))
+        self.s = (x / float(lado - 1)) * 100.0
+        self.v = (1.0 - (y / float(lado - 1))) * 100.0
         self._atualizar_tudo()
 
     def _evento_h(self, evento):
-        y = max(0, min(self.LADO_SV - 1, evento.y))
-        self.h = (1.0 - (y / float(self.LADO_SV - 1))) * 360.0
+        lado = max(170, int(self._lado_sv))
+        y = max(0, min(lado - 1, evento.y))
+        self.h = (1.0 - (y / float(lado - 1))) * 360.0
         self._atualizar_tudo()
 
     def _digitou_num(self, chave):
