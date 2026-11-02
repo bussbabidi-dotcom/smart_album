@@ -44,7 +44,10 @@ import photoshop
 import projeto as proj
 import recorte
 import tema
-from comum import EXTENSOES, cor_hex, cor_rgb, gravar_json, ler_json, normalizar_caminho, pasta_dados
+from comum import (
+    EXTENSOES, apagar_pasta, cor_hex, cor_rgb, gravar_json, ler_json,
+    limpar_temporarios_disco, normalizar_caminho, pasta_dados,
+)
 import fundos
 import janela_exportar
 import janela_tratamento
@@ -343,6 +346,10 @@ class Aplicativo:
         self._celula = (100, 96, 84)
         self._pastas_temp_drive = []
         atexit.register(self._limpar_pastas_temp_drive)
+        threading.Thread(
+            target=lambda: limpar_temporarios_disco(pastas_protegidas=self._pastas_temp_drive, limpar_autosave=False),
+            daemon=True,
+        ).start()
         self.atalhos_mapa = self._carregar_atalhos()
         self._gravando_atalho_acao = None
         self._botoes_atalhos_ui = {}
@@ -354,6 +361,7 @@ class Aplicativo:
         self.root.protocol("WM_DELETE_WINDOW", self.sair)
         self.root.after(30, self._ler_fila)
         self._carregar_ui_do_projeto()
+        self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
         self.atualizar_tudo()
         if argumentos:
             self.root.after(300, lambda: self.adicionar_caminhos(list(argumentos)))
@@ -367,6 +375,8 @@ class Aplicativo:
         self.espacamento_var = tk.DoubleVar()
         self.fotos_lamina_var = tk.IntVar()
         self.auto_salvar_var = tk.IntVar(value=5)
+        self.proteger_rostos_var = tk.BooleanVar(value=True)
+        self.separar_pastas_var = tk.BooleanVar(value=True)
 
         topo = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 4))
         topo.pack(side="top", fill="x")
@@ -503,6 +513,8 @@ class Aplicativo:
         self.botao_capa.pack(side="right", padx=2)
 
         ttk.Frame(topo, width=6).pack(side="right")
+        self._botao(topo, "? Guia", self.mostrar_guia_rapido,
+                    "Guia rápido passo a passo e dicas de uso para novos usuários", "Compacto.TButton").pack(side="right", padx=2)
         self._botao(topo, "↷", self.refazer, "Refazer", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(topo, "↶", self.desfazer, "Desfazer", "Icone.TButton", width=3).pack(side="right", padx=1)
         ttk.Frame(topo, width=6).pack(side="right")
@@ -545,6 +557,30 @@ class Aplicativo:
         self._botao(barra, "⊞", self.rediagramar_todas,
                     "Aplicar margem e espaçamento em todas as lâminas",
                     "Icone.TButton", width=3).pack(side="left", padx=1)
+        bt_rostos = ttk.Checkbutton(
+            barra,
+            text="👤 Rostos",
+            variable=self.proteger_rostos_var,
+            command=self._alternou_protecao_rostos,
+            style="Alternar.Toolbutton",
+        )
+        bt_rostos.pack(side="left", padx=2)
+        tema.dica(
+            bt_rostos,
+            "Identificar quantos rostos existem em cada foto e ajustar o quadro/enquadramento para não cortar nenhuma pessoa",
+        )
+        bt_pastas = ttk.Checkbutton(
+            barra,
+            text="📁 Separar Pastas",
+            variable=self.separar_pastas_var,
+            command=self._alternou_separar_pastas,
+            style="Alternar.Toolbutton",
+        )
+        bt_pastas.pack(side="left", padx=2)
+        tema.dica(
+            bt_pastas,
+            "Separar por pastas carregadas: fotos de pastas diferentes nunca se misturam na mesma lâmina",
+        )
         guias = ttk.Checkbutton(barra, text="⌗", variable=self.guias, command=self.desenhar_lamina,
                                 style="Alternar.Toolbutton")
         guias.pack(side="left", padx=1)
@@ -640,7 +676,10 @@ class Aplicativo:
                              values=["nome", "data", "cenario"])
         combo.pack(side="left", padx=(4, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.ordenar_fotos())
-        tema.dica(combo, "Ordenar fotos por nome, data ou cenário")
+        tema.dica(combo, "Ordenar fotos por nome, data ou cenário (mantendo a separação por pastas)")
+        self._botao(cabeca, "📁 Separar Lâminas", self.separar_laminas_por_pasta,
+                    "Separar pastas carregadas em lâminas exclusivas (nunca mistura fotos de pastas diferentes na mesma lâmina)",
+                    "Compacto.TButton").pack(side="left", padx=(6, 0))
         self._botao(cabeca, "🗑", self.remover_fotos_selecionadas,
                     "Remover fotos selecionadas do projeto", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
         self._botao(cabeca, "⇉", self.distribuir_nao_usadas,
@@ -2196,6 +2235,8 @@ class Aplicativo:
             self.espacamento_var.set(cfg["espacamento_mm"])
             self.fotos_lamina_var.set(cfg["fotos_por_lamina"])
             self.auto_salvar_var.set(int(cfg.get("auto_salvar_minutos", 5)))
+            self.proteger_rostos_var.set(bool(cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True)))
+            self.separar_pastas_var.set(bool(cfg.get("separar_pastas", True)))
         finally:
             self._carregando = False
         self._reagendar_auto_salvar()
@@ -2210,19 +2251,33 @@ class Aplicativo:
         if minutos > 0:
             self.agendar("auto_salvar_json", minutos * 60 * 1000, self._executar_auto_salvar)
 
+    def _eh_pasta_temporaria_drive(self, caminho):
+        if not caminho:
+            return False
+        ch_norm = normalizar_caminho(caminho)
+        if "smartalbum_drive_" in ch_norm.lower():
+            return True
+        for p in getattr(self, "_pastas_temp_drive", []):
+            if not p:
+                continue
+            p_norm = normalizar_caminho(p)
+            if ch_norm == p_norm or ch_norm.startswith(p_norm + os.sep):
+                return True
+        return False
+
     def _executar_auto_salvar(self):
         try:
             if self.projeto.get("fotos") or self.projeto.get("laminas"):
                 caminho = self.caminho_projeto
                 if not caminho:
                     pasta_fotos = self.projeto.get("pasta_fotos") or ""
-                    nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (self.projeto.get("nome") or "album").strip()) or "album"
-                    if pasta_fotos and Path(pasta_fotos).is_dir():
+                    # Nunca grava auto-save dentro de pasta temporária do Drive nem polui o disco com vários arquivos
+                    if pasta_fotos and Path(pasta_fotos).is_dir() and not self._eh_pasta_temporaria_drive(pasta_fotos):
+                        nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (self.projeto.get("nome") or "album").strip()) or "album"
                         caminho = str(Path(pasta_fotos) / (nome_limpo + proj.EXTENSAO))
                     else:
-                        pasta_auto = PASTA_DADOS / "autosave"
-                        pasta_auto.mkdir(parents=True, exist_ok=True)
-                        caminho = str(pasta_auto / (nome_limpo + proj.EXTENSAO))
+                        # Se o projeto é apenas temporário (ex.: pasta temporária do Drive) e não foi salvo pelo usuário, não grava lixo em disco
+                        return
                 caminho_salvo = proj.salvar(self.projeto, caminho)
                 if not self.caminho_projeto:
                     self.caminho_projeto = str(caminho_salvo)
@@ -2237,6 +2292,7 @@ class Aplicativo:
     def novo_projeto(self, silencioso=False):
         if not silencioso and not self._confirmar_descartar():
             return
+        self._limpar_pastas_temp_drive(limpar_autosave=True)
         self._carregar_projeto(proj.novo(self.produto["nome"]))
         self.info = {}
         self.registrar("Álbum novo. Arraste fotos ou uma pasta para a janela.")
@@ -2249,6 +2305,7 @@ class Aplicativo:
                                                  filetypes=[("Álbum", "*" + proj.EXTENSAO), ("Todos", "*.*")])
         if not caminho:
             return
+        self._limpar_pastas_temp_drive(limpar_autosave=True)
         try:
             projeto = proj.abrir(caminho)
         except Exception as e:
@@ -2325,23 +2382,112 @@ class Aplicativo:
             if messagebox.askyesno("Produto", "Diagramar o álbum de novo para o tamanho %s?" % nome, parent=self.root):
                 self.diagramar_tudo(False)
 
-    def _limpar_pastas_temp_drive(self):
-        for p in list(getattr(self, "_pastas_temp_drive", [])):
+    def _executar_limpeza_programada_temp_drive(self, limite_mb=250):
+        """
+        Limpeza programada periódica: monitora o uso de memória/disco das pastas temporárias
+        do Google Drive na sessão atual e remove fotos/pastas temporárias não utilizadas
+        nas lâminas caso o limite (padrão 250 MB) seja atingido.
+        """
+        try:
+            pastas = [p for p in list(getattr(self, "_pastas_temp_drive", [])) if p and Path(p).exists()]
+            if pastas:
+                usadas = {
+                    normalizar_caminho(e["foto"])
+                    for e in proj.todos_espacos(self.projeto)
+                    if e.get("foto")
+                }
+                arquivos_temp = []
+                bytes_total = 0
+                for p in pastas:
+                    for arq in Path(p).rglob("*"):
+                        if arq.is_file():
+                            try:
+                                tam = arq.stat().st_size
+                                bytes_total += tam
+                                arquivos_temp.append((arq, tam, normalizar_caminho(arq) in usadas))
+                            except OSError:
+                                pass
+
+                limite_bytes = max(32, int(limite_mb)) * 1024 * 1024
+                if bytes_total > limite_bytes and self.tarefa is None:
+                    meta_bytes = int(limite_bytes * 0.75)
+                    removidas = []
+                    for arq, tam, em_uso in arquivos_temp:
+                        if bytes_total <= meta_bytes:
+                            break
+                        if not em_uso:
+                            try:
+                                ch = str(arq)
+                                if hasattr(self, "observador") and self.observador:
+                                    self.observador.esquecer(ch)
+                                analise.esquecer_miniaturas(ch)
+                                arq.unlink(missing_ok=True)
+                                removidas.append(ch)
+                                bytes_total -= tam
+                            except OSError:
+                                pass
+                    if removidas:
+                        proj.remover_fotos(self.projeto, removidas)
+                        for r in removidas:
+                            self.info.pop(normalizar_caminho(r), None)
+                        self.atualizar_fotos()
+                        self.registrar(
+                            "Limpeza programada de memória: %d foto(s) temporária(s) não usada(s) do Drive removida(s)."
+                            % len(removidas)
+                        )
+        except Exception:
+            pass
+        finally:
+            self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
+
+    def _limpar_pastas_temp_drive(self, limpar_autosave=True):
+        """
+        Remove imediatamente do disco todas as pastas temporárias do Google Drive e
+        quaisquer arquivos temporários/caches órfãos, liberando descritores abertos no Windows.
+        """
+        self.cancelar_agendado("limpeza_temp_drive")
+        pastas = list(getattr(self, "_pastas_temp_drive", []))
+        for p in pastas:
+            if not p:
+                continue
             try:
-                if p and Path(p).is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
+                p_norm = normalizar_caminho(p)
+                if hasattr(self, "observador") and self.observador:
+                    for vig in list(self.observador.vigiados()):
+                        v_norm = normalizar_caminho(vig)
+                        if v_norm == p_norm or v_norm.startswith(p_norm + os.sep):
+                            self.observador.esquecer(vig)
+                analise.esquecer_pasta(p)
+            except Exception:
+                pass
+            try:
+                apagar_pasta(p, tentativas=6, pausa=0.2)
             except Exception:
                 pass
         if hasattr(self, "_pastas_temp_drive"):
             self._pastas_temp_drive.clear()
+        try:
+            limpar_temporarios_disco(pastas_protegidas=(), limpar_autosave=limpar_autosave)
+        except Exception:
+            pass
 
     def sair(self):
         if not self._confirmar_descartar():
             return
         self.gravar_arranjo()
         self.observador.parar()
+        try:
+            self._tk_lamina = None
+            self._tk_lamina_zoom = None
+            self._imagem_lamina = None
+            self._cache_laminas.clear()
+            self._tk_miniaturas.clear()
+            self._tl_pil.clear()
+            self._tl_tk.clear()
+        except Exception:
+            pass
+        self._limpar_pastas_temp_drive(limpar_autosave=True)
         analise.gravar_cache()
-        self._limpar_pastas_temp_drive()
         self.root.destroy()
 
     # ==================================================================
@@ -2407,6 +2553,25 @@ class Aplicativo:
                         self.diagramar_tudo(False, escopo="pasta", pasta_alvo=str(pasta_origem) if pasta_origem else None)
             elif novo:
                 self.diagramar_tudo(False)
+            elif self.projeto.get("laminas") and self._cfg().get("separar_pastas", True):
+                pastas_novas = []
+                nomes_novas = []
+                for cam_n in novas:
+                    ch_n = normalizar_caminho(proj.pasta_da_foto(cam_n))
+                    if ch_n not in pastas_novas:
+                        pastas_novas.append(ch_n)
+                        nomes_novas.append(proj.nome_pasta_da_foto(cam_n))
+                resumo_pastas = ", ".join(nomes_novas[:3]) + ("..." if len(nomes_novas) > 3 else "")
+                if messagebox.askyesno(
+                    "Separar por Pastas Carregadas",
+                    "%d foto(s) carregada(s) na pasta '%s'.\nDeseja diagramar esta pasta em novas lâminas separadas ao final do álbum (sem misturar com as pastas anteriores)?"
+                    % (len(novas), resumo_pastas),
+                    parent=self.root,
+                ):
+                    if len(pastas_novas) == 1:
+                        self.diagramar_tudo(False, escopo="pasta", pasta_alvo=pastas_novas[0])
+                    else:
+                        self.distribuir_nao_usadas()
             self.atualizar_tudo()
 
         self.executar_quando_livre("Analisando %s foto(s)" % len(novas), trabalho, fim)
@@ -3035,6 +3200,12 @@ class Aplicativo:
 
         def fim(baixados, erro):
             if erro or not baixados:
+                try:
+                    if pasta_base in self._pastas_temp_drive:
+                        self._pastas_temp_drive.remove(pasta_base)
+                    apagar_pasta(pasta_base, tentativas=5, pausa=0.15)
+                except Exception:
+                    pass
                 messagebox.showwarning(
                     "Google Drive",
                     "Não foi possível baixar fotos desse link.\nVerifique se a pasta do Google Drive está com acesso 'Qualquer pessoa com o link'.",
@@ -3043,9 +3214,10 @@ class Aplicativo:
                 return
             esperadas = estado_destino.get("esperadas") or len(baixados)
             self.registrar(
-                "Google Drive: %d de %d foto(s) baixada(s) com sucesso." % (len(baixados), esperadas)
+                "Google Drive: %d de %d foto(s) baixada(s) na pasta temporária (auto-excluída ao fechar)." % (len(baixados), esperadas)
             )
             self.adicionar_caminhos([str(estado_destino["pasta"])], perguntar_diagramar=True)
+            self.agendar("limpeza_temp_drive", 4000, self._executar_limpeza_programada_temp_drive)
 
         self.executar("Baixando fotos do Google Drive", trabalho, fim)
 
@@ -3318,6 +3490,7 @@ class Aplicativo:
         meio_termo_var = tk.BooleanVar(value=bool(cfg.get("permitir_meio_termo", True)))
         sangria_total_var = tk.BooleanVar(value=bool(cfg.get("permitir_sangria_total", True)))
         rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
+        nao_cortar_pessoas_var = tk.BooleanVar(value=bool(cfg.get("nao_cortar_pessoas", True)))
         preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
         repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
 
@@ -3366,7 +3539,12 @@ class Aplicativo:
         ).pack(anchor="w", pady=2)
         ttk.Checkbutton(
             quadro_geom,
-            text="Reconhecer rostos e desviá-los automaticamente da linha de dobra central",
+            text="Identificar quantos rostos há na imagem e ajustar para NÃO cortar nenhuma pessoa",
+            variable=nao_cortar_pessoas_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Desviar todos os rostos detectados automaticamente da linha de dobra central",
             variable=rostos_var,
         ).pack(anchor="w", pady=2)
         ttk.Checkbutton(
@@ -3484,7 +3662,8 @@ class Aplicativo:
                 "permitir_transpasse": bool(transpasse_var.get()),
                 "permitir_meio_termo": bool(meio_termo_var.get()),
                 "permitir_sangria_total": bool(sangria_total_var.get()),
-                "reconhecer_rostos": bool(rostos_var.get()),
+                "reconhecer_rostos": bool(rostos_var.get() or nao_cortar_pessoas_var.get()),
+                "nao_cortar_pessoas": bool(nao_cortar_pessoas_var.get()),
                 "preencher_espacos_extras": bool(preencher_extras_var.get()),
                 "excluir_repetidas": bool(repetidas_var.get()),
             })
@@ -3500,8 +3679,15 @@ class Aplicativo:
                 cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
-                text="Fotos no escopo: %d  |  Pastas: %d  |  Cenários detectados: %d  →  %d lâmina(s) gerada(s)"
-                % (prev["total_fotos"], prev["pastas"], prev["cenarios"], prev["laminas_estimadas"])
+                text="Fotos: %d  |  Pastas: %d  |  Cenários: %d  |  👥 %d rosto(s) em %d foto(s)  →  %d lâmina(s)"
+                % (
+                    prev["total_fotos"],
+                    prev["pastas"],
+                    prev["cenarios"],
+                    prev.get("total_rostos", 0),
+                    prev.get("fotos_com_rostos", 0),
+                    prev["laminas_estimadas"],
+                )
             )
             detalhes = "Média de %.1f fotos/lâmina (%d lâminas com fotos" % (
                 prev["media_fotos_lamina"],
@@ -3510,6 +3696,8 @@ class Aplicativo:
             if prev["laminas_extras_vazias"] > 0:
                 detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
             detalhes += ")."
+            if nao_cortar_pessoas_var.get():
+                detalhes += " Proteção ativa: nenhuma pessoa será cortada."
             if prev["sobras"] > 0:
                 detalhes += " Atenção: %d foto(s) excedem o limite máximo de lâminas." % prev["sobras"]
             lbl_previa_2.configure(text=detalhes)
@@ -3524,6 +3712,7 @@ class Aplicativo:
             corte_max_pct_var,
             transpasse_var,
             rostos_var,
+            nao_cortar_pessoas_var,
             preencher_extras_var,
             repetidas_var,
             *vars_num.values(),
@@ -3694,14 +3883,14 @@ class Aplicativo:
                 caminhos_pasta = {
                     normalizar_caminho(f["caminho"])
                     for f in self.projeto.get("fotos", [])
-                    if normalizar_caminho(proj.pasta_da_foto(f)) == ch_alvo
+                    if proj.pertence_a_pasta(proj.pasta_da_foto(f), ch_alvo)
                 }
                 atuais = self.projeto.get("laminas", [])
                 pos_insercao = None
                 mantidas = []
                 for idx_l, lam in enumerate(atuais):
                     fotos_lam = [normalizar_caminho(e["foto"]) for e in lam.get("espacos", []) if e.get("foto")]
-                    pertence = (lam.get("pasta") and normalizar_caminho(lam["pasta"]) == ch_alvo) or (
+                    pertence = (lam.get("pasta") and proj.pertence_a_pasta(lam["pasta"], ch_alvo)) or (
                         fotos_lam and all(c in caminhos_pasta for c in fotos_lam)
                     )
                     if pertence:
@@ -3799,6 +3988,10 @@ class Aplicativo:
                              for e in opcao["espacos"]]
         lamina["sobreposicoes"] = list(opcao.get("sobreposicoes") or [])
         lamina["modelo"] = opcao.get("modelo")
+        ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lamina)
+        if ch_l:
+            lamina["pasta"] = ch_l
+            lamina["nome_pasta"] = nm_l
 
     def relayout(self, indice, fotos=None, marcar=True):
         lamina = self._lamina(indice)
@@ -3908,6 +4101,198 @@ class Aplicativo:
                 self.agendar("config_timeline", 180, self.desenhar_timeline)
             self.atualizar_sugestoes()
 
+    def _alternou_protecao_rostos(self):
+        if getattr(self, "_carregando", False):
+            return
+        ativo = bool(self.proteger_rostos_var.get())
+        cfg_proj = self.projeto.setdefault("config", {})
+        cfg_proj["reconhecer_rostos"] = ativo
+        cfg_proj["nao_cortar_pessoas"] = ativo
+        self._chave_cache_sugestoes = None
+        self._chave_cache_modelos_pag = None
+        self._marcar_modificado()
+        lamina = self._lamina()
+        if lamina is not None and any(e.get("foto") for e in lamina.get("espacos", [])):
+            for e in lamina.get("espacos", []):
+                ed = e.setdefault("edicao", {})
+                ed["ignorar_rosto"] = not ativo
+                ed.pop("corte", None)
+            if ativo:
+                fotos_l = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
+                esp_seg, _pen = diagramar._proteger_espacos_contra_corte_pessoas(
+                    lamina["espacos"], fotos_l, self.produto, self._cfg()
+                )
+                lamina["espacos"] = esp_seg
+        self._cache_laminas.clear()
+        self.atualizar_lamina_atual()
+        self.atualizar_sugestoes()
+        self.registrar(
+            "Identificação de rostos ativada: quadros e enquadramentos ajustados para não cortar nenhuma pessoa."
+            if ativo
+            else "Proteção automática de rostos desativada na lâmina atual."
+        )
+
+    def _alternou_separar_pastas(self):
+        if getattr(self, "_carregando", False):
+            return
+        ativo = bool(self.separar_pastas_var.get())
+        cfg_proj = self.projeto.setdefault("config", {})
+        cfg_proj["separar_pastas"] = ativo
+        self._marcar_modificado()
+        if ativo:
+            misturadas = proj.laminas_com_pastas_misturadas(self.projeto)
+            if misturadas:
+                self.separar_laminas_por_pasta()
+                return
+            self.registrar("Separação por pastas carregadas ATIVADA: fotos de pastas diferentes não se misturam.")
+        else:
+            self.registrar("Separação estrita por pastas carregadas desativada.")
+        self.atualizar_fotos()
+        self.desenhar_timeline()
+
+    def separar_laminas_por_pasta(self):
+        """
+        Garante que nenhuma lâmina misture fotos de pastas carregadas diferentes.
+        Se houver lâminas misturadas, divide cada pasta em sua própria lâmina; se houver fotos livres
+        ou múltiplas pastas carregadas sem lâminas, diagrama separando por pasta.
+        """
+        cfg_proj = self.projeto.setdefault("config", {})
+        cfg_proj["separar_pastas"] = True
+        if hasattr(self, "separar_pastas_var"):
+            self._carregando = True
+            self.separar_pastas_var.set(True)
+            self._carregando = False
+
+        laminas_atuais = self.projeto.get("laminas", [])
+        if not laminas_atuais:
+            if self.projeto.get("fotos"):
+                self.diagramar_tudo(confirmar=False, escopo="tudo")
+            else:
+                self.registrar("Carregue uma ou mais pastas de fotos primeiro.")
+            return
+
+        misturadas = proj.laminas_com_pastas_misturadas(self.projeto)
+        if not misturadas:
+            # Verifica se há mais de uma pasta carregada e oferece rediagramar mantendo cada pasta em seu bloco
+            pastas = proj.listar_pastas_projeto(self.projeto)
+            for lam in laminas_atuais:
+                ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lam)
+                if ch_l:
+                    lam["pasta"] = ch_l
+                    lam["nome_pasta"] = nm_l
+            self.desenhar_timeline()
+            self.atualizar_fotos()
+            if len(pastas) > 1:
+                self.registrar("As %d lâminas já estão 100%% separadas nas %d pastas carregadas." % (len(laminas_atuais), len(pastas)))
+            else:
+                self.registrar("Separação por pastas ativa (%d pasta carregada)." % max(1, len(pastas)))
+            return
+
+        self.marcar_historico()
+        novas_laminas = []
+        cfg = self._cfg()
+        modelos = self._modelos()
+        laminas_divididas = 0
+        for lam in laminas_atuais:
+            ch_l, nm_l, distintas = proj.pasta_da_lamina(self.projeto, lam)
+            if len(distintas) <= 1:
+                if ch_l:
+                    lam["pasta"] = ch_l
+                    lam["nome_pasta"] = nm_l
+                novas_laminas.append(lam)
+                continue
+            laminas_divididas += 1
+            # Separa as fotos desta lâmina por pasta carregada na ordem em que aparecem
+            por_pasta = OrderedDict()
+            for esp in lam.get("espacos", []):
+                cam = esp.get("foto")
+                if not cam:
+                    continue
+                reg = proj.registro_foto(self.projeto, cam)
+                ch_p = normalizar_caminho(proj.pasta_da_foto(reg if reg else cam))
+                nm_p = proj.nome_pasta_da_foto(reg if reg else cam)
+                por_pasta.setdefault(ch_p, (nm_p, []))[1].append(cam)
+            for ch_p, (nm_p, cams_p) in por_pasta.items():
+                infos_p = self._fotos_info(cams_p, lam)
+                if not infos_p:
+                    continue
+                melhor = diagramar.opcoes_lamina(infos_p, self.produto, cfg, modelos, maximo=1)[0]
+                nova_l = diagramar.lamina_vazia(cfg)
+                nova_l["fundo"] = lam.get("fundo", cfg.get("fundo", "#ffffff"))
+                if lam.get("fundo_imagem"):
+                    nova_l["fundo_imagem"] = copy.deepcopy(lam["fundo_imagem"])
+                self._aplicar_opcao(nova_l, melhor)
+                nova_l["pasta"] = ch_p
+                nova_l["nome_pasta"] = nm_p
+                novas_laminas.append(nova_l)
+
+        self.projeto["laminas"] = novas_laminas
+        self.atual = min(self.atual if isinstance(self.atual, int) else 0, max(0, len(novas_laminas) - 1))
+        self.laminas_sel = {self.atual}
+        self._cache_laminas.clear()
+        self.atualizar_tudo()
+        self.registrar(
+            "%d lâmina(s) que misturavam pastas foram separadas em lâminas exclusivas por pasta (%d lâminas no total)."
+            % (laminas_divididas, len(novas_laminas))
+        )
+
+    def diagramar_pasta_selecionada(self, ch_pasta=None):
+        """Diagrama somente uma pasta carregada específica em lâminas exclusivas."""
+        alvo = ch_pasta or (self.pasta_filtro.get() if hasattr(self, "pasta_filtro") else "todas")
+        if not alvo or alvo == "todas":
+            pastas = proj.listar_pastas_projeto(self.projeto)
+            if len(pastas) == 1:
+                alvo = pastas[0][0]
+            else:
+                self.abrir_diagramacao()
+                return
+        self.diagramar_tudo(confirmar=False, escopo="pasta", pasta_alvo=alvo)
+
+    def selecionar_laminas_da_pasta(self, ch_pasta):
+        """Seleciona na linha do tempo todas as lâminas que pertencem à pasta carregada `ch_pasta`."""
+        alvo = normalizar_caminho(ch_pasta)
+        indices = set()
+        nome_p = Path(ch_pasta).name or "Pasta"
+        for idx, lam in enumerate(self.projeto.get("laminas", [])):
+            ch_l, nm_l, distintas = proj.pasta_da_lamina(self.projeto, lam)
+            if ch_l == alvo or alvo in distintas:
+                indices.add(idx)
+                if nm_l:
+                    nome_p = nm_l
+        if not indices:
+            self.registrar("Nenhuma lâmina encontrada com fotos da pasta '%s'." % nome_p)
+            return
+        ordenados = sorted(indices)
+        self.atual = ordenados[0]
+        self.laminas_sel = indices
+        self.ultima_lamina_clicada = ordenados[0]
+        self.espaco_sel = None
+        self.atualizar_tudo()
+        self._mostrar_na_timeline(self.atual)
+        self.registrar("%d lâmina(s) da pasta '%s' selecionada(s) em grupo." % (len(indices), nome_p))
+
+    def remover_pasta_carregada(self, ch_pasta):
+        """Remove do projeto todas as fotos e lâminas exclusivas de uma pasta carregada."""
+        nome_p = Path(ch_pasta).name or str(ch_pasta)
+        pastas = proj.listar_pastas_projeto(self.projeto)
+        qtd_fotos = next((q for ch, _p, _n, q in pastas if ch == normalizar_caminho(ch_pasta)), 0)
+        if not messagebox.askyesno(
+            "Remover Pasta do Projeto",
+            "Deseja remover a pasta '%s' (%d foto(s)) e suas lâminas exclusivas do projeto?\n(Os arquivos originais no computador não serão apagados.)"
+            % (nome_p, qtd_fotos),
+            parent=self.root,
+        ):
+            return
+        self.marcar_historico()
+        n_fotos, n_lams = proj.remover_pasta_projeto(self.projeto, ch_pasta, remover_laminas_da_pasta=True)
+        if hasattr(self, "pasta_filtro") and normalizar_caminho(self.pasta_filtro.get()) == normalizar_caminho(ch_pasta):
+            self.pasta_filtro.set("todas")
+        self.pastas_recolhidas.discard(normalizar_caminho(ch_pasta))
+        self.pastas_recolhidas.discard(ch_pasta)
+        self._cache_laminas.clear()
+        self.atualizar_tudo()
+        self.registrar("Pasta '%s' removida do projeto (%d foto(s) e %d lâmina(s) removida(s))." % (nome_p, n_fotos, n_lams))
+
     def colocar_foto(self, caminho, li, ei, marcar=True):
         lamina = self._lamina(li)
         if lamina is None or not (0 <= ei < len(lamina["espacos"])):
@@ -3918,6 +4303,10 @@ class Aplicativo:
         espaco = lamina["espacos"][ei]
         espaco["foto"] = str(caminho)
         espaco["edicao"] = {}
+        ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lamina)
+        if ch_l:
+            lamina["pasta"] = ch_l
+            lamina["nome_pasta"] = nm_l
         if not self.editar_layout.get():
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
         self.atual, self.espaco_sel = li, ei
@@ -4491,10 +4880,7 @@ class Aplicativo:
             return
         if not itens:
             self.canvas.delete("all")
-            self.canvas.create_text(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2,
-                                    text="Clique em 'Diagramar automático' ou em '+ Lâmina'.", fill=tema.TEXTO_FRACO,
-                                    font=tema.FONTE_TITULO)
-            self.rotulo_lamina.configure(text="")
+            self._desenhar_vazio(somente_sem_laminas=True)
             return
         dw, dh, ox, oy = self._geometria()
         self._geo = (dw, dh, ox, oy)
@@ -4699,15 +5085,178 @@ class Aplicativo:
                                                  (" · %s vazio(s)" % vazios) if vazios else "")
         self.rotulo_lamina.configure(text=texto)
 
-    def _desenhar_vazio(self):
-        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        x0, y0, x1, y1 = cw * 0.2, ch * 0.25, cw * 0.8, ch * 0.75
-        self.canvas.create_rectangle(x0, y0, x1, y1, outline=tema.BORDA, dash=(6, 6), width=2)
-        self.canvas.create_text(cw / 2, ch / 2 - 18, text="Arraste fotos ou várias pastas para cá",
-                                fill=tema.TEXTO, font=("Segoe UI Semibold", 16))
-        self.canvas.create_text(cw / 2, ch / 2 + 16, fill=tema.TEXTO_FRACO,
-                                text="As pastas ficam separadas na tira de fotos e os cenários são agrupados automaticamente")
+    def _desenhar_vazio(self, somente_sem_laminas=False):
+        cw = max(480, self.canvas.winfo_width())
+        ch = max(340, self.canvas.winfo_height())
+        cx, cy = cw // 2, ch // 2
+        self._botoes_vazio = []
         self.rotulo_lamina.configure(text="")
+
+        if somente_sem_laminas:
+            w_box, h_box = min(520, cw - 60), 210
+            x0, y0 = cx - w_box // 2, cy - h_box // 2
+            x1, y1 = x0 + w_box, y0 + h_box
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL, outline=tema.BORDA, width=1)
+            self.canvas.create_text(
+                cx, y0 + 42,
+                text="%d foto(s) pronta(s) no projeto" % len(self.projeto.get("fotos", [])),
+                fill=tema.TEXTO, font=("Segoe UI Semibold", 15),
+            )
+            self.canvas.create_text(
+                cx, y0 + 72,
+                text="Clique abaixo para criar as lâminas automaticamente separadas por pastas e cenários:",
+                fill=tema.TEXTO_FRACO, font=tema.FONTE,
+            )
+            bx0, by0, bx1, by1 = cx - 150, y0 + 112, cx + 150, y0 + 158
+            self.canvas.create_rectangle(bx0, by0, bx1, by1, fill=tema.DESTAQUE, outline="#31a8ff", width=1)
+            self.canvas.create_text(
+                (bx0 + bx1) // 2, (by0 + by1) // 2,
+                text="✦ Diagramar Álbum Agora",
+                fill="#ffffff", font=tema.FONTE_FORTE,
+            )
+            self._botoes_vazio.append((bx0, by0, bx1, by1, lambda: self.diagramar_tudo(False)))
+            return
+
+        w_card = min(720, cw - 48)
+        h_card = min(400, ch - 36)
+        x0, y0 = cx - w_card // 2, cy - h_card // 2
+        x1, y1 = x0 + w_card, y0 + h_card
+
+        self.canvas.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL, outline=tema.BORDA, width=1)
+        self.canvas.create_rectangle(x0 + 14, y0 + 14, x1 - 14, y1 - 14, outline=tema.BORDA, dash=(5, 5), width=1)
+
+        self.canvas.create_text(
+            cx, y0 + 46,
+            text="Bem-vindo ao Smart Album Studio",
+            fill=tema.TEXTO, font=("Segoe UI Semibold", 17),
+        )
+        self.canvas.create_text(
+            cx, y0 + 76,
+            text="Arraste fotos ou pastas do Windows Explorer para cá, ou escolha uma opção abaixo para começar:",
+            fill=tema.TEXTO_FRACO, font=tema.FONTE,
+        )
+
+        # 4 Cartões de Ação Clicáveis na Tela Inicial
+        acoes = [
+            ("📁 Carregar Pasta", "Separa cada pasta carregada", self.escolher_pasta, True),
+            ("☁ Link do Drive", "Baixa da nuvem em pasta temp.", self.importar_link_drive, False),
+            ("🖼 Fotos Avulsas", "Selecionar JPG, PNG ou TIFF", self.escolher_fotos, False),
+            ("📂 Abrir Projeto", "Continuar arquivo .album.json", self.abrir_projeto, False),
+        ]
+        n_bt = len(acoes)
+        esp_bt = 12
+        larg_total_bt = min(w_card - 64, 620)
+        w_bt = (larg_total_bt - esp_bt * (n_bt - 1)) // n_bt
+        h_bt = 78
+        bx_ini = cx - larg_total_bt // 2
+        by0 = y0 + 108
+        by1 = by0 + h_bt
+
+        for idx_b, (titulo_b, sub_b, cmd_b, primario) in enumerate(acoes):
+            bx0 = bx_ini + idx_b * (w_bt + esp_bt)
+            bx1 = bx0 + w_bt
+            cor_fundo = tema.DESTAQUE_ESCURO if primario else tema.PAINEL_2
+            cor_borda = tema.DESTAQUE if primario else tema.BORDA
+            self.canvas.create_rectangle(bx0, by0, bx1, by1, fill=cor_fundo, outline=cor_borda, width=1)
+            self.canvas.create_text(
+                (bx0 + bx1) // 2, by0 + 28,
+                text=titulo_b, fill="#ffffff" if primario else tema.TEXTO, font=tema.FONTE_FORTE,
+            )
+            self.canvas.create_text(
+                (bx0 + bx1) // 2, by0 + 54,
+                text=sub_b, fill="#7dd3fc" if primario else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA,
+            )
+            self._botoes_vazio.append((bx0, by0, bx1, by1, cmd_b))
+
+        # Resumo rápido em 4 passos para usuários novos
+        y_passos = by1 + 32
+        if y_passos + 95 < y1:
+            self.canvas.create_line(x0 + 36, y_passos - 12, x1 - 36, y_passos - 12, fill=tema.BORDA)
+            self.canvas.create_text(
+                cx, y_passos + 6,
+                text="COMO FUNCIONA EM 4 PASSOS SIMPLES",
+                fill=tema.DESTAQUE, font=tema.FONTE_FORTE,
+            )
+            passos = [
+                ("1. Carregue Pastas", "As pastas não se misturam"),
+                ("2. Diagramação IA", "Agrupa cenários e protege rostos"),
+                ("3. Ajuste Livre", "Arraste fotos ou dê duplo clique"),
+                ("4. Exporte", "JPG, PSD em camadas ou PDF"),
+            ]
+            larg_p = larg_total_bt // 4
+            for i_p, (t_p, d_p) in enumerate(passos):
+                px = bx_ini + i_p * larg_p + larg_p // 2
+                self.canvas.create_text(px, y_passos + 34, text=t_p, fill=tema.TEXTO, font=tema.FONTE_FORTE)
+                self.canvas.create_text(px, y_passos + 54, text=d_p, fill=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+
+    def _acao_vazio_em(self, x, y):
+        if self.projeto.get("laminas"):
+            return None
+        for bx0, by0, bx1, by1, cmd in getattr(self, "_botoes_vazio", []):
+            if bx0 <= x <= bx1 and by0 <= y <= by1:
+                return cmd
+        return None
+
+    def mostrar_guia_rapido(self):
+        """Janela amigável com o passo a passo e atalhos principais para usuários novos."""
+        jan = tk.Toplevel(self.root)
+        jan.title("Guia Rápido — Como usar o Smart Album")
+        jan.configure(bg=tema.PAINEL)
+        jan.resizable(False, False)
+        jan.transient(self.root)
+
+        quadro = ttk.Frame(jan, padding=18)
+        quadro.pack(fill="both", expand=True)
+
+        ttk.Label(
+            quadro,
+            text="Bem-vindo ao Smart Album Studio",
+            font=("Segoe UI Semibold", 14),
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            quadro,
+            text="Monte álbuns profissionais em poucos cliques seguindo este fluxo rápido:",
+            style="Fraco.TLabel",
+        ).pack(anchor="w", pady=(0, 12))
+
+        etapas = [
+            (
+                "1. Carregar Pastas ou Link do Google Drive",
+                "• Use '📁 Pasta' (ou arraste várias pastas do Explorer) para importar suas fotos.\n"
+                "• Com '📁 Separar Pastas' ativo, cada pasta carregada fica em lâminas exclusivas sem nunca misturar eventos.\n"
+                "• Use '☁ Link Drive' para baixar pastas compartilhadas diretamente em uma pasta temporária auto-limpa.",
+            ),
+            (
+                "2. Diagramação Inteligente (Cenários + Proteção de Rostos)",
+                "• O motor identifica automaticamente a quantidade de rostos (👤 Rostos) para evitar cortes em pessoas e desviar rostos da dobra central.\n"
+                "• Clique com o botão direito sobre o cabeçalho de qualquer pasta na galeria para diagramar somente aquela pasta.",
+            ),
+            (
+                "3. Edição Rápida na Lâmina e Seleção em Grupo",
+                "• Clique em uma foto e arraste para outra posição na lâmina para trocar as duas fotos mantendo o layout.\n"
+                "• Dê duplo clique na lâmina (ou clique em '⬚') para mover e redimensionar os quadros livremente.\n"
+                "• Na linha do tempo de lâminas, use Ctrl+Clique ou Shift+Clique para selecionar várias lâminas e duplicar ou excluir todas de uma vez (Del).",
+            ),
+            (
+                "4. Integração com Photoshop e Exportação Final",
+                "• Clique em '✦ Ps/Lr' para editar a foto no Photoshop — ao salvar (Ctrl+S), ela atualiza sozinha no álbum.\n"
+                "• Clique em '⤓ Exportar' para gravar o álbum finalizado em JPG, PSD (em camadas editáveis) e/ou PDF.",
+            ),
+        ]
+
+        for titulo_e, texto_e in etapas:
+            bloco = tk.Frame(quadro, bg=tema.PAINEL_2, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+            bloco.pack(fill="x", pady=4)
+            tk.Label(bloco, text=titulo_e, bg=tema.PAINEL_2, fg=tema.DESTAQUE, font=tema.FONTE_FORTE, anchor="w").pack(fill="x")
+            tk.Label(bloco, text=texto_e, bg=tema.PAINEL_2, fg=tema.TEXTO, font=tema.FONTE, justify="left", anchor="w").pack(fill="x", pady=(3, 0))
+
+        rodape = ttk.Frame(quadro)
+        rodape.pack(fill="x", pady=(14, 0))
+        self._botao(rodape, "📁 Carregar Pasta Agora", lambda: (jan.destroy(), self.escolher_pasta()),
+                    estilo="PrimarioCompacto.TButton").pack(side="left")
+        self._botao(rodape, "☁ Importar do Google Drive", lambda: (jan.destroy(), self.importar_link_drive()),
+                    estilo="Compacto.TButton").pack(side="left", padx=6)
+        self._botao(rodape, "Fechar", jan.destroy, estilo="Compacto.TButton").pack(side="right")
 
     def _desenhar_espacos(self, ocultar=None):
         c = self.canvas
@@ -4927,6 +5476,10 @@ class Aplicativo:
         return ox <= x <= ox + dw and oy <= y <= oy + dh
 
     def _lamina_passou(self, evento):
+        if not self.projeto.get("laminas"):
+            acao_v = self._acao_vazio_em(evento.x, evento.y)
+            self.canvas.configure(cursor="hand2" if acao_v is not None else "")
+            return
         if self._editando_lamina():
             alca = self._alca_em(evento.x, evento.y)
             if alca:
@@ -4942,6 +5495,11 @@ class Aplicativo:
         if self._foco() in getattr(self, "_num_campos", []):
             self._aplicar_numeros()
         self.canvas.focus_set()
+        if not self.projeto.get("laminas"):
+            acao_v = self._acao_vazio_em(evento.x, evento.y)
+            if acao_v is not None:
+                acao_v()
+            return
         if self._editando_lamina():
             self._layout_pressionou(evento)
             return
@@ -6855,12 +7413,14 @@ class Aplicativo:
         x_cursor = 0
         for ch_p, (nome_p, fotos_p) in grupos.items():
             recolhida = ch_p in self.pastas_recolhidas
+            usadas_p = sum(1 for _i, _f, u in fotos_p if u)
             if mostrar_divisores:
                 itens.append({
                     "tipo": "pasta",
                     "pasta": ch_p,
                     "nome": nome_p,
                     "qtd": len(fotos_p),
+                    "usadas": usadas_p,
                     "recolhida": recolhida,
                     "x0": x_cursor,
                     "x1": x_cursor + larg_div,
@@ -6951,8 +7511,7 @@ class Aplicativo:
         # caso contrário, agenda em segundo plano via Pintor para não travar a rolagem em álbuns grandes
         ja_em_ram = False
         try:
-            with analise._trava:
-                ja_em_ram = norm in analise._cache_miniaturas
+            ja_em_ram = analise._memoria_miniatura.pegar((norm, analise.LADO_MINIATURA)) is not None
         except Exception:
             ja_em_ram = False
         if ja_em_ram:
@@ -7021,13 +7580,14 @@ class Aplicativo:
                 recolhida = item["recolhida"]
                 c.create_rectangle(ix0 + 3, 4, ix1 - 3, ch - 4,
                                    fill=tema.PAINEL_2 if not recolhida else tema.DESTAQUE_ESCURO,
-                                   outline=tema.BORDA, width=1)
+                                   outline=tema.DESTAQUE if not recolhida else tema.BORDA, width=1)
                 seta = "▶" if recolhida else "▼"
-                c.create_text(cx, 16, text="📁 %s" % seta, fill=tema.ALERTA, font=tema.FONTE_FORTE)
+                c.create_text(cx, 15, text="📁 %s" % seta, fill=tema.ALERTA, font=tema.FONTE_FORTE)
                 nome_p = item["nome"]
                 curto_p = nome_p if len(nome_p) <= 12 else nome_p[:10] + "…"
-                c.create_text(cx, ch // 2, text=curto_p, fill=tema.TEXTO, font=tema.FONTE_PEQUENA, width=ix1 - ix0 - 8)
-                c.create_text(cx, ch - 14, text="%d foto(s)" % item["qtd"], fill=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+                c.create_text(cx, ch // 2 - 2, text=curto_p, fill=tema.TEXTO, font=tema.FONTE_PEQUENA, width=ix1 - ix0 - 8)
+                usadas_p = item.get("usadas", 0)
+                c.create_text(cx, ch - 14, text="%d/%d" % (usadas_p, item["qtd"]), fill=tema.VERDE if usadas_p == item["qtd"] else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
                 continue
 
             foto, usos = item["foto"], item["usos"]
@@ -7053,6 +7613,18 @@ class Aplicativo:
                 c.create_text(direita - 7, 13, text=str(usos), fill="#0b2a1c", font=tema.FONTE_FORTE)
             if foto.get("destaque"):
                 c.create_text(cx - lado // 2 + 6, 12, text="★", fill=tema.ALERTA, font=("Segoe UI", 12))
+            # Selo com a quantidade de rostos identificados na foto (ex.: 👤 1 ou 👥 5)
+            dados_f = self.info.get(normalizar_caminho(foto["caminho"]))
+            rosto_f = dados_f.get("rosto") if isinstance(dados_f, dict) else None
+            if isinstance(rosto_f, dict):
+                qtd_r = max(1, int(rosto_f.get("qtd") or 1))
+                etq_r = ("%d" % qtd_r)
+                bx0 = cx - lado // 2 + 2
+                by1 = ch - 18
+                by0 = by1 - 14
+                bx1 = bx0 + (22 if qtd_r < 10 else 28)
+                c.create_rectangle(bx0, by0, bx1, by1, fill="#0e2942", outline="#31a8ff", width=1)
+                c.create_text((bx0 + bx1) / 2.0, (by0 + by1) / 2.0, text="👤" + etq_r, fill="#7dd3fc", font=("Segoe UI", 7, "bold"))
             nome = Path(foto["caminho"]).name
             c.create_text(cx, ch - 9, text=nome if len(nome) <= letras else nome[:letras - 2] + "…",
                           fill=tema.TEXTO if selecionada else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
@@ -7133,12 +7705,30 @@ class Aplicativo:
             ch_pasta = item["pasta"]
             nome_pasta = item["nome"]
             menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(label="Selecionar todas da pasta '%s'" % nome_pasta,
+            menu.add_command(
+                label="⚡ Diagramar somente a pasta '%s' (lâminas separadas)" % nome_pasta,
+                command=lambda: self.diagramar_pasta_selecionada(ch_pasta),
+            )
+            menu.add_command(
+                label="📁 Selecionar lâminas da pasta '%s' na linha do tempo" % nome_pasta,
+                command=lambda: self.selecionar_laminas_da_pasta(ch_pasta),
+            )
+            menu.add_command(
+                label="📁 Separar todas as pastas carregadas nas lâminas",
+                command=self.separar_laminas_por_pasta,
+            )
+            menu.add_separator()
+            menu.add_command(label="Selecionar todas as fotos da pasta '%s'" % nome_pasta,
                              command=lambda: self._selecionar_pasta_inteira(ch_pasta))
             menu.add_command(label="Filtrar somente a pasta '%s'" % nome_pasta,
                              command=lambda: (self.pasta_filtro.set(ch_pasta), self.atualizar_fotos()))
             menu.add_command(label="Mostrar todas as pastas",
                              command=lambda: (self.pasta_filtro.set("todas"), self.atualizar_fotos()))
+            menu.add_separator()
+            menu.add_command(
+                label="🗑 Remover pasta '%s' do projeto" % nome_pasta,
+                command=lambda: self.remover_pasta_carregada(ch_pasta),
+            )
             menu.tk_popup(evento.x_root, evento.y_root)
             return
         indice = item["indice"] if (item and item.get("tipo") == "foto") else None
@@ -7303,10 +7893,28 @@ class Aplicativo:
             if len(selecionadas) > 1 and em_multi:
                 c.create_rectangle(xi + 2, yi + 2, xi + 16, yi + 15, fill=tema.DESTAQUE if ativa else tema.MULTI_SEL, outline="#ffffff", width=1)
                 c.create_text(xi + 9, yi + 8, text="✓", fill="#ffffff", font=("Segoe UI", 7, "bold"))
-            rotulo = str(item + 1)
-            c.create_text(x + larg // 2, y + alt + 10, text=rotulo,
-                          fill="#ffffff" if (ativa or em_multi) else tema.TEXTO_FRACO,
-                          font=tema.FONTE_PEQUENA)
+            ch_pasta_lam, nome_pasta_lam, distintas_lam = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][item])
+            pasta_ant = ""
+            if posicao > 0:
+                pasta_ant, _nm_ant, _d_ant = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][itens[posicao - 1]])
+            mudou_pasta = bool(ch_pasta_lam and posicao > 0 and pasta_ant and ch_pasta_lam != pasta_ant)
+            if mudou_pasta:
+                if vertical:
+                    c.create_line(4, y - 3, largura - 4, y - 3, fill=tema.ALERTA, width=2)
+                else:
+                    c.create_line(x - 4, 4, x - 4, altura - 4, fill=tema.ALERTA, width=2)
+            if nome_pasta_lam:
+                curto_pl = nome_pasta_lam if len(nome_pasta_lam) <= 10 else nome_pasta_lam[:8] + "…"
+                cor_etq = "#f5a623" if len(distintas_lam) > 1 else ("#38c172" if (posicao == 0 or mudou_pasta) else "#9aa3ad")
+                rotulo = "%d · 📁%s" % (item + 1, curto_pl)
+                c.create_text(x + larg // 2, y + alt + 10, text=rotulo,
+                              fill="#ffffff" if (ativa or em_multi) else cor_etq,
+                              font=tema.FONTE_PEQUENA)
+            else:
+                rotulo = str(item + 1)
+                c.create_text(x + larg // 2, y + alt + 10, text=rotulo,
+                              fill="#ffffff" if (ativa or em_multi) else tema.TEXTO_FRACO,
+                              font=tema.FONTE_PEQUENA)
         self._desenhar_insercao()
 
     def _medidas_timeline(self):
@@ -7452,6 +8060,20 @@ class Aplicativo:
         menu.add_command(
             label="Aplicar fundo atual nas %d lâmina(s) selecionada(s)" % max(1, qtd_sel),
             command=self.fundo_em_selecionadas,
+        )
+        ch_pasta_tl, nome_pasta_tl, _dist_tl = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][item])
+        if ch_pasta_tl:
+            menu.add_command(
+                label="📁 Selecionar todas as lâminas da pasta '%s'" % nome_pasta_tl,
+                command=lambda: self.selecionar_laminas_da_pasta(ch_pasta_tl),
+            )
+            menu.add_command(
+                label="⚡ Rediagramar somente a pasta '%s'" % nome_pasta_tl,
+                command=lambda: self.diagramar_pasta_selecionada(ch_pasta_tl),
+            )
+        menu.add_command(
+            label="📁 Separar pastas carregadas em lâminas exclusivas",
+            command=self.separar_laminas_por_pasta,
         )
         menu.add_command(label="Selecionar todas as lâminas (%d)" % n, command=self.selecionar_todas_laminas)
         if qtd_sel > 1:

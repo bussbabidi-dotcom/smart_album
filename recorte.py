@@ -125,22 +125,87 @@ def tamanho_transformado(w, h, edicao):
     return w * f, h * f
 
 
+class RostoTransformado(dict):
+    """Dicionário de rosto transformado compatível tanto com indexação [0]/[1] quanto com chaves ('x0'..'y1', 'qtd', 'rostos')."""
+
+    def __getitem__(self, chave):
+        if chave == 0:
+            return self["cx"]
+        if chave == 1:
+            return self["cy"]
+        return super().__getitem__(chave)
+
+
+def _transformar_ponto(x, y, rot, espelhar):
+    if rot == 90:
+        x, y = 1.0 - y, x
+    elif rot == 180:
+        x, y = 1.0 - x, 1.0 - y
+    elif rot == 270:
+        x, y = y, 1.0 - x
+    if espelhar:
+        x = 1.0 - x
+    return x, y
+
+
+def _transformar_caixa(x0, y0, x1, y1, rot, espelhar):
+    p1 = _transformar_ponto(x0, y0, rot, espelhar)
+    p2 = _transformar_ponto(x1, y0, rot, espelhar)
+    p3 = _transformar_ponto(x0, y1, rot, espelhar)
+    p4 = _transformar_ponto(x1, y1, rot, espelhar)
+    xs = (p1[0], p2[0], p3[0], p4[0])
+    ys = (p1[1], p2[1], p3[1], p4[1])
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def rosto_transformado(rosto, edicao):
-    """Posição do rosto (fração) depois do giro e do espelho."""
+    """
+    Posição do(s) rosto(s) e caixa de segurança do grupo (fração 0..1)
+    depois do giro e do espelhamento.
+    """
     if not rosto:
         return None
     ed = _ed(edicao)
-    x, y = rosto["cx"], rosto["cy"]
     rot = int(ed["rot"]) % 360
-    if rot == 90:
-        x, y = 1 - y, x
-    elif rot == 180:
-        x, y = 1 - x, 1 - y
-    elif rot == 270:
-        x, y = y, 1 - x
-    if ed["espelhar"]:
-        x = 1 - x
-    return (x, y)
+    espelhar = bool(ed["espelhar"])
+
+    if isinstance(rosto, (tuple, list)):
+        cx, cy = _transformar_ponto(float(rosto[0]), float(rosto[1]), rot, espelhar)
+        return RostoTransformado(cx=cx, cy=cy, qtd=1, x0=max(0.0, cx - 0.12), y0=max(0.0, cy - 0.14), x1=min(1.0, cx + 0.12), y1=min(1.0, cy + 0.18), rostos=[])
+
+    cx, cy = _transformar_ponto(float(rosto.get("cx", 0.5)), float(rosto.get("cy", 0.45)), rot, espelhar)
+    h_r = float(rosto.get("h", 0.15))
+    x0_orig = float(rosto.get("x0", max(0.0, float(rosto.get("cx", 0.5)) - max(0.08, h_r * 0.65))))
+    y0_orig = float(rosto.get("y0", max(0.0, float(rosto.get("cy", 0.45)) - max(0.10, h_r * 0.75))))
+    x1_orig = float(rosto.get("x1", min(1.0, float(rosto.get("cx", 0.5)) + max(0.08, h_r * 0.65))))
+    y1_orig = float(rosto.get("y1", min(1.0, float(rosto.get("cy", 0.45)) + max(0.12, h_r * 0.95))))
+    gx0, gy0, gx1, gy1 = _transformar_caixa(x0_orig, y0_orig, x1_orig, y1_orig, rot, espelhar)
+
+    rostos_t = []
+    for item in rosto.get("rostos") or []:
+        icx, icy = _transformar_ponto(float(item.get("cx", 0.5)), float(item.get("cy", 0.5)), rot, espelhar)
+        ix0, iy0, ix1, iy1 = _transformar_caixa(
+            float(item.get("x0", icx - 0.06)),
+            float(item.get("y0", icy - 0.08)),
+            float(item.get("x1", icx + 0.06)),
+            float(item.get("y1", icy + 0.10)),
+            rot,
+            espelhar,
+        )
+        rostos_t.append({"cx": icx, "cy": icy, "x0": ix0, "y0": iy0, "x1": ix1, "y1": iy1})
+
+    qtd = max(1, int(rosto.get("qtd") or len(rostos_t) or 1))
+    return RostoTransformado(
+        cx=cx,
+        cy=cy,
+        h=h_r,
+        qtd=qtd,
+        x0=gx0,
+        y0=gy0,
+        x1=gx1,
+        y1=gy1,
+        rostos=rostos_t,
+    )
 
 
 # ------------------------------------------------------------
@@ -162,33 +227,83 @@ def zoom_encaixar(W, H, aspecto):
 
 def corte_automatico(W, H, aspecto, rosto_t, dobra_x=None):
     """
-    Preenche o espaço (zoom = 1.0) centralizando no rosto se houver.
+    Preenche o espaço (zoom = 1.0) protegendo TODOS os rostos/pessoas detectados na imagem
+    para que nenhuma pessoa seja cortada nas bordas do quadro.
     Quando o quadro atravessa o meio da lâmina (dobra_x entre 0.05 e 0.95),
-    desloca o corte horizontalmente se o rosto cair perto da dobra central.
+    desloca o corte horizontalmente dentro da margem segura para afastar rostos da dobra.
     """
     bw, bh = caixa_base(W, H, aspecto)
     if rosto_t:
-        cx = rosto_t[0] * W
-        cy = rosto_t[1] * H + (0.5 - OLHOS_NO_CORTE) * bh
+        rx = float(rosto_t[0])
+        ry = float(rosto_t[1])
+        if isinstance(rosto_t, dict):
+            gx0 = float(rosto_t.get("x0", max(0.0, rx - 0.10))) * W
+            gy0 = float(rosto_t.get("y0", max(0.0, ry - 0.12))) * H
+            gx1 = float(rosto_t.get("x1", min(1.0, rx + 0.10))) * W
+            gy1 = float(rosto_t.get("y1", min(1.0, ry + 0.15))) * H
+            qtd = int(rosto_t.get("qtd", 1))
+            lista_r = rosto_t.get("rostos") or [{"cx": rx, "cy": ry}]
+        else:
+            gx0, gy0 = max(0.0, rx - 0.10) * W, max(0.0, ry - 0.12) * H
+            gx1, gy1 = min(1.0, rx + 0.10) * W, min(1.0, ry + 0.15) * H
+            qtd = 1
+            lista_r = [{"cx": rx, "cy": ry}]
+
+        # Posição ideal inicial: para grupos (2+ pessoas) centraliza no grupo inteiro;
+        # para 1 pessoa posiciona os olhos na regra dos terços superior (OLHOS_NO_CORTE)
+        if qtd >= 2:
+            cx = (gx0 + gx1) * 0.5
+            cy = (gy0 + gy1) * 0.48 + (ry * H) * 0.04
+        else:
+            cx = rx * W
+            cy = ry * H + (0.5 - OLHOS_NO_CORTE) * bh
+
+        # Intervalo seguro [cx_min, cx_max] e [cy_min, cy_max] que mantém TODAS as pessoas
+        # 100% dentro da janela de corte [cx - bw/2 .. cx + bw/2, cy - bh/2 .. cy + bh/2]
+        if (gx1 - gx0) <= bw:
+            cx_min = max(bw / 2.0, gx1 - bw / 2.0)
+            cx_max = min(W - bw / 2.0, gx0 + bw / 2.0)
+            if cx_min <= cx_max:
+                cx = min(max(cx, cx_min), cx_max)
+            else:
+                cx = (gx0 + gx1) * 0.5
+        else:
+            # Se o grupo de pessoas for mais largo que a janela, centraliza exatamente no grupo
+            cx = (gx0 + gx1) * 0.5
+
+        if (gy1 - gy0) <= bh:
+            cy_min = max(bh / 2.0, gy1 - bh / 2.0)
+            cy_max = min(H - bh / 2.0, gy0 + bh / 2.0)
+            if cy_min <= cy_max:
+                cy = min(max(cy, cy_min), cy_max)
+            else:
+                cy = (gy0 + gy1) * 0.5
+        else:
+            # Prioriza nunca cortar o topo da cabeça (gy0) quando o quadro é muito baixo
+            cy = max(bh / 2.0, min(H - bh / 2.0, gy0 + bh * 0.48))
+
+        # Desvio da linha de dobra central (sem nunca violar cx_min..cx_max que protege as pessoas das pontas)
         if dobra_x is not None and 0.05 < float(dobra_x) < 0.95 and bw < W - 1.0:
             dobra = float(dobra_x)
-            # Posição desejada do rosto longe da linha de dobra (margem de segurança de 14% da largura do quadro)
-            margem_dobra = 0.14
-            cx_clamped = min(max(cx, bw / 2.0), W - bw / 2.0)
-            u_rosto = (rosto_t[0] * W - (cx_clamped - bw / 2.0)) / max(1.0, bw)
-            if abs(u_rosto - dobra) < margem_dobra:
-                # Tenta empurrar o corte para que o rosto fique do lado com mais folga na foto
-                u_esq = dobra - margem_dobra
-                u_dir = dobra + margem_dobra
-                cx_op_esq = rosto_t[0] * W + bw * (0.5 - u_esq)
-                cx_op_dir = rosto_t[0] * W + bw * (0.5 - u_dir)
-                opcoes_cx = []
-                for cand in (cx_op_esq, cx_op_dir):
-                    c_lim = min(max(cand, bw / 2.0), W - bw / 2.0)
-                    u_cand = (rosto_t[0] * W - (c_lim - bw / 2.0)) / max(1.0, bw)
-                    opcoes_cx.append((abs(u_cand - dobra), -abs(c_lim - cx_clamped), c_lim))
-                opcoes_cx.sort(reverse=True)
-                cx = opcoes_cx[0][2]
+            margem_dobra = 0.13
+            lim_esq = max(bw / 2.0, gx1 - bw / 2.0) if (gx1 - gx0) <= bw else bw / 2.0
+            lim_dir = min(W - bw / 2.0, gx0 + bw / 2.0) if (gx1 - gx0) <= bw else W - bw / 2.0
+            if lim_esq > lim_dir:
+                lim_esq, lim_dir = bw / 2.0, W - bw / 2.0
+            cx_clamped = min(max(cx, lim_esq), lim_dir)
+
+            def _menor_dist_dobra(cand_cx):
+                x_ini = cand_cx - bw / 2.0
+                return min(abs((( float(r.get("cx", rx)) * W - x_ini ) / max(1.0, bw)) - dobra) for r in lista_r)
+
+            if _menor_dist_dobra(cx_clamped) < margem_dobra and lim_dir > lim_esq + 1.0:
+                # Testa deslocamentos seguros dentro de [lim_esq, lim_dir] para afastar todos os rostos da dobra
+                passos = [lim_esq + (lim_dir - lim_esq) * (i / 16.0) for i in range(17)]
+                melhor_cx = max(
+                    passos,
+                    key=lambda c_cand: (min(_menor_dist_dobra(c_cand), margem_dobra), -abs(c_cand - cx_clamped)),
+                )
+                cx = melhor_cx
     else:
         cx, cy = W / 2.0, H / 2.0
     cx = min(max(cx, bw / 2), W - bw / 2)

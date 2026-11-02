@@ -29,7 +29,7 @@ LADO_ANALISE = 1024
 LADO_PREVIA = 1600
 LADO_MINIATURA = 220
 TOLERANCIA_QUADRADO = 0.08
-VERSAO_CACHE = 2
+VERSAO_CACHE = 3
 
 PASTA_MINIATURAS = pasta_dados() / "miniaturas"
 ARQUIVO_CACHE = pasta_dados() / "analise.json"
@@ -106,8 +106,12 @@ class _Lru:
 
     def esquecer(self, prefixo):
         with self.trava:
-            for chave in [c for c in self.itens if c[0] == prefixo]:
+            for chave in [c for c in self.itens if c[0] == prefixo or c[0].startswith(prefixo + os.sep)]:
                 self.itens.pop(chave, None)
+
+    def limpar(self):
+        with self.trava:
+            self.itens.clear()
 
 
 _memoria_previa = _Lru(140)
@@ -116,9 +120,9 @@ _memoria_miniatura = _Lru(3500)
 
 def miniatura(caminho, lado=LADO_MINIATURA):
     """
-    Foto reduzida guardada em disco e na memória. lado=LADO_MINIATURA para o
-    painel de fotos, LADO_PREVIA para a lâmina e a tela de edição.
-    Consulta primeiro a memória RAM sem I/O de disco (stat) para resposta instantânea.
+    Foto reduzida mantida exclusivamente em memória RAM (LRU) sem gravar
+    cópias .jpg no disco (evita consumo desnecessário de espaço em disco).
+    lado=LADO_MINIATURA para o painel de fotos, LADO_PREVIA para a lâmina e tela de edição.
     """
     memoria = _memoria_miniatura if lado <= LADO_MINIATURA else _memoria_previa
     ch_norm = normalizar_caminho(caminho)
@@ -126,27 +130,7 @@ def miniatura(caminho, lado=LADO_MINIATURA):
     guardada = memoria.pegar(chave_rapida)
     if guardada is not None:
         return guardada
-    try:
-        destino = _arquivo_miniatura(caminho, lado)
-    except OSError:
-        destino = None
-    img = None
-    if destino is not None and destino.is_file():
-        try:
-            with Image.open(destino) as arquivo:
-                img = arquivo.convert("RGB")
-        except OSError:
-            img = None
-    if img is None:
-        img = _abrir_reduzida(caminho, lado)
-        if destino is not None:
-            try:
-                PASTA_MINIATURAS.mkdir(parents=True, exist_ok=True)
-                temp = destino.with_name("%s.%s.tmp" % (destino.stem, threading.get_ident()))
-                img.save(temp, "JPEG", quality=88)
-                os.replace(temp, destino)
-            except OSError:
-                pass
+    img = _abrir_reduzida(caminho, lado)
     memoria.por(chave_rapida, img)
     return img
 
@@ -156,6 +140,26 @@ def esquecer_miniaturas(caminho):
     chave = normalizar_caminho(caminho)
     _memoria_miniatura.esquecer(chave)
     _memoria_previa.esquecer(chave)
+
+
+def esquecer_pasta(pasta):
+    """Remove da memória RAM e do cache de análise todas as fotos de uma pasta (ex.: pasta temporária do Drive)."""
+    global _cache_sujo
+    if not pasta:
+        return
+    pref = normalizar_caminho(pasta)
+    _memoria_miniatura.esquecer(pref)
+    _memoria_previa.esquecer(pref)
+    with _trava_cache:
+        if _cache is not None and "fotos" in _cache:
+            chaves_remover = [
+                k for k in _cache["fotos"]
+                if k.startswith(pref + os.sep) or k.startswith(pref + "|")
+            ]
+            for k in chaves_remover:
+                _cache["fotos"].pop(k, None)
+            if chaves_remover:
+                _cache_sujo = True
 
 
 def imagem_para(caminho, lado_necessario):
@@ -169,7 +173,7 @@ def imagem_para(caminho, lado_necessario):
 
 
 # ------------------------------------------------------------
-# Rosto, nitidez, orientação
+# Rosto (múltiplas pessoas + caixa anti-corte), nitidez, orientação
 # ------------------------------------------------------------
 
 def _detector_yunet():
@@ -178,35 +182,165 @@ def _detector_yunet():
         modelo = modelo_rosto()
         if not modelo.is_file():
             return None
-        _detector = cv2.FaceDetectorYN.create(str(modelo), "", (320, 320), 0.7, 0.3, 5000)
+        _detector = cv2.FaceDetectorYN.create(str(modelo), "", (320, 320), 0.58, 0.3, 5000)
     return _detector
 
 
+def _iou_caixa(a, b):
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(1e-6, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1e-6, (bx1 - bx0) * (by1 - by0))
+    if inter / min(area_a, area_b) > 0.65:
+        return 1.0
+    return inter / max(1e-6, area_a + area_b - inter)
+
+
 def detectar_rosto(img):
-    """Maior rosto, em fração da imagem: {cx, cy (altura dos olhos), h}, ou None."""
+    """
+    Detecta TODOS os rostos na imagem (YuNet DNN + fallback Haar Cascade),
+    conta quantas pessoas existem ('qtd') e calcula a caixa de proteção de todo
+    o grupo ('x0', 'y0', 'x1', 'y1' em 0..1, incluindo margem para topo da cabeça,
+    cabelo/beca e ombros) para garantir que nenhuma pessoa seja cortada.
+    """
     w, h = img.size
+    if w < 24 or h < 24:
+        return None
     bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    candidatos = []
+    metodo_usado = None
+
     with _trava_rosto:
         det = _detector_yunet()
         if det is not None:
-            det.setInputSize((w, h))
-            _ok, faces = det.detect(bgr)
-            if faces is not None and len(faces):
-                f = max(faces, key=lambda r: r[2] * r[3])
-                fx, fy, fw, fh = (float(v) for v in f[:4])
-                olhos_y = (float(f[5]) + float(f[7])) / 2
-                return {"cx": (fx + fw / 2) / w, "cy": olhos_y / h, "h": fh / h, "metodo": "yunet"}
-    global _haar
-    if not hasattr(cv2, "CascadeClassifier"):
+            try:
+                det.setInputSize((w, h))
+                _ok, faces = det.detect(bgr)
+                if faces is not None and len(faces):
+                    metodo_usado = "yunet"
+                    for f in faces:
+                        fx, fy, fw, fh = (float(v) for v in f[:4])
+                        score = float(f[14]) if len(f) > 14 else 0.8
+                        if fw < 8 or fh < 8:
+                            continue
+                        olhos_x = (float(f[4]) + float(f[6])) / 2.0 if len(f) >= 8 else (fx + fw / 2.0)
+                        olhos_y = (float(f[5]) + float(f[7])) / 2.0 if len(f) >= 8 else (fy + fh * 0.42)
+                        candidatos.append((score, fx, fy, fw, fh, olhos_x, olhos_y))
+            except Exception:
+                pass
+
+    if not candidatos and hasattr(cv2, "CascadeClassifier"):
+        global _haar
+        if _haar is None:
+            _haar = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        cinza = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        caixas = _haar.detectMultiScale(
+            cinza,
+            1.1,
+            5,
+            minSize=(max(22, min(w, h) // 18), max(22, min(w, h) // 18)),
+        )
+        if len(caixas):
+            metodo_usado = "haar"
+            for r in caixas:
+                fx, fy, fw, fh = (float(v) for v in r)
+                candidatos.append((0.68, fx, fy, fw, fh, fx + fw / 2.0, fy + fh * 0.42))
+
+    if not candidatos:
         return None
-    if _haar is None:
-        _haar = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    cinza = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    caixas = _haar.detectMultiScale(cinza, 1.1, 6, minSize=(30, 30))
-    if len(caixas):
-        fx, fy, fw, fh = (float(v) for v in max(caixas, key=lambda r: r[2] * r[3]))
-        return {"cx": (fx + fw / 2) / w, "cy": (fy + fh * 0.4) / h, "h": fh / h, "metodo": "haar"}
-    return None
+
+    # Filtra detecções muito pequenas espúrias (< 8% da área do maior rosto) e aplica NMS
+    maior_area = max(c[3] * c[4] for c in candidatos)
+    candidatos = [c for c in candidatos if (c[3] * c[4]) >= maior_area * 0.08]
+    candidatos.sort(key=lambda c: c[0] * (c[3] * c[4]), reverse=True)
+
+    aceitos = []
+    for cand in candidatos:
+        _sc, fx, fy, fw, fh, _cx, _cy = cand
+        caixa_c = (fx, fy, fx + fw, fy + fh)
+        if any(_iou_caixa(caixa_c, (a[1], a[2], a[1] + a[3], a[2] + a[4])) > 0.36 for a in aceitos):
+            continue
+        aceitos.append(cand)
+
+    if not aceitos:
+        return None
+
+    # Ordena os rostos da esquerda para a direita
+    aceitos.sort(key=lambda c: c[5])
+
+    lista_rostos = []
+    gx0, gy0, gx1, gy1 = 1.0, 1.0, 0.0, 0.0
+    soma_peso = 0.0
+    soma_cx = 0.0
+    soma_cy = 0.0
+    maior_h_norm = 0.0
+
+    for _sc, fx, fy, fw, fh, cx, cy in aceitos:
+        cx_n = max(0.0, min(1.0, cx / float(w)))
+        cy_n = max(0.0, min(1.0, cy / float(h)))
+        fw_n = min(1.0, fw / float(w))
+        fh_n = min(1.0, fh / float(h))
+        maior_h_norm = max(maior_h_norm, fh_n)
+
+        # Margem de segurança de cada pessoa (protege topo da cabeça/cabelo/beca, ombros laterais e queixo/colo)
+        pad_x = max(0.035, fw_n * 0.42)
+        pad_top = max(0.045, fh_n * 0.52)
+        pad_bot = max(0.055, fh_n * 0.65)
+
+        rx0 = max(0.0, (fx / float(w)) - pad_x)
+        ry0 = max(0.0, (fy / float(h)) - pad_top)
+        rx1 = min(1.0, ((fx + fw) / float(w)) + pad_x)
+        ry1 = min(1.0, ((fy + fh) / float(h)) + pad_bot)
+
+        gx0 = min(gx0, rx0)
+        gy0 = min(gy0, ry0)
+        gx1 = max(gx1, rx1)
+        gy1 = max(gy1, ry1)
+
+        peso = max(0.001, fw_n * fh_n)
+        soma_peso += peso
+        soma_cx += cx_n * peso
+        soma_cy += cy_n * peso
+
+        lista_rostos.append({
+            "cx": round(cx_n, 4),
+            "cy": round(cy_n, 4),
+            "w": round(fw_n, 4),
+            "h": round(fh_n, 4),
+            "x0": round(rx0, 4),
+            "y0": round(ry0, 4),
+            "x1": round(rx1, 4),
+            "y1": round(ry1, 4),
+        })
+
+    # Centro do grupo: quando há 2+ pessoas, prioriza o centro da caixa do grupo para não cortar as pessoas das extremidades
+    centro_caixa_x = (gx0 + gx1) * 0.5
+    centro_caixa_y = (gy0 + gy1) * 0.5
+    if len(lista_rostos) >= 2:
+        cx_final = centro_caixa_x * 0.78 + (soma_cx / soma_peso) * 0.22
+        cy_final = centro_caixa_y * 0.68 + (soma_cy / soma_peso) * 0.32
+    else:
+        cx_final = soma_cx / soma_peso
+        cy_final = soma_cy / soma_peso
+
+    return {
+        "cx": round(max(0.0, min(1.0, cx_final)), 4),
+        "cy": round(max(0.0, min(1.0, cy_final)), 4),
+        "h": round(maior_h_norm, 4),
+        "qtd": len(lista_rostos),
+        "x0": round(gx0, 4),
+        "y0": round(gy0, 4),
+        "x1": round(gx1, 4),
+        "y1": round(gy1, 4),
+        "rostos": lista_rostos,
+        "metodo": metodo_usado or "yunet",
+    }
 
 
 def nitidez(img):
@@ -310,11 +444,34 @@ def _carregar_cache():
     return _cache
 
 
+def _eh_caminho_temporario(caminho_norm):
+    c_low = str(caminho_norm or "").lower()
+    return (
+        "smartalbum_drive_" in c_low
+        or "\\appdata\\local\\temp\\" in c_low
+        or "/tmp/smartalbum_drive_" in c_low
+    )
+
+
 def gravar_cache():
     global _cache_sujo
     with _trava_cache:
         if _cache is not None and _cache_sujo:
             try:
+                fotos_atuais = _cache.get("fotos") or {}
+                fotos_filtradas = {}
+                for k, v in list(fotos_atuais.items()):
+                    cam = k.split("|", 1)[0]
+                    if _eh_caminho_temporario(cam):
+                        continue
+                    if not Path(cam).is_file():
+                        continue
+                    fotos_filtradas[k] = v
+                # Limita a no máximo 600 entradas recentes para não inflar o analise.json no disco
+                if len(fotos_filtradas) > 600:
+                    itens_rec = list(fotos_filtradas.items())[-600:]
+                    fotos_filtradas = dict(itens_rec)
+                _cache["fotos"] = fotos_filtradas
                 gravar_json(ARQUIVO_CACHE, _cache)
                 _cache_sujo = False
             except OSError:

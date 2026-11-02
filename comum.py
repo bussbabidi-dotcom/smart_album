@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """Caminhos, JSON e cópia de arquivos usados por todo o programa."""
 
+import gc
 import json
 import os
 import re
 import shutil
+import stat
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -88,12 +91,19 @@ def ler_json(caminho, padrao=None):
 
 
 def gravar_json(caminho, dados):
-    """Grava num .tmp e troca de uma vez, para nunca deixar o arquivo pela metade."""
+    """Grava num .tmp e troca de uma vez, garantindo remoção do .tmp em caso de falha."""
     caminho = Path(caminho)
     caminho.parent.mkdir(parents=True, exist_ok=True)
     temp = caminho.with_name("%s.%s.tmp" % (caminho.name, threading.get_ident()))
-    temp.write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temp, caminho)
+    try:
+        temp.write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, caminho)
+    finally:
+        try:
+            if temp.exists():
+                temp.unlink()
+        except OSError:
+            pass
 
 
 def substituir_arquivo(origem, destino, tentativas=5, pausa=2.0):
@@ -126,13 +136,148 @@ def substituir_arquivo(origem, destino, tentativas=5, pausa=2.0):
     raise OSError("Não foi possível gravar %s depois de %s tentativas: %s" % (destino, tentativas, ultimo_erro))
 
 
-def apagar_pasta(pasta, tentativas=5, pausa=1.0):
-    for _ in range(tentativas):
-        shutil.rmtree(pasta, ignore_errors=True)
-        if not Path(pasta).exists():
+def _forcar_remocao_readonly(func, path, _exc_info):
+    """Remove atributo somente-leitura no Windows quando shutil.rmtree encontra arquivo bloqueado."""
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        func(path)
+    except OSError:
+        pass
+
+
+def apagar_pasta(pasta, tentativas=6, pausa=0.25):
+    """Apaga uma pasta e todo seu conteúdo liberando descritores de arquivo e travas readonly no Windows."""
+    if not pasta:
+        return True
+    alvo = Path(pasta)
+    if not alvo.exists():
+        return True
+    gc.collect()
+    for tentativa in range(tentativas):
+        try:
+            shutil.rmtree(alvo, onerror=_forcar_remocao_readonly)
+        except Exception:
+            pass
+        if not alvo.exists():
             return True
+        if tentativa == 1:
+            gc.collect()
         time.sleep(pausa)
-    return False
+    return not alvo.exists()
+
+
+def _tamanho_caminho_bytes(caminho):
+    p = Path(caminho)
+    if not p.exists():
+        return 0
+    if p.is_file():
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    try:
+        for arq in p.rglob("*"):
+            if arq.is_file():
+                try:
+                    total += arq.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def limpar_temporarios_disco(pastas_protegidas=(), limpar_autosave=False):
+    """
+    Varre e remove arquivos e pastas temporárias que consomem espaço desnecessário no disco:
+    1. Pastas órfãs no %TEMP% ('SmartAlbum_Drive_*', 'smart_album_ps_*', 'smart_album_acoes_*')
+    2. Pasta antiga de miniaturas em disco (%LOCALAPPDATA%\\smart_album\\miniaturas)
+    3. Pasta temporária do Lightroom (%LOCALAPPDATA%\\smart_album\\lightroom\\temp)
+    4. Arquivos temporários órfãos (*.tmp, *.parcial, *.psd_tmp) em %LOCALAPPDATA%\\smart_album
+    5. Autosaves antigos em %LOCALAPPDATA%\\smart_album\\autosave
+    Retorna (qtd_removidos, bytes_liberados).
+    """
+    protegidas_norm = {normalizar_caminho(p) for p in (pastas_protegidas or ()) if p}
+    qtd_removidos = 0
+    bytes_liberados = 0
+
+    # 1. Limpa pastas temporárias órfãs no diretório %TEMP% do sistema
+    try:
+        dir_temp = Path(tempfile.gettempdir())
+        prefixos_temp = ("SmartAlbum_Drive_", "smart_album_ps_", "smart_album_acoes_")
+        if dir_temp.is_dir():
+            for item in dir_temp.iterdir():
+                nome = item.name
+                if any(nome.startswith(pref) for pref in prefixos_temp):
+                    ch_item = normalizar_caminho(item)
+                    if ch_item in protegidas_norm or any(
+                        p.startswith(ch_item + os.sep) for p in protegidas_norm
+                    ):
+                        continue
+                    tam = _tamanho_caminho_bytes(item)
+                    if apagar_pasta(item, tentativas=4, pausa=0.15):
+                        qtd_removidos += 1
+                        bytes_liberados += tam
+    except Exception:
+        pass
+
+    # 2. Limpa a pasta de dados do Smart Album (%LOCALAPPDATA%\smart_album)
+    try:
+        dados_dir = pasta_dados()
+        # Miniaturas não ficam mais gravadas em disco (ficam apenas em memória RAM durante o uso)
+        pasta_mini = dados_dir / "miniaturas"
+        if pasta_mini.exists():
+            tam = _tamanho_caminho_bytes(pasta_mini)
+            if apagar_pasta(pasta_mini, tentativas=4, pausa=0.15):
+                qtd_removidos += 1
+                bytes_liberados += tam
+
+        # Temporários antigos da ponte com o Lightroom
+        pasta_lr_temp = dados_dir / "lightroom" / "temp"
+        if pasta_lr_temp.is_dir():
+            for sub in pasta_lr_temp.iterdir():
+                tam = _tamanho_caminho_bytes(sub)
+                if apagar_pasta(sub, tentativas=3, pausa=0.1):
+                    qtd_removidos += 1
+                    bytes_liberados += tam
+
+        # Autosaves temporários órfãos (mantém apenas o mais recente se limpar_autosave=False)
+        pasta_auto = dados_dir / "autosave"
+        if pasta_auto.is_dir():
+            arqs_auto = sorted(
+                [a for a in pasta_auto.iterdir() if a.is_file()],
+                key=lambda a: a.stat().st_mtime if a.exists() else 0,
+                reverse=True,
+            )
+            alvos_apagar = arqs_auto if limpar_autosave else arqs_auto[1:]
+            for arq in alvos_apagar:
+                try:
+                    tam = arq.stat().st_size
+                    arq.unlink()
+                    qtd_removidos += 1
+                    bytes_liberados += tam
+                except OSError:
+                    pass
+
+        # Arquivos *.tmp / *.parcial / *.psd_tmp esquecidos na pasta de dados
+        for arq_tmp in dados_dir.rglob("*"):
+            if arq_tmp.is_file() and (
+                arq_tmp.name.endswith(".tmp")
+                or arq_tmp.name.endswith(".parcial")
+                or arq_tmp.name.endswith(".psd_tmp")
+            ):
+                try:
+                    tam = arq_tmp.stat().st_size
+                    arq_tmp.unlink()
+                    qtd_removidos += 1
+                    bytes_liberados += tam
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    return qtd_removidos, bytes_liberados
 
 
 def cor_rgb(valor, padrao=(255, 255, 255)):

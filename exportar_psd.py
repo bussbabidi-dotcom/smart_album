@@ -325,13 +325,20 @@ def gravar_psd_em_camadas(caminho_psd, largura, altura, dpi, camadas, composta_r
     composite_section = composite_header + b"".join(linhas_dados)
 
     temp = caminho_psd.with_name(caminho_psd.stem + ".psd_tmp")
-    with open(temp, "wb") as fp:
-        fp.write(header)
-        fp.write(color_mode_data)
-        fp.write(image_resources)
-        fp.write(layer_and_mask_section)
-        fp.write(composite_section)
-    temp.replace(caminho_psd)
+    try:
+        with open(temp, "wb") as fp:
+            fp.write(header)
+            fp.write(color_mode_data)
+            fp.write(image_resources)
+            fp.write(layer_and_mask_section)
+            fp.write(composite_section)
+        temp.replace(caminho_psd)
+    finally:
+        try:
+            if temp.exists():
+                temp.unlink()
+        except OSError:
+            pass
 
     return caminho_psd
 

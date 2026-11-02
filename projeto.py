@@ -101,6 +101,87 @@ def remover_fotos(projeto, caminhos):
         capa.pop("fundo_imagem", None)
 
 
+def pertence_a_pasta(ch_pasta, chave_pasta_alvo):
+    """Verifica se `ch_pasta` é exatamente `chave_pasta_alvo` ou uma subpasta dentro dela."""
+    if not chave_pasta_alvo:
+        return True
+    p = normalizar_caminho(ch_pasta).rstrip("/\\")
+    alvo = normalizar_caminho(chave_pasta_alvo).rstrip("/\\")
+    if p == alvo:
+        return True
+    return p.startswith(alvo + "/") or p.startswith(alvo + "\\")
+
+
+def remover_pasta_projeto(projeto, chave_pasta, remover_laminas_da_pasta=True):
+    """Remove todas as fotos de uma pasta carregada e opcionalmente remove as lâminas exclusivas dessa pasta."""
+    alvo = normalizar_caminho(chave_pasta)
+    caminhos_pasta = [
+        f["caminho"]
+        for f in projeto.get("fotos", [])
+        if pertence_a_pasta(pasta_da_foto(f), alvo)
+    ]
+    if not caminhos_pasta:
+        return 0, 0
+    remover_fotos(projeto, caminhos_pasta)
+    laminas_removidas = 0
+    if remover_laminas_da_pasta:
+        novas_laminas = []
+        for lam in projeto.get("laminas", []):
+            ch_lam = normalizar_caminho(lam.get("pasta") or "")
+            fotos_restantes = [e for e in lam.get("espacos", []) if e.get("foto")]
+            if (pertence_a_pasta(ch_lam, alvo) and not fotos_restantes) or (not fotos_restantes and lam.get("espacos")):
+                laminas_removidas += 1
+                continue
+            novas_laminas.append(lam)
+        projeto["laminas"] = novas_laminas
+    return len(caminhos_pasta), laminas_removidas
+
+
+def pasta_da_lamina(projeto, lamina):
+    """
+    Identifica a pasta principal e a lista de pastas presentes nos espaços de uma lâmina.
+    Devolve (chave_pasta, nome_pasta, lista_pastas_distintas).
+    """
+    if not isinstance(lamina, dict):
+        return "", "", []
+    mapa_fotos = {
+        normalizar_caminho(f["caminho"]): f
+        for f in projeto.get("fotos", [])
+        if f.get("caminho")
+    }
+    pastas_vistas = []
+    nomes_pastas = {}
+    for esp in lamina.get("espacos", []):
+        cam = esp.get("foto")
+        if not cam:
+            continue
+        reg = mapa_fotos.get(normalizar_caminho(cam))
+        p_raw = pasta_da_foto(reg if reg else cam)
+        ch_p = normalizar_caminho(p_raw)
+        if ch_p not in nomes_pastas:
+            nomes_pastas[ch_p] = nome_pasta_da_foto(reg if reg else cam)
+            pastas_vistas.append(ch_p)
+    if pastas_vistas:
+        ch0 = pastas_vistas[0]
+        return ch0, nomes_pastas[ch0], pastas_vistas
+    if lamina.get("pasta"):
+        ch_l = normalizar_caminho(lamina["pasta"])
+        nm_l = lamina.get("nome_pasta") or Path(lamina["pasta"]).name or "Pasta"
+        return ch_l, nm_l, [ch_l]
+    return "", "", []
+
+
+def laminas_com_pastas_misturadas(projeto):
+    """Retorna os índices das lâminas que misturam fotos de 2 ou mais pastas carregadas diferentes."""
+    misturadas = []
+    for idx, lam in enumerate(projeto.get("laminas", [])):
+        _ch, _nm, distintas = pasta_da_lamina(projeto, lam)
+        if len(distintas) > 1:
+            misturadas.append(idx)
+    return misturadas
+
+
+
 def todos_espacos(projeto):
     for lamina in projeto.get("laminas", []):
         for espaco in lamina.get("espacos", []):
@@ -179,7 +260,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
         if not dados or ja_usadas.get(chave):
             continue
         ch_pasta = normalizar_caminho(pasta_da_foto(foto))
-        if chave_pasta_alvo and ch_pasta != chave_pasta_alvo:
+        if chave_pasta_alvo and not pertence_a_pasta(ch_pasta, chave_pasta_alvo):
             continue
         saida.append({
             "caminho": foto["caminho"],

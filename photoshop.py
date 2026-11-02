@@ -23,7 +23,7 @@ try:
 except ImportError:
     winreg = None
 
-from comum import EXTENSOES as EXTENSOES_IMAGEM, normalizar_caminho
+from comum import EXTENSOES as EXTENSOES_IMAGEM, apagar_pasta, normalizar_caminho
 
 
 FORMATOS_SAIDA = ("jpg", "tif", "psd", "mesmo")
@@ -319,7 +319,7 @@ JSON.stringify = function (v) {
 
 
 def rodar_jsx(corpo, job):
-    """Grava um .jsx temporário com `JOB = ...` no topo e manda o Photoshop executar."""
+    """Grava um .jsx temporário com `JOB = ...` no topo, executa no Photoshop e apaga o temporário."""
     app = conectar()
     pasta = Path(tempfile.mkdtemp(prefix="smart_album_ps_"))
     try:
@@ -335,7 +335,7 @@ def rodar_jsx(corpo, job):
     except Exception as e:
         raise ErroPhotoshop("O Photoshop devolveu um erro ao rodar o script:\n%s" % e) from e
     finally:
-        shutil.rmtree(pasta, ignore_errors=True)
+        apagar_pasta(pasta, tentativas=5, pausa=0.15)
 
 
 def aplicar_acao_em_arquivo(caminho_arquivo, conjunto, acao):
@@ -363,7 +363,7 @@ def listar_acoes():
             raise ErroPhotoshop("O Photoshop não devolveu a lista de ações.")
         return json.loads(saida.read_text(encoding="utf-8-sig"))
     finally:
-        shutil.rmtree(pasta, ignore_errors=True)
+        apagar_pasta(pasta, tentativas=5, pausa=0.15)
 
 
 def destino_tratada(caminho, formato, pasta_saida=None, sufixo="_tratada"):

@@ -46,6 +46,7 @@ def configuracao(produto, projeto_cfg=None):
         "reconhecer_cenarios": True,
         "limiar_cenario": 0.28,
         "reconhecer_rostos": True,
+        "nao_cortar_pessoas": True,
         "permitir_transpasse": True,
         "permitir_meio_termo": True,
         "permitir_sangria_total": True,
@@ -557,9 +558,125 @@ def _layouts_sem_corte(proporcoes, area, espaco, priorizar=False):
     return saida
 
 
+def _caixa_grupo_rosto(foto):
+    """
+    Devolve (qtd, gx0, gy0, gx1, gy1, lista_rostos) normalizados (0..1) para a foto,
+    considerando todos os rostos detectados e a margem de segurança de cada pessoa.
+    """
+    rosto = foto.get("rosto") if isinstance(foto, dict) else None
+    if not rosto or not isinstance(rosto, dict):
+        return 0, 0.0, 0.0, 1.0, 1.0, []
+    rx = float(rosto.get("cx", 0.5))
+    ry = float(rosto.get("cy", 0.45))
+    rh = float(rosto.get("h", 0.14))
+    gx0 = max(0.0, min(1.0, float(rosto.get("x0", max(0.0, rx - max(0.08, rh * 0.65))))))
+    gy0 = max(0.0, min(1.0, float(rosto.get("y0", max(0.0, ry - max(0.10, rh * 0.75))))))
+    gx1 = max(gx0 + 0.02, min(1.0, float(rosto.get("x1", min(1.0, rx + max(0.08, rh * 0.65))))))
+    gy1 = max(gy0 + 0.02, min(1.0, float(rosto.get("y1", min(1.0, ry + max(0.12, rh * 0.95))))))
+    lista = rosto.get("rostos") or [{"cx": rx, "cy": ry, "x0": gx0, "y0": gy0, "x1": gx1, "y1": gy1}]
+    qtd = max(1, int(rosto.get("qtd") or len(lista) or 1))
+    return qtd, gx0, gy0, gx1, gy1, lista
+
+
+def _risco_cortar_pessoas(foto, quadro):
+    """
+    Verifica se a proporção do quadro `quadro = (qx, qy, qw, qh)` cortaria alguma
+    pessoa detectada na foto (horizontalmente ou verticalmente).
+    Devolve (excesso_x, excesso_y, penalidade).
+    """
+    qtd, gx0, gy0, gx1, gy1, _lista = _caixa_grupo_rosto(foto)
+    if qtd <= 0:
+        return 0.0, 0.0, 0.0
+    _qx, _qy, qw, qh = quadro
+    if qw <= 1e-4 or qh <= 1e-4:
+        return 0.0, 0.0, 0.0
+    prop_foto = max(0.1, float(foto.get("proporcao") or 1.5))
+    aspecto_q = qw / float(qh)
+
+    # Se o quadro for mais estreito que a foto, a fração horizontal visível da foto é (aspecto_q / prop_foto)
+    frac_vis_x = min(1.0, aspecto_q / prop_foto)
+    # Se o quadro for mais baixo/largo que a foto, a fração vertical visível da foto é (prop_foto / aspecto_q)
+    frac_vis_y = min(1.0, prop_foto / aspecto_q)
+
+    span_x = gx1 - gx0
+    span_y = gy1 - gy0
+
+    excesso_x = max(0.0, span_x - frac_vis_x)
+    excesso_y = max(0.0, span_y - frac_vis_y)
+    if excesso_x <= 0.002 and excesso_y <= 0.002:
+        return 0.0, 0.0, 0.0
+
+    fator_grupo = 1.0 + min(2.5, (qtd - 1) * 0.45)
+    penalidade = (excesso_x * 28.0 + excesso_y * 32.0) * fator_grupo
+    return excesso_x, excesso_y, penalidade
+
+
+def caixa_segura_pessoas(foto, area):
+    """
+    Ajusta a caixa `area = (x0, y0, W, H)` para o menor recorte possível que
+    garanta que 100% de todas as pessoas detectadas em `foto` fiquem visíveis
+    dentro do quadro sem cortar ninguém.
+    """
+    x0, y0, W, H = area
+    if W <= 0 or H <= 0:
+        return area
+    qtd, gx0, gy0, gx1, gy1, _lista = _caixa_grupo_rosto(foto)
+    if qtd <= 0:
+        return area
+    p = max(0.1, float(foto.get("proporcao") or 1.5))
+    aspecto_a = W / float(H)
+    span_x = min(1.0, max(0.15, (gx1 - gx0) * 1.03))
+    span_y = min(1.0, max(0.15, (gy1 - gy0) * 1.03))
+
+    # Proporção mínima permitida para não cortar pessoas na horizontal: p * span_x
+    aspecto_min = p * span_x
+    # Proporção máxima permitida para não cortar cabeças/pessoas na vertical: p / span_y
+    aspecto_max = p / span_y
+
+    if aspecto_a < aspecto_min - 1e-4:
+        # Quadro estreito demais para o grupo de pessoas -> ajusta altura para respeitar aspecto_min
+        h_novo = min(float(H), float(W) / max(0.1, aspecto_min))
+        return (x0, y0 + (H - h_novo) / 2.0, float(W), h_novo)
+    if aspecto_a > aspecto_max + 1e-4:
+        # Quadro baixo/largo demais para a altura das pessoas -> ajusta largura para respeitar aspecto_max
+        w_novo = min(float(W), float(H) * aspecto_max)
+        return (x0 + (W - w_novo) / 2.0, y0, w_novo, float(H))
+    return area
+
+
+def _proteger_espacos_contra_corte_pessoas(espacos, fotos, produto, cfg):
+    """
+    Percorre os espaços gerados em uma opção de layout e, quando `reconhecer_rostos` e
+    `nao_cortar_pessoas` estão ativos, garante que nenhum espaço corte uma pessoa
+    (ajustando o quadro daquela foto para `caixa_segura_pessoas` e devolvendo a penalidade residual).
+    """
+    if not cfg or not cfg.get("reconhecer_rostos", True) or not cfg.get("nao_cortar_pessoas", True):
+        return espacos, 0.0
+    lw, lh = lamina_mm(produto)
+    mapa_fotos = {f.get("caminho"): f for f in (fotos or []) if isinstance(f, dict) and f.get("caminho")}
+    novos = []
+    penalidade_total = 0.0
+    for e in espacos:
+        f_info = mapa_fotos.get(e.get("foto"))
+        if not f_info or not f_info.get("rosto"):
+            novos.append(e)
+            continue
+        quadro_mm = (e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh)
+        exc_x, exc_y, pen = _risco_cortar_pessoas(f_info, quadro_mm)
+        if exc_x > 0.004 or exc_y > 0.004:
+            quadro_seguro = caixa_segura_pessoas(f_info, quadro_mm)
+            e_seg = _espaco(produto, quadro_seguro, e.get("foto"), e.get("edicao"))
+            novos.append(e_seg)
+            # Pequena penalidade para que o motor prefira nativamente um layout que já encaixe todas as pessoas sem precisar encolher o quadro
+            penalidade_total += min(1.8, pen * 0.18)
+        else:
+            novos.append(e)
+    return novos, penalidade_total
+
+
 def _custo_rosto_na_dobra(foto, quadro, lw):
     """
-    Calcula o risco/custo de o rosto principal da foto cair sobre a linha de
+    Calcula o risco/custo de QUALQUER rosto detectado na foto cair sobre a linha de
     dobra central da lâmina (meio = lw / 2.0) e devolve (penalidade, dobra_x).
     """
     qx, _qy, qw, qh = quadro
@@ -567,18 +684,18 @@ def _custo_rosto_na_dobra(foto, quadro, lw):
     if qw <= 1e-4 or not (qx < meio - 1.5 and qx + qw > meio + 1.5):
         return 0.0, None
     dobra_x = (meio - qx) / float(qw)
-    rosto = foto.get("rosto")
-    if not rosto or not isinstance(rosto, dict):
+    qtd, gx0, _gy0, gx1, _gy1, lista_rostos = _caixa_grupo_rosto(foto)
+    if qtd <= 0:
         return 0.0, round(dobra_x, 4)
-    rx = float(rosto.get("cx", 0.5))
     prop_foto = max(0.1, float(foto.get("proporcao") or 1.5))
     aspecto_q = qw / max(1e-4, float(qh))
-    # Folga horizontal disponível para deslocar o enquadramento longe da dobra
-    folga_h = max(0.0, 1.0 - (aspecto_q / prop_foto)) if prop_foto > aspecto_q else 0.0
-    dist_dobra = abs(rx - dobra_x)
-    dist_efetiva = dist_dobra + folga_h * 0.45
+    # Folga horizontal disponível sem cortar nenhuma pessoa das pontas (gx0..gx1)
+    frac_vis_x = min(1.0, aspecto_q / prop_foto) if prop_foto > aspecto_q else 1.0
+    folga_h = max(0.0, frac_vis_x - (gx1 - gx0)) if prop_foto > aspecto_q else 0.0
+    menor_dist = min(abs(float(r.get("cx", 0.5)) - dobra_x) for r in lista_rostos)
+    dist_efetiva = menor_dist + folga_h * 0.40
     if dist_efetiva < 0.14:
-        return (0.14 - dist_efetiva) * 14.0, round(dobra_x, 4)
+        return (0.14 - dist_efetiva) * (15.0 + min(10.0, (qtd - 1) * 3.5)), round(dobra_x, 4)
     return 0.0, round(dobra_x, 4)
 
 
@@ -1192,6 +1309,14 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             if sem_corte:
                 opcoes[-1]["tipo_layout"] = "sem_corte"
 
+    # Aplica a proteção inteligente de múltiplos rostos / pessoas para nunca cortar ninguém
+    if cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True):
+        for op in opcoes:
+            if not op.get("sobreposicoes"):
+                esp_seguros, pen_pessoas = _proteger_espacos_contra_corte_pessoas(op["espacos"], fotos, produto, cfg)
+                op["espacos"] = esp_seguros
+                op["custo"] = float(op.get("custo", 0.0)) + pen_pessoas
+
     opcoes.sort(key=lambda o: o["custo"])
     unicas = []
     tipos_especiais = (
@@ -1565,6 +1690,14 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_f
             "pagina": pagina,
         })
 
+    # Aplica a proteção inteligente de múltiplos rostos na página única
+    if cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True):
+        for op in opcoes_brutas:
+            esp_seg, pen_p = _proteger_espacos_contra_corte_pessoas(op["espacos"], lista_fotos, produto, cfg)
+            op["espacos"] = esp_seg
+            op["custo"] = float(op.get("custo", 0.0)) + pen_p
+        opcoes_brutas.sort(key=lambda o: o["custo"])
+
     # Deduplicação geométrica preservando pelo menos cada estilo
     unicas = []
     for op in opcoes_brutas:
@@ -1857,6 +1990,8 @@ def previa_diagramacao(fotos, produto, cfg):
             "total_fotos": 0,
             "pastas": 0,
             "cenarios": 0,
+            "total_rostos": 0,
+            "fotos_com_rostos": 0,
             "laminas_com_fotos": 0,
             "laminas_extras_vazias": 0,
             "laminas_estimadas": 0,
@@ -1872,10 +2007,20 @@ def previa_diagramacao(fotos, produto, cfg):
     extras_vazias = max(0, laminas_totais - laminas_com_fotos)
     usadas = sum(len(g) for g in grupos)
     media = usadas / float(max(1, laminas_com_fotos)) if laminas_com_fotos else 0.0
+    total_rostos = 0
+    fotos_com_rostos = 0
+    for f in fotos_lista:
+        rosto = f.get("rosto") if isinstance(f, dict) else None
+        if isinstance(rosto, dict):
+            q = max(1, int(rosto.get("qtd") or 1))
+            total_rostos += q
+            fotos_com_rostos += 1
     return {
         "total_fotos": len(fotos_lista),
         "pastas": qtd_pastas,
         "cenarios": qtd_cenarios,
+        "total_rostos": total_rostos,
+        "fotos_com_rostos": fotos_com_rostos,
         "laminas_com_fotos": laminas_com_fotos,
         "laminas_extras_vazias": extras_vazias,
         "laminas_estimadas": laminas_totais,
