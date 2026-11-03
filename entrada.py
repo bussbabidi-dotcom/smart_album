@@ -167,7 +167,9 @@ def registrar_drop_nativo_windows(root, ao_soltar):
     # Tenta windnd se estiver instalado, senão usa hook ctypes nativo 32/64 bits
     try:
         import ctypes
-        from ctypes import wintypes
+
+        class _POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
         shell32 = ctypes.windll.shell32
         user32 = ctypes.windll.user32
@@ -194,10 +196,10 @@ def registrar_drop_nativo_windows(root, ao_soltar):
         call_window_proc.argtypes = [ctypes.c_void_p, HWND, UINT, WPARAM, LPARAM]
         call_window_proc.restype = LRESULT
 
-        shell32.DragAcceptFiles.argtypes = [HWND, wintypes.BOOL]
+        shell32.DragAcceptFiles.argtypes = [HWND, ctypes.c_int]
         shell32.DragAcceptFiles.restype = None
 
-        shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, UINT, wintypes.LPWSTR, UINT]
+        shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, UINT, ctypes.c_wchar_p, UINT]
         shell32.DragQueryFileW.restype = UINT
 
         shell32.DragFinish.argtypes = [ctypes.c_void_p]
@@ -232,7 +234,7 @@ def registrar_drop_nativo_windows(root, ao_soltar):
                                 shell32.DragQueryFileW(hdrop, i, buf, tam + 2)
                                 if buf.value:
                                     caminhos.append(buf.value)
-                            pt = wintypes.POINT()
+                            pt = _POINT()
                             try:
                                 user32.GetCursorPos(ctypes.byref(pt))
                                 x_root, y_root = int(pt.x), int(pt.y)

@@ -113,9 +113,11 @@ def gerar_script_bootstrap_embutido() -> str:
 
     script = f'''# -*- coding: utf-8 -*-
 import base64
+import ctypes
 import json
 import os
 import sys
+import traceback
 import types
 import zlib
 from pathlib import Path
@@ -139,7 +141,59 @@ for _p in reversed(_pastas_busca):
     if _ps not in sys.path:
         sys.path.insert(0, _ps)
 
-# Garante produtos/*.json ao lado do executavel
+# 1. Garante PIL.ImageGrab no pacote PyInstaller (usando PIL.Image.core.grabscreen_win32 nativo)
+try:
+    import PIL
+    from PIL import Image as _PIL_Image
+    try:
+        from PIL import ImageGrab as _ig_mod
+    except Exception:
+        _ig_mod = types.ModuleType("PIL.ImageGrab")
+        def _grab_screen(bbox=None, include_layered_windows=False, all_screens=False, xdisplay=None):
+            fn = getattr(getattr(_PIL_Image, "core", None), "grabscreen_win32", None)
+            if fn is not None:
+                offset, size, raw_data = fn(bool(include_layered_windows), bool(all_screens))
+                stride = (size[0] * 3 + 3) & -4
+                im = _PIL_Image.frombytes("RGB", size, raw_data, "raw", "BGR", stride, -1)
+                if bbox is not None:
+                    x0, y0 = offset
+                    im = im.crop((bbox[0] - x0, bbox[1] - y0, bbox[2] - x0, bbox[3] - y0))
+                return im
+            return _PIL_Image.new("RGB", (1920, 1080), (30, 30, 30))
+        _ig_mod.grab = _grab_screen
+        sys.modules["PIL.ImageGrab"] = _ig_mod
+        setattr(PIL, "ImageGrab", _ig_mod)
+except Exception:
+    pass
+
+# 2. Garante ctypes.wintypes no pacote PyInstaller caso nao esteja no PYZ
+try:
+    from ctypes import wintypes as _wt_mod
+except Exception:
+    try:
+        _wt_mod = types.ModuleType("ctypes.wintypes")
+        _wt_mod.BOOL = ctypes.c_int
+        _wt_mod.DWORD = ctypes.c_ulong
+        _wt_mod.HANDLE = ctypes.c_void_p
+        _wt_mod.HWND = ctypes.c_void_p
+        _wt_mod.LONG = ctypes.c_long
+        _wt_mod.LPCWSTR = ctypes.c_wchar_p
+        _wt_mod.LPWSTR = ctypes.c_wchar_p
+        _wt_mod.UINT = ctypes.c_uint
+        _wt_mod.WPARAM = ctypes.c_size_t
+        _wt_mod.LPARAM = ctypes.c_ssize_t
+        class _POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        class _RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        _wt_mod.POINT = _POINT
+        _wt_mod.RECT = _RECT
+        sys.modules["ctypes.wintypes"] = _wt_mod
+        setattr(ctypes, "wintypes", _wt_mod)
+    except Exception:
+        pass
+
+# 3. Garante produtos/*.json ao lado do executavel e sincroniza .py/.pyw na raiz se existir
 try:
     _dir_prod = _exe_dir / "produtos"
     _dir_prod.mkdir(parents=True, exist_ok=True)
@@ -150,32 +204,57 @@ try:
 except Exception:
     pass
 
-# Carrega todos os modulos atualizados em sys.modules (sobrepondo versoes antigas do PYZ.pyz)
-for _mod_nome in _ORDEM:
-    _nome_arq = _mod_nome + ".py"
-    _codigo = _ARQUIVOS_PY[_nome_arq]
-    _caminho_arq = _exe_dir / _nome_arq
-    for _cand in _pastas_busca:
-        _arq_disco = _cand / _nome_arq
-        if _arq_disco.is_file():
-            _caminho_arq = _arq_disco
+try:
+    for _cand_sync in _pastas_busca:
+        if (_cand_sync / "app.pyw").is_file() and (_cand_sync / "tema.py").is_file():
+            for _nome_s, _cod_s in _ARQUIVOS_PY.items():
+                _dest_s = _cand_sync / _nome_s
+                try:
+                    if not _dest_s.is_file() or _dest_s.read_text(encoding="utf-8") != _cod_s:
+                        _dest_s.write_text(_cod_s, encoding="utf-8")
+                except Exception:
+                    pass
             break
-    _mod = types.ModuleType(_mod_nome)
-    _mod.__file__ = str(_caminho_arq)
-    _mod.__package__ = ""
-    sys.modules[_mod_nome] = _mod
-    exec(compile(_codigo, str(_caminho_arq), "exec"), _mod.__dict__)
+except Exception:
+    pass
 
-_codigo_app = _ARQUIVOS_PY["app.pyw"]
-_caminho_app = _exe_dir / "app.pyw"
-for _cand in _pastas_busca:
-    if (_cand / "app.pyw").is_file():
-        _caminho_app = _cand / "app.pyw"
-        break
+try:
+    # 4. Carrega todos os modulos atualizados em sys.modules (sobrepondo versoes antigas do PYZ.pyz)
+    for _mod_nome in _ORDEM:
+        _nome_arq = _mod_nome + ".py"
+        _codigo = _ARQUIVOS_PY[_nome_arq]
+        _caminho_arq = _exe_dir / _nome_arq
+        for _cand in _pastas_busca:
+            _arq_disco = _cand / _nome_arq
+            if _arq_disco.is_file():
+                _caminho_arq = _arq_disco
+                break
+        _mod = types.ModuleType(_mod_nome)
+        _mod.__file__ = str(_caminho_arq)
+        _mod.__package__ = ""
+        sys.modules[_mod_nome] = _mod
+        exec(compile(_codigo, str(_caminho_arq), "exec"), _mod.__dict__)
 
-__file__ = str(_caminho_app)
-__name__ = "__main__"
-exec(compile(_codigo_app, str(_caminho_app), "exec"), globals())
+    _codigo_app = _ARQUIVOS_PY["app.pyw"]
+    _caminho_app = _exe_dir / "app.pyw"
+    for _cand in _pastas_busca:
+        if (_cand / "app.pyw").is_file():
+            _caminho_app = _cand / "app.pyw"
+            break
+
+    __file__ = str(_caminho_app)
+    __name__ = "__main__"
+    exec(compile(_codigo_app, str(_caminho_app), "exec"), globals())
+except Exception:
+    _tb_txt = traceback.format_exc()
+    try:
+        (_exe_dir / "erro_inicializacao.log").write_text(_tb_txt, encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.MessageBoxW(0, _tb_txt, "Smart Album - Erro ao Iniciar", 0x10)
+    except Exception:
+        pass
 '''
     # Garante que o script de bootstrap é 100% ASCII
     script.encode("ascii")

@@ -7,7 +7,12 @@ import sys
 import tkinter as tk
 from tkinter import colorchooser, ttk
 
-from PIL import Image, ImageDraw, ImageGrab, ImageTk
+from PIL import Image, ImageDraw, ImageTk
+
+try:
+    from PIL import ImageGrab
+except Exception:
+    ImageGrab = None
 
 FUNDO = "#181818"
 PAINEL = "#252526"
@@ -443,6 +448,27 @@ def _rgb_para_hex(r, g, b):
     )
 
 
+def _capturar_tela_rgb(largura, altura):
+    """Captura a tela inteira em RGB usando PIL.ImageGrab ou diretamente PIL.Image.core.grabscreen_win32."""
+    if ImageGrab is not None:
+        try:
+            return ImageGrab.grab(all_screens=True).convert("RGB")
+        except Exception:
+            try:
+                return ImageGrab.grab().convert("RGB")
+            except Exception:
+                pass
+    try:
+        fn_grab = getattr(getattr(Image, "core", None), "grabscreen_win32", None)
+        if fn_grab is not None:
+            _offset, size, raw_data = fn_grab(False, True)
+            stride = (size[0] * 3 + 3) & -4
+            return Image.frombytes("RGB", size, raw_data, "raw", "BGR", stride, -1)
+    except Exception:
+        pass
+    return Image.new("RGB", (max(800, int(largura)), max(600, int(altura))), (30, 30, 30))
+
+
 class ContaGotasTela(tk.Toplevel):
     """
     Conta-gotas em tela cheia estilo Photoshop: captura a tela atual e exibe uma lupa
@@ -456,13 +482,7 @@ class ContaGotasTela(tk.Toplevel):
         self.withdraw()
         self.update_idletasks()
 
-        try:
-            self._captura = ImageGrab.grab(all_screens=True).convert("RGB")
-        except Exception:
-            try:
-                self._captura = ImageGrab.grab().convert("RGB")
-            except Exception:
-                self._captura = Image.new("RGB", (max(800, pai.winfo_screenwidth()), max(600, pai.winfo_screenheight())), (30, 30, 30))
+        self._captura = _capturar_tela_rgb(pai.winfo_screenwidth(), pai.winfo_screenheight())
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
