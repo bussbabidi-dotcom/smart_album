@@ -224,6 +224,37 @@ def criar_corpo_rolavel(pai, padding=12, bg=PAINEL):
     return interno, container, canvas
 
 
+def area_util_tela(janela):
+    """Retorna (work_x, work_y, work_w, work_h) descontando a barra de tarefas do sistema operacional."""
+    try:
+        janela.update_idletasks()
+        sw = max(800, int(janela.winfo_screenwidth()))
+        sh = max(600, int(janela.winfo_screenheight()))
+    except Exception:
+        sw, sh = 1440, 900
+
+    if sys.platform == "win32":
+        try:
+            class _RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+            rect = _RECT()
+            # SPI_GETWORKAREA = 0x0030 (48)
+            if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
+                ww = int(rect.right - rect.left)
+                wh = int(rect.bottom - rect.top)
+                if ww >= 640 and wh >= 400:
+                    return int(rect.left), int(rect.top), ww, wh
+        except Exception:
+            pass
+
+    return 0, 0, sw, max(480, sh - 52)
+
+
 def configurar_janela_secundaria(
     janela,
     pai=None,
@@ -236,11 +267,11 @@ def configurar_janela_secundaria(
 ):
     """
     Habilita redimensionamento completo (horizontal e vertical) em qualquer janela secundária,
-    adiciona alça de redimensionamento (Sizegrip) no canto inferior direito, respeita os limites
-    da tela e memoriza o tamanho personalizado escolhido pelo usuário.
+    adiciona alça de redimensionamento (Sizegrip) no canto inferior direito, respeita a área útil
+    real do monitor (descontando barra de tarefas e título em 1440x900, 1366x768, 1080p, etc.)
+    e memoriza o tamanho personalizado escolhido pelo usuário.
     """
     janela.resizable(True, True)
-    janela.minsize(int(min_largura), int(min_altura))
 
     # Localiza o dicionário de arranjo na aplicação principal, se existir
     dono_arranjo = None
@@ -257,23 +288,37 @@ def configurar_janela_secundaria(
     except tk.TclError:
         grip = None
 
-    janela.update_idletasks()
-    sw = max(800, janela.winfo_screenwidth())
-    sh = max(600, janela.winfo_screenheight())
-    max_w = max(int(min_largura), sw - 36)
-    max_h = max(int(min_altura), sh - 68)
+    wx, wy, work_w, work_h = area_util_tela(janela)
+    # Desconta decoração da janela (barra de título do Windows ~34px + bordas)
+    max_w = max(360, work_w - 20)
+    max_h = max(240, work_h - 42)
 
-    w_req = max(int(min_largura), int(largura or janela.winfo_reqwidth() or min_largura))
-    h_req = max(int(min_altura), int(altura or janela.winfo_reqheight() or min_altura))
+    # Escala proporcional automática quando o monitor tem altura/largura reduzida (ex: 1440x900, 1366x768)
+    escala_w = min(1.0, max(0.72, work_w / 1600.0)) if work_w < 1560 else 1.0
+    escala_h = min(1.0, max(0.70, work_h / 960.0)) if work_h < 920 else 1.0
 
-    # Restaura tamanho salvo pelo usuário se disponível
+    min_l = max(320, min(int(round(min_largura * min(1.0, escala_w + 0.08))), max_w))
+    min_a = max(220, min(int(round(min_altura * min(1.0, escala_h + 0.08))), max_h))
+    janela.minsize(int(min_l), int(min_a))
+
+    larg_base = int(largura or janela.winfo_reqwidth() or min_l)
+    alt_base = int(altura or janela.winfo_reqheight() or min_a)
+    if larg_base > int(max_w * 0.80):
+        larg_base = int(round(larg_base * escala_w))
+    if alt_base > int(max_h * 0.80):
+        alt_base = int(round(alt_base * escala_h))
+
+    w_req = max(min_l, larg_base)
+    h_req = max(min_a, alt_base)
+
+    # Restaura tamanho salvo pelo usuário se disponível (sempre limitado à área útil do monitor atual)
     if dono_arranjo is not None and chave:
         mapa_janelas = dono_arranjo.get("janelas_secundarias")
         if isinstance(mapa_janelas, dict) and isinstance(mapa_janelas.get(chave), dict):
             salvo = mapa_janelas[chave]
             if isinstance(salvo.get("w"), int) and isinstance(salvo.get("h"), int):
-                w_req = max(int(min_largura), salvo["w"])
-                h_req = max(int(min_altura), salvo["h"])
+                w_req = max(min_l, salvo["w"])
+                h_req = max(min_a, salvo["h"])
 
     w_final = min(max_w, w_req)
     h_final = min(max_h, h_req)
@@ -288,14 +333,14 @@ def configurar_janela_secundaria(
             px = rx + (rw - w_final) // 2
             py = ry + (rh - h_final) // 2
         except tk.TclError:
-            px = (sw - w_final) // 2
-            py = (sh - h_final) // 2
+            px = wx + (work_w - w_final) // 2
+            py = wy + (work_h - h_final) // 2
     else:
-        px = (sw - w_final) // 2
-        py = (sh - h_final) // 2
+        px = wx + (work_w - w_final) // 2
+        py = wy + (work_h - h_final) // 2
 
-    px = max(12, min(px, sw - w_final - 12))
-    py = max(18, min(py, sh - h_final - 42))
+    px = max(wx + 8, min(px, max(wx + 8, wx + work_w - w_final - 10)))
+    py = max(wy + 8, min(py, max(wy + 8, wy + work_h - h_final - 36)))
     janela.geometry("%dx%d+%d+%d" % (w_final, h_final, px, py))
 
     def _ao_configurar(evento):
@@ -306,7 +351,7 @@ def configurar_janela_secundaria(
                 grip.lift()
             except tk.TclError:
                 pass
-        if dono_arranjo is not None and chave and evento.width >= min_largura and evento.height >= min_altura:
+        if dono_arranjo is not None and chave and evento.width >= min_l and evento.height >= min_a:
             mapa = dono_arranjo.setdefault("janelas_secundarias", {})
             if isinstance(mapa, dict):
                 mapa[chave] = {"w": int(evento.width), "h": int(evento.height)}
@@ -533,7 +578,7 @@ class DialogoCorPhotoshop(tk.Toplevel):
     - Campos HSB, RGB e Hex (#RRGGBB) sincronizados em tempo real
     """
 
-    LADO_SV = 210
+    LADO_SV = 190
     LARG_H = 22
 
     def __init__(self, pai, cor_inicial="#c08a4a", titulo="Seletor de Cores (Photoshop)", ao_mudar=None):
@@ -572,10 +617,10 @@ class DialogoCorPhotoshop(tk.Toplevel):
             self,
             pai=pai,
             chave="seletor_cor_photoshop",
-            largura=540,
-            altura=410,
-            min_largura=490,
-            min_altura=370,
+            largura=520,
+            altura=385,
+            min_largura=450,
+            min_altura=330,
         )
         self.grab_set()
         self.focus_set()

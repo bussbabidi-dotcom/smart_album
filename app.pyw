@@ -113,24 +113,24 @@ DEFINICOES_ATALHOS = (
     ("abrir_tratamento", "Photoshop / Lightroom", "T"),
     ("abrir_capa", "Programa de capas", "K"),
 )
-VERSAO_ARRANJO = 3
+VERSAO_ARRANJO = 4
 ARRANJO_PADRAO = {
     "versao": VERSAO_ARRANJO,
-    "geometria": "1520x940+40+30",
+    "geometria": "1280x760+30+20",
     "maximizada": True,
     "mostrar_timeline": True,
     "mostrar_fotos": True,
     "mostrar_lateral": True,
     "timeline": "baixo",
     "lateral": "direita",
-    "largura_timeline": 430,
-    "altura_timeline": 136,
-    "altura_fotos": 142,
-    "largura_lateral": 330,
+    "largura_timeline": 360,
+    "altura_timeline": 114,
+    "altura_fotos": 118,
+    "largura_lateral": 310,
 }
 LADOS_TIMELINE = ("esquerda", "direita", "cima", "baixo")
-CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline")
-MINIMOS = {"timeline": 86, "timeline_vertical": 120, "fotos": 96, "lateral": 280, "centro": 320, "meio": 260}
+CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline", "altura_fotos", "largura_lateral")
+MINIMOS = {"timeline": 76, "timeline_vertical": 110, "fotos": 84, "lateral": 265, "centro": 280, "meio": 220}
 ALCA = 4
 RAIO_ALCA = 7
 IMA_PX = 5
@@ -162,15 +162,16 @@ def ler_arranjo():
 
 
 def geometria_valida(texto, root):
-    """A geometria guardada, se ainda couber na tela (outro monitor pode ter saído)."""
+    """A geometria guardada, se ainda couber na área útil real da tela (ex: 1440x900, 1366x768)."""
     achado = re.match(r"^(\d+)x(\d+)\+?(-?\d+)\+?(-?\d+)$", str(texto or ""))
     if not achado:
         return None
     w, h, x, y = (int(v) for v in achado.groups())
-    largura, altura = root.winfo_screenwidth(), root.winfo_screenheight()
-    w, h = min(w, largura), min(h, altura)
-    if not (-50 <= x <= largura - 200 and 0 <= y <= altura - 100):
-        x, y = 40, 30
+    wx, wy, largura, altura = tema.area_util_tela(root)
+    w = max(900, min(w, largura - 16))
+    h = max(540, min(h, altura - 36))
+    if not (wx - 20 <= x <= wx + largura - 200 and wy <= y <= wy + altura - 100):
+        x, y = wx + 20, wy + 16
     return "%dx%d+%d+%d" % (w, h, x, y)
 
 
@@ -252,7 +253,7 @@ class Aplicativo:
         self.root = root
         tema.configurar(root)
         root.title("Álbum")
-        root.minsize(1000, 640)
+        root.minsize(900, 540)
         self.arranjo = ler_arranjo()
         root.geometry(geometria_valida(self.arranjo.get("geometria"), root) or ARRANJO_PADRAO["geometria"])
         if self.arranjo.get("maximizada", True):
@@ -277,6 +278,21 @@ class Aplicativo:
         self.espaco_sel = None
         self.espacos_sel = set()
         self._ancora_espaco = None
+        self._seq_aba_album = 1
+        self.abas_albuns = [
+            {
+                "id": "aba_1",
+                "projeto": self.projeto,
+                "produto": self.produto,
+                "caminho_projeto": None,
+                "modificado": False,
+                "info": self.info,
+                "historico": self.historico,
+                "atual": 0,
+                "laminas_sel": {0},
+            }
+        ]
+        self.aba_album_ativa = 0
         self.fotos_sel = set()
         self.ultima_foto_clicada = None
         self.filtro = tk.StringVar(value="todas")
@@ -385,6 +401,13 @@ class Aplicativo:
 
         tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
 
+        barra_abas_albuns = tk.Frame(self.root, bg=tema.PAINEL_2, padx=8, pady=3)
+        barra_abas_albuns.pack(side="top", fill="x")
+        self.barra_abas_albuns = barra_abas_albuns
+        self._atualizar_barra_abas_albuns()
+
+        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
+
         barra_opcoes = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 3))
         barra_opcoes.pack(side="top", fill="x")
         self.barra_opcoes = barra_opcoes
@@ -453,8 +476,10 @@ class Aplicativo:
 
         arquivo = ttk.Menubutton(topo, text="Arquivo", style="Compacto.TMenubutton")
         menu = tk.Menu(arquivo, tearoff=0)
-        menu.add_command(label="Novo álbum", accelerator="Ctrl+N", command=self.novo_projeto)
+        menu.add_command(label="Nova aba de álbum", accelerator="Ctrl+T", command=self.nova_aba_album)
+        menu.add_command(label="Novo álbum (nesta aba)", accelerator="Ctrl+N", command=self.novo_projeto)
         menu.add_command(label="Abrir...", accelerator="Ctrl+O", command=self.abrir_projeto)
+        menu.add_command(label="Abrir em nova aba...", command=lambda: self.abrir_projeto(em_nova_aba=True))
         self.menu_recentes = tk.Menu(menu, tearoff=0, postcommand=self._montar_recentes)
         menu.add_cascade(label="Recentes", menu=self.menu_recentes)
         menu.add_separator()
@@ -478,48 +503,51 @@ class Aplicativo:
         exibir.pack(side="left", padx=1)
         self.botao_exibir = exibir
 
-        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
+        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4, pady=2)
         self._botao(topo, "📁 Pasta", self.escolher_pasta,
-                    "Carregar pasta de fotos do computador", "Compacto.TButton").pack(side="left", padx=2)
-        self._botao(topo, "☁ Link Drive", self.importar_link_drive,
+                    "Carregar pasta de fotos do computador", "Compacto.TButton").pack(side="left", padx=1)
+        self._botao(topo, "☁ Drive", self.importar_link_drive,
                     "Colar link do Google Drive e baixar fotos em pasta temporária (apagada ao fechar)",
-                    "Compacto.TButton").pack(side="left", padx=2)
+                    "Compacto.TButton").pack(side="left", padx=1)
         self._botao(topo, "🖼 Fotos", self.escolher_fotos,
-                    "Carregar fotos avulsas do computador", "Compacto.TButton").pack(side="left", padx=2)
+                    "Carregar fotos avulsas do computador", "Compacto.TButton").pack(side="left", padx=1)
 
-        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
-        self._botao(topo, "💾 Salvar JSON", self.salvar_projeto_como,
+        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4, pady=2)
+        self._botao(topo, "💾 Salvar", self.salvar_projeto_como,
                     "Salvar o arquivo JSON do álbum para continuar o projeto mais tarde",
-                    "Compacto.TButton").pack(side="left", padx=2)
-        self._botao(topo, "📂 Abrir JSON", self.abrir_projeto,
+                    "Compacto.TButton").pack(side="left", padx=1)
+        self._botao(topo, "📂 Abrir", self.abrir_projeto,
                     "Abrir um arquivo JSON de álbum salvo anteriormente",
-                    "Compacto.TButton").pack(side="left", padx=2)
-        self._botao(topo, "🔗 Relinkar Fotos", self.consertar_caminhos,
+                    "Compacto.TButton").pack(side="left", padx=1)
+        self._botao(topo, "🔗 Relinkar", self.consertar_caminhos,
                     "Relinkar a pasta de fotos caso o projeto ou as fotos tenham mudado de lugar",
-                    "Compacto.TButton").pack(side="left", padx=2)
+                    "Compacto.TButton").pack(side="left", padx=1)
 
-        ttk.Frame(topo, width=8).pack(side="left")
+        ttk.Frame(topo, width=4).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
-        self.rotulo_nome.pack(side="left", padx=(0, 8))
+        self.rotulo_nome.pack(side="left", padx=(0, 4))
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
                                           "Exportar álbum", "Compacto.TButton")
-        self.botao_exportar.pack(side="right", padx=(3, 0))
+        self.botao_exportar.pack(side="right", padx=(2, 0))
         self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
                                         "Photoshop / Lightroom", "Compacto.TButton")
-        self.botao_tratar.pack(side="right", padx=2)
+        self.botao_tratar.pack(side="right", padx=1)
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
                                       "Abrir programa de capas", "Compacto.TButton")
-        self.botao_capa.pack(side="right", padx=2)
+        self.botao_capa.pack(side="right", padx=1)
 
-        ttk.Frame(topo, width=6).pack(side="right")
+        ttk.Frame(topo, width=4).pack(side="right")
         self._botao(topo, "? Guia", self.mostrar_guia_rapido,
-                    "Guia rápido passo a passo e dicas de uso para novos usuários", "Compacto.TButton").pack(side="right", padx=2)
+                    "Guia rápido passo a passo e dicas de uso para novos usuários", "Compacto.TButton").pack(side="right", padx=1)
         self._botao(topo, "↷", self.refazer, "Refazer", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(topo, "↶", self.desfazer, "Desfazer", "Icone.TButton", width=3).pack(side="right", padx=1)
-        ttk.Frame(topo, width=6).pack(side="right")
+        ttk.Frame(topo, width=4).pack(side="right")
         self._botao(topo, "✦ Diagramar", self.abrir_diagramacao,
-                    "Diagramação automática", "PrimarioCompacto.TButton").pack(side="right", padx=2)
+                    "Diagramação automática", "PrimarioCompacto.TButton").pack(side="right", padx=1)
+        self._botao(topo, "🗂 Ordem/Grupos", self.abrir_ordem_grupos,
+                    "Definir qual foto ou grupo numerado vem primeiro sem alterar os arquivos no PC (nunca mistura grupos diferentes na mesma lâmina)",
+                    "Compacto.TButton").pack(side="right", padx=1)
 
     def _montar_barra_opcoes(self, barra):
         """Barra de opções enxuta: apenas Produto, Margem, Espaçamento, Fotos/Lâmina, Aplicar em Todas e Guias."""
@@ -671,22 +699,25 @@ class Aplicativo:
         self.combo_pasta_filtro.bind("<<ComboboxSelected>>", self._mudou_filtro_pasta)
         tema.dica(self.combo_pasta_filtro, "Filtrar visualização por pasta carregada (as pastas ficam separadas sem se misturar)")
 
-        self.ordem_var = tk.StringVar(value="nome")
+        self.ordem_var = tk.StringVar(value="grupos")
         combo = ttk.Combobox(cabeca, textvariable=self.ordem_var, state="readonly", width=7,
-                             values=["nome", "data", "cenario"])
+                             values=["grupos", "nome", "data"])
         combo.pack(side="left", padx=(4, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.ordenar_fotos())
-        tema.dica(combo, "Ordenar fotos por nome, data ou cenário (mantendo a separação por pastas)")
+        tema.dica(combo, "Ordenar fotos por grupos numerados/ordem manual, nome ou data (sem renomear arquivos)")
+        self._botao(cabeca, "🗂 Ordem / Grupos", self.abrir_ordem_grupos,
+                    "Organizar fotos em grupos numerados (Grupo 1, Grupo 2...) e escolher qual foto vem primeiro sem alterar arquivos",
+                    "Compacto.TButton").pack(side="left", padx=(6, 0))
         self._botao(cabeca, "📁 Separar Lâminas", self.separar_laminas_por_pasta,
                     "Separar pastas carregadas em lâminas exclusivas (nunca mistura fotos de pastas diferentes na mesma lâmina)",
-                    "Compacto.TButton").pack(side="left", padx=(6, 0))
+                    "Compacto.TButton").pack(side="left", padx=(4, 0))
         self._botao(cabeca, "🗑", self.remover_fotos_selecionadas,
                     "Remover fotos selecionadas do projeto", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
         self._botao(cabeca, "⇉", self.distribuir_nao_usadas,
                     "Distribuir fotos livres em novas lâminas", "Icone.TButton", width=3).pack(side="right", padx=3)
         barra = ttk.Scrollbar(caixa, orient="horizontal", command=self._rolar_fotos)
         barra.pack(side="bottom", fill="x")
-        self.canvas_fotos = tk.Canvas(caixa, height=100, bg=tema.PAINEL, highlightthickness=0)
+        self.canvas_fotos = tk.Canvas(caixa, height=82, bg=tema.PAINEL, highlightthickness=0)
         self.canvas_fotos.pack(side="top", fill="both", expand=True, pady=(3, 0))
         self.canvas_fotos.configure(xscrollcommand=lambda a, b: (barra.set(a, b), self.agendar("fotos", 15, self._desenhar_fotos_visiveis)))
         self.canvas_fotos.bind("<Configure>", self._mudou_tamanho_fotos)
@@ -770,8 +801,15 @@ class Aplicativo:
                 painel.forget(nome)
         vertical = self._timeline_vertical()
         self._orientar_timeline(vertical)
-        lateral = dict(width=a["largura_lateral"], minsize=MINIMOS["lateral"], stretch="never")
-        tl_lado = dict(width=a["largura_timeline"], minsize=MINIMOS["timeline_vertical"], stretch="never")
+        _wx, _wy, sw, sh = tema.area_util_tela(self.root)
+        # Limita proporcionalmente a altura/largura dos painéis periféricos em telas compactas (ex: 1440x900, 1366x768)
+        larg_lat = min(int(a["largura_lateral"]), max(MINIMOS["lateral"], int(sw * 0.25)))
+        larg_tl = min(int(a.get("largura_timeline", 360)), max(220, int(sw * 0.30)))
+        alt_tl = min(int(a["altura_timeline"]), max(MINIMOS["timeline"], int(sh * 0.16)))
+        alt_fotos = min(int(a["altura_fotos"]), max(MINIMOS["fotos"], int(sh * 0.17)))
+
+        lateral = dict(width=larg_lat, minsize=MINIMOS["lateral"], stretch="never")
+        tl_lado = dict(width=larg_tl, minsize=MINIMOS["timeline_vertical"], stretch="never")
         mostrar_tl, mostrar_lat = a["mostrar_timeline"], a["mostrar_lateral"]
         if mostrar_lat and a["lateral"] == "esquerda":
             h.add(self.quadro_lateral, **lateral)
@@ -782,17 +820,17 @@ class Aplicativo:
             h.add(self.quadro_timeline, **tl_lado)
         if mostrar_lat and a["lateral"] == "direita":
             h.add(self.quadro_lateral, **lateral)
-        tl_faixa = dict(height=a["altura_timeline"], minsize=MINIMOS["timeline"], stretch="never")
+        tl_faixa = dict(height=alt_tl, minsize=MINIMOS["timeline"], stretch="never")
         if mostrar_tl and a["timeline"] == "cima":
             v.add(self.quadro_timeline, **tl_faixa)
         v.add(h, minsize=MINIMOS["meio"], stretch="always")
         if mostrar_tl and a["timeline"] == "baixo" and a["mostrar_fotos"]:
-            b.add(self.quadro_timeline, width=max(260, a.get("largura_timeline", 420)), minsize=220, stretch="never")
-            b.add(self.quadro_fotos, minsize=260, stretch="always")
-            v.add(b, height=a["altura_fotos"], minsize=MINIMOS["fotos"], stretch="never")
+            b.add(self.quadro_timeline, width=max(220, larg_tl), minsize=200, stretch="never")
+            b.add(self.quadro_fotos, minsize=240, stretch="always")
+            v.add(b, height=alt_fotos, minsize=MINIMOS["fotos"], stretch="never")
         else:
             if a["mostrar_fotos"]:
-                v.add(self.quadro_fotos, height=a["altura_fotos"], minsize=MINIMOS["fotos"], stretch="never")
+                v.add(self.quadro_fotos, height=alt_fotos, minsize=MINIMOS["fotos"], stretch="never")
             if mostrar_tl and a["timeline"] == "baixo":
                 v.add(self.quadro_timeline, **tl_faixa)
 
@@ -879,16 +917,24 @@ class Aplicativo:
 
     def _montar_direita(self, direita):
         abas = ttk.Notebook(direita)
-        abas.pack(fill="both", expand=True, padx=4, pady=6)
+        abas.pack(fill="both", expand=True, padx=4, pady=4)
         self.abas = abas
         self.quadros_abas = {}
+        abas_rolaveis = {"Fundo", "Degradê", "Moldura"}
         for titulo, montar in (("Layouts", self._aba_layouts), ("Fundo", self._aba_fundo),
                                ("Degradê", self._aba_degrade), ("Moldura", self._aba_moldura),
                                ("⌨ Atalhos", self._aba_atalhos)):
-            quadro = ttk.Frame(abas, padding=8)
-            abas.add(quadro, text=titulo)
-            self.quadros_abas[titulo] = quadro
-            montar(quadro)
+            if titulo in abas_rolaveis:
+                quadro = ttk.Frame(abas, padding=0)
+                abas.add(quadro, text=titulo)
+                self.quadros_abas[titulo] = quadro
+                interno, _cont, _cv = tema.criar_corpo_rolavel(quadro, padding=6)
+                montar(interno)
+            else:
+                quadro = ttk.Frame(abas, padding=6)
+                abas.add(quadro, text=titulo)
+                self.quadros_abas[titulo] = quadro
+                montar(quadro)
         abas.bind("<<NotebookTabChanged>>", self._aba_mudou)
 
     def abrir_aba_degrade(self):
@@ -925,7 +971,8 @@ class Aplicativo:
             self.secoes_layouts[valor] = ttk.Frame(quadro)
         self._secao_sugestoes(self.secoes_layouts["sugestoes"])
         self._secao_modelos(self.secoes_layouts["modelos"])
-        self._montar_edicao_layout(self.secoes_layouts["editar"])
+        interno_ed, _cont_ed, _cv_ed = tema.criar_corpo_rolavel(self.secoes_layouts["editar"], padding=2)
+        self._montar_edicao_layout(interno_ed)
         self._mostrar_secao_layouts()
 
     def _mostrar_secao_layouts(self, secao=None):
@@ -1110,7 +1157,7 @@ class Aplicativo:
                     "Girar foto 90° no sentido anti-horário", "Icone.TButton", width=3).pack(side="right", padx=1)
 
         self.canvas_enquadramento = tk.Canvas(
-            enq, bg="#18181b", highlightthickness=1, highlightbackground=tema.BORDA, height=130, cursor="fleur"
+            enq, bg="#18181b", highlightthickness=1, highlightbackground=tema.BORDA, height=104, cursor="fleur"
         )
         self.canvas_enquadramento.pack(fill="both", expand=True, pady=(0, 4))
         self.canvas_enquadramento.bind("<ButtonPress-1>", self._enquadramento_inicio)
@@ -1978,13 +2025,38 @@ class Aplicativo:
         return "break"
 
     def _registrar_drop(self):
-        if TkinterDnD is None:
-            self.registrar("Arrastar arquivos do Explorer não está disponível (instale tkinterdnd2).")
-            return
-        for widget, funcao in ((self.root, self._drop_geral), (self.canvas, self._drop_lamina),
-                               (self.canvas_fotos, self._drop_geral), (self.canvas_timeline, self._drop_timeline)):
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<Drop>>", funcao)
+        entrada.desbloquear_uipi_drop_windows(self.root)
+        registrado_tkdnd = False
+        if TkinterDnD is not None and DND_FILES is not None:
+            alvos_drop = [
+                (self.root, self._drop_geral),
+                (self.canvas, self._drop_lamina),
+                (self.canvas_fotos, self._drop_geral),
+                (self.canvas_timeline, self._drop_timeline),
+            ]
+            for extra in (
+                getattr(self, "quadro_lateral", None),
+                getattr(self, "quadro_fotos", None),
+                getattr(self, "quadro_timeline", None),
+                getattr(self, "barra_topo", None),
+                getattr(self, "barra_opcoes", None),
+                getattr(self, "barra_ferramentas", None),
+            ):
+                if extra is not None:
+                    alvos_drop.append((extra, self._drop_geral))
+            for widget, funcao in alvos_drop:
+                try:
+                    widget.drop_target_register(DND_FILES)
+                    widget.dnd_bind("<<Drop>>", funcao)
+                    registrado_tkdnd = True
+                except Exception:
+                    pass
+        if not registrado_tkdnd:
+            if entrada.registrar_drop_nativo_windows(self.root, self._receber_drop_nativo_windows):
+                self.registrar("Arrastar pastas e fotos do Windows Explorer ativado (modo nativo Win32).")
+            else:
+                self.registrar("Arraste pastas/fotos ou use o botão '📁 Pasta' (Ctrl+P) / Ctrl+V.")
+
 
     # ==================================================================
     # Utilidades de janela
@@ -2027,13 +2099,48 @@ class Aplicativo:
 
     def mostrar_registro(self):
         janela = tk.Toplevel(self.root)
-        janela.title("Registro")
-        janela.configure(bg=tema.FUNDO)
-        janela.geometry("760x420")
-        texto = tk.Text(janela, bg=tema.PAINEL_2, fg=tema.TEXTO, insertbackground=tema.TEXTO, relief="flat")
-        texto.pack(fill="both", expand=True)
+        janela.title("Registro de Atividades")
+        janela.configure(bg=tema.PAINEL)
+        janela.transient(self.root)
+        tema.criar_cabecalho_janela(
+            janela,
+            "Registro de Atividades do Álbum",
+            "Histórico detalhado de ações e operações da sessão atual",
+            icone="📋",
+        )
+        rodape = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+        rodape.pack(side="bottom", fill="x")
+        ttk.Button(rodape, text="Fechar", style="Compacto.TButton", command=janela.destroy).pack(side="right", padx=(0, 10))
+
+        corpo = ttk.Frame(janela, padding=10)
+        corpo.pack(fill="both", expand=True)
+        barra = ttk.Scrollbar(corpo, orient="vertical")
+        barra.pack(side="right", fill="y")
+        texto = tk.Text(
+            corpo,
+            bg=tema.FUNDO,
+            fg=tema.TEXTO,
+            insertbackground=tema.TEXTO,
+            relief="solid",
+            bd=1,
+            font=tema.FONTE_MONO,
+            wrap="word",
+            yscrollcommand=barra.set,
+        )
+        texto.pack(side="left", fill="both", expand=True)
+        barra.configure(command=texto.yview)
         texto.insert("end", "\n".join(self.registro))
         texto.see("end")
+        janela.bind("<Escape>", lambda _e: janela.destroy())
+        tema.configurar_janela_secundaria(
+            janela,
+            pai=self,
+            chave="janela_registro",
+            largura=760,
+            altura=460,
+            min_largura=460,
+            min_altura=280,
+        )
 
     def marcar_historico(self):
         self.historico.marcar(self.projeto)
@@ -2064,9 +2171,232 @@ class Aplicativo:
 
     def _atualizar_titulo(self):
         nome = self.projeto.get("nome") or "Novo álbum"
-        curto = nome if len(nome) <= 26 else nome[:24] + "…"
+        lim_nome = 18 if self.root.winfo_screenwidth() <= 1500 else 26
+        curto = nome if len(nome) <= lim_nome else nome[:lim_nome - 2] + "…"
         self.rotulo_nome.configure(text=curto + (" *" if self.modificado else ""))
         self.root.title("%s%s - Álbum" % (nome, " *" if self.modificado else ""))
+        self._salvar_estado_aba_atual()
+        self._atualizar_barra_abas_albuns()
+
+    # ==================================================================
+    # Abas de Álbuns (trabalhar em vários álbuns durante exportação)
+    # ==================================================================
+
+    def _salvar_estado_aba_atual(self):
+        if not hasattr(self, "abas_albuns") or not self.abas_albuns:
+            return
+        idx = max(0, min(len(self.abas_albuns) - 1, int(getattr(self, "aba_album_ativa", 0))))
+        aba = self.abas_albuns[idx]
+        aba["projeto"] = self.projeto
+        aba["produto"] = self.produto
+        aba["caminho_projeto"] = self.caminho_projeto
+        aba["modificado"] = self.modificado
+        aba["info"] = self.info
+        aba["historico"] = self.historico
+        aba["atual"] = self.atual
+        aba["laminas_sel"] = set(self.laminas_sel or {0})
+
+    def _carregar_estado_aba(self, idx):
+        if not hasattr(self, "abas_albuns") or not (0 <= idx < len(self.abas_albuns)):
+            return
+        self.aba_album_ativa = idx
+        aba = self.abas_albuns[idx]
+        self.projeto = aba["projeto"]
+        self.produto = aba["produto"] or (self.produtos[0] if self.produtos else None)
+        self.caminho_projeto = aba.get("caminho_projeto")
+        self.modificado = bool(aba.get("modificado", False))
+        self.info = aba.get("info") if isinstance(aba.get("info"), dict) else {}
+        self.historico = aba.get("historico") or proj.Historico()
+        total_l = len(self.projeto.get("laminas", []))
+        self.atual = max(0, min(max(0, total_l - 1), int(aba.get("atual") or 0)))
+        self.laminas_sel = set(aba.get("laminas_sel") or {self.atual})
+        self.ultima_lamina_clicada = self.atual
+        self.espaco_sel = None
+        self.espacos_sel.clear()
+        self.fotos_sel.clear()
+        self._tl_pil.clear()
+        self._tl_tk.clear()
+        self._cache_laminas.clear()
+        self._tk_lamina = None
+        self._tk_lamina_zoom = None
+        self._imagem_lamina = None
+        if self.produto:
+            self.produto_var.set(self.produto["nome"])
+        self._carregar_ui_do_projeto()
+        self.atualizar_tudo()
+
+    def alternar_aba_album(self, idx):
+        if not hasattr(self, "abas_albuns") or not (0 <= idx < len(self.abas_albuns)):
+            return
+        if idx == self.aba_album_ativa:
+            return
+        self._salvar_estado_aba_atual()
+        self._carregar_estado_aba(idx)
+        nome_alb = self.projeto.get("nome") or "Novo álbum"
+        self.registrar("Alternou para a aba '%s' (%s)." % (nome_alb, (self.produto or {}).get("nome", "")))
+
+    def nova_aba_album(self, nome_inicial=None, projeto_inicial=None, caminho=None):
+        self._salvar_estado_aba_atual()
+        self._seq_aba_album = getattr(self, "_seq_aba_album", 1) + 1
+        prod = self.produto or (self.produtos[0] if self.produtos else None)
+        novo_proj = projeto_inicial if isinstance(projeto_inicial, dict) else proj.novo(prod["nome"] if prod else "")
+        if not projeto_inicial:
+            novo_proj["nome"] = nome_inicial or ("Álbum %02d" % len(self.abas_albuns) if len(self.abas_albuns) < 9 else "Álbum %d" % (len(self.abas_albuns) + 1))
+            if nome_inicial is None:
+                novo_proj["nome"] = "Álbum %02d" % (len(self.abas_albuns) + 1)
+        nova = {
+            "id": "aba_%d" % self._seq_aba_album,
+            "projeto": novo_proj,
+            "produto": prod,
+            "caminho_projeto": caminho,
+            "modificado": False,
+            "info": {},
+            "historico": proj.Historico(),
+            "atual": 0,
+            "laminas_sel": {0},
+        }
+        self.abas_albuns.append(nova)
+        self._carregar_estado_aba(len(self.abas_albuns) - 1)
+        self.registrar("Nova aba criada: '%s'. Você pode editar enquanto outras exportações rodam em background." % novo_proj.get("nome", "Álbum"))
+        return len(self.abas_albuns) - 1
+
+    def renomear_aba_album(self, idx=None):
+        if idx is None:
+            idx = self.aba_album_ativa
+        if not (0 <= idx < len(self.abas_albuns)):
+            return
+        aba = self.abas_albuns[idx]
+        atual_nome = aba["projeto"].get("nome") or "Novo álbum"
+        novo_nome = simpledialog.askstring(
+            "Nome do Álbum",
+            "Nome do álbum (usado para separar a subpasta na exportação PSD/JPG):",
+            initialvalue=atual_nome,
+            parent=self.root,
+        )
+        if novo_nome and novo_nome.strip():
+            aba["projeto"]["nome"] = novo_nome.strip()
+            if idx == self.aba_album_ativa:
+                self.projeto["nome"] = novo_nome.strip()
+                self._marcar_modificado()
+            else:
+                aba["modificado"] = True
+                self._atualizar_barra_abas_albuns()
+
+    def fechar_aba_album(self, idx):
+        if not hasattr(self, "abas_albuns") or len(self.abas_albuns) <= 1:
+            self.novo_projeto()
+            return
+        if not (0 <= idx < len(self.abas_albuns)):
+            return
+        self._salvar_estado_aba_atual()
+        aba = self.abas_albuns[idx]
+        if aba.get("modificado"):
+            nome_a = aba["projeto"].get("nome") or "Novo álbum"
+            resp = messagebox.askyesnocancel("Fechar Aba", "Salvar as mudanças de '%s' antes de fechar a aba?" % nome_a, parent=self.root)
+            if resp is None:
+                return
+            if resp:
+                self.alternar_aba_album(idx)
+                if not self.salvar_projeto():
+                    return
+        self.abas_albuns.pop(idx)
+        novo_idx = max(0, min(len(self.abas_albuns) - 1, self.aba_album_ativa if idx > self.aba_album_ativa else self.aba_album_ativa - 1))
+        self._carregar_estado_aba(novo_idx)
+
+    def _atualizar_barra_abas_albuns(self):
+        barra = getattr(self, "barra_abas_albuns", None)
+        if barra is None or not barra.winfo_exists():
+            return
+        for w in barra.winfo_children():
+            w.destroy()
+
+        tk.Label(
+            barra, text="ÁLBUNS ABERTOS:", bg=tema.PAINEL_2, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA
+        ).pack(side="left", padx=(0, 6))
+
+        ids_exportando = set()
+        job_at = getattr(self, "_job_exportacao_atual", None)
+        if isinstance(job_at, dict) and job_at.get("id_aba"):
+            ids_exportando.add(job_at["id_aba"])
+        for j in getattr(self, "fila_jobs_exportacao", []):
+            if isinstance(j, dict) and j.get("id_aba"):
+                ids_exportando.add(j["id_aba"])
+
+        for i, aba in enumerate(getattr(self, "abas_albuns", [])):
+            ativa = (i == getattr(self, "aba_album_ativa", 0))
+            proj_a = aba["projeto"] if not ativa else self.projeto
+            prod_a = aba["produto"] if not ativa else self.produto
+            mod_a = aba.get("modificado", False) if not ativa else self.modificado
+            nome_a = (proj_a.get("nome") or ("Álbum %02d" % (i + 1))).strip()
+            curto = nome_a if len(nome_a) <= 20 else nome_a[:18] + "…"
+            tam_txt = exportar.tamanho_produto_texto(prod_a)
+            qtd_l = len(proj_a.get("laminas", []))
+            em_exp = aba.get("id") in ids_exportando
+            selo_exp = " ⚡Exportando" if em_exp else ""
+            rotulo = "%s%s · %s (%d)%s" % (curto, " *" if mod_a else "", tam_txt, qtd_l, selo_exp)
+
+            quadro_aba = tk.Frame(
+                barra,
+                bg=tema.DESTAQUE_ESCURO if ativa else tema.PAINEL,
+                highlightthickness=1,
+                highlightbackground=tema.DESTAQUE if ativa else ("#f59e0b" if em_exp else tema.BORDA),
+                 padx=4,
+                pady=1,
+            )
+            quadro_aba.pack(side="left", padx=2)
+
+            bt_aba = tk.Button(
+                quadro_aba,
+                text=rotulo,
+                bg=tema.DESTAQUE_ESCURO if ativa else tema.PAINEL,
+                fg="#ffffff" if ativa else ("#fbbf24" if em_exp else tema.TEXTO),
+                activebackground=tema.DESTAQUE,
+                activeforeground="#ffffff",
+                bd=0,
+                relief="flat",
+                cursor="hand2",
+                font=tema.FONTE_FORTE if ativa else tema.FONTE_NORMAL,
+                command=lambda idx=i: self.alternar_aba_album(idx),
+            )
+            bt_aba.pack(side="left", padx=(2, 2))
+            bt_aba.bind("<Double-Button-1>", lambda _e, idx=i: self.renomear_aba_album(idx))
+            tema.dica(
+                bt_aba,
+                "Clique para alternar para '%s' · Duplo clique para renomear o álbum (subpasta: '%s')"
+                % (nome_a, exportar.nome_pasta_album(prod_a, proj_a)),
+            )
+
+            if len(self.abas_albuns) > 1:
+                bt_fechar = tk.Button(
+                    quadro_aba,
+                    text="×",
+                    bg=tema.DESTAQUE_ESCURO if ativa else tema.PAINEL,
+                    fg=tema.TEXTO_FRACO,
+                    activebackground=tema.ERRO,
+                    activeforeground="#ffffff",
+                    bd=0,
+                    relief="flat",
+                    cursor="hand2",
+                    padx=2,
+                    command=lambda idx=i: self.fechar_aba_album(idx),
+                )
+                bt_fechar.pack(side="left")
+                tema.dica(bt_fechar, "Fechar esta aba de álbum")
+
+        self._botao(
+            barra,
+            "＋ Novo Álbum em Aba",
+            self.nova_aba_album,
+            "Criar uma nova aba de álbum para trabalhar em outro álbum enquanto a exportação roda em segundo plano",
+            "Compacto.TButton",
+        ).pack(side="left", padx=(6, 2))
+        self._botao(
+            barra,
+            "✎ Renomear Álbum",
+            lambda: self.renomear_aba_album(self.aba_album_ativa),
+            "Definir o nome deste álbum/projeto (cria subpasta exclusiva na exportação PSD/JPG)",
+            "Compacto.TButton",
+        ).pack(side="left", padx=2)
 
     def _cfg(self):
         return diagramar.configuracao(self.produto, self.projeto.get("config"))
@@ -2297,22 +2627,26 @@ class Aplicativo:
         self.info = {}
         self.registrar("Álbum novo. Arraste fotos ou uma pasta para a janela.")
 
-    def abrir_projeto(self, caminho=None):
-        if not self._confirmar_descartar():
+    def abrir_projeto(self, caminho=None, em_nova_aba=False):
+        if not em_nova_aba and not self._confirmar_descartar():
             return
         if not caminho:
             caminho = filedialog.askopenfilename(parent=self.root, title="Abrir álbum",
                                                  filetypes=[("Álbum", "*" + proj.EXTENSAO), ("Todos", "*.*")])
         if not caminho:
             return
-        self._limpar_pastas_temp_drive(limpar_autosave=True)
+        if not em_nova_aba:
+            self._limpar_pastas_temp_drive(limpar_autosave=True)
         try:
             projeto = proj.abrir(caminho)
         except Exception as e:
             messagebox.showerror("Abrir", str(e), parent=self.root)
             return
-        self.info = {}
-        self._carregar_projeto(projeto, caminho)
+        if em_nova_aba:
+            self.nova_aba_album(projeto_inicial=projeto, caminho=caminho)
+        else:
+            self.info = {}
+            self._carregar_projeto(projeto, caminho)
         entrada.adicionar_recente("projeto", caminho)
         faltam = proj.faltando(projeto)
         if faltam:
@@ -2499,14 +2833,20 @@ class Aplicativo:
         Fotos, pastas ou projetos vindos do Explorer, do Ctrl+V, do Link do Drive ou da linha de comando.
         destino: ("espaco", lamina, espaco) ou ("lamina", lamina) para já colocar as fotos.
         """
+        caminhos = [c for c in (caminhos or []) if c]
+        tem_pasta_arrastada = any(Path(c).is_dir() for c in caminhos)
+        if tem_pasta_arrastada:
+            # Quando uma pasta inteira é arrastada do PC, nunca espreme todas as fotos dentro de um único quadro
+            destino = None
         fotos, projetos = entrada.expandir(caminhos)
         if projetos and not fotos:
             self.abrir_projeto(str(projetos[0]))
             return
         if not fotos:
-            self.registrar("Nenhuma foto (JPG, PNG ou TIF) encontrada.")
+            self.registrar("Nenhuma foto (JPG, PNG, TIF ou WEBP) encontrada na pasta selecionada.")
             return
         novo = not self.projeto["fotos"] and not self.projeto["laminas"]
+        sem_laminas = not self.projeto.get("laminas")
         pasta_origem = entrada.pasta_comum(fotos)
         if novo:
             produto = entrada.adivinhar_produto(pasta_origem, fotos)
@@ -2518,6 +2858,8 @@ class Aplicativo:
             if pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
                 entrada.adicionar_recente("pasta", pasta_origem)
             self._carregar_ui_do_projeto()
+        elif pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
+            entrada.adicionar_recente("pasta", pasta_origem)
         self.marcar_historico()
         novas = proj.adicionar_fotos(self.projeto, fotos)
         self.atualizar_fotos()
@@ -2547,13 +2889,13 @@ class Aplicativo:
                     "%d foto(s) baixada(s) na pasta temporária.\nDeseja diagramar essas fotos agora?" % len(info),
                     parent=self.root,
                 ):
-                    if novo:
+                    if novo or sem_laminas:
                         self.diagramar_tudo(False)
                     else:
                         self.diagramar_tudo(False, escopo="pasta", pasta_alvo=str(pasta_origem) if pasta_origem else None)
-            elif novo:
+            elif novo or sem_laminas:
                 self.diagramar_tudo(False)
-            elif self.projeto.get("laminas") and self._cfg().get("separar_pastas", True):
+            elif self.projeto.get("laminas") and (self._cfg().get("separar_pastas", True) or tem_pasta_arrastada):
                 pastas_novas = []
                 nomes_novas = []
                 for cam_n in novas:
@@ -2562,7 +2904,12 @@ class Aplicativo:
                         pastas_novas.append(ch_n)
                         nomes_novas.append(proj.nome_pasta_da_foto(cam_n))
                 resumo_pastas = ", ".join(nomes_novas[:3]) + ("..." if len(nomes_novas) > 3 else "")
-                if messagebox.askyesno(
+                if tem_pasta_arrastada:
+                    if len(pastas_novas) == 1:
+                        self.diagramar_tudo(False, escopo="pasta", pasta_alvo=pastas_novas[0])
+                    else:
+                        self.distribuir_nao_usadas()
+                elif messagebox.askyesno(
                     "Separar por Pastas Carregadas",
                     "%d foto(s) carregada(s) na pasta '%s'.\nDeseja diagramar esta pasta em novas lâminas separadas ao final do álbum (sem misturar com as pastas anteriores)?"
                     % (len(novas), resumo_pastas),
@@ -3024,18 +3371,34 @@ class Aplicativo:
     def importar_link_drive(self):
         janela = tk.Toplevel(self.root)
         janela.title("Importar Fotos do Google Drive")
+        janela.configure(bg=tema.PAINEL)
         janela.transient(self.root)
-        janela.resizable(False, False)
-        janela.grab_set()
+
+        tema.criar_cabecalho_janela(
+            janela,
+            "Importar Fotos ou Pastas do Google Drive",
+            "Baixa todas as fotos do link em pasta temporária com limpeza automática ao fechar",
+            icone="☁",
+        )
+
+        rodape = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=8)
+        rodape.pack(side="bottom", fill="x")
 
         quadro = ttk.Frame(janela, padding=14)
         quadro.pack(fill="both", expand=True)
-        ttk.Label(quadro, text="Cole o link público da pasta ou foto do Google Drive:", style="Titulo.TLabel").pack(anchor="w")
-        ttk.Label(quadro, text="As fotos serão baixadas em uma pasta temporária e apagadas ao fechar o programa.",
-                  style="Fraco.TLabel").pack(anchor="w", pady=(2, 8))
+        lbl_t = ttk.Label(quadro, text="Cole o link público da pasta ou foto do Google Drive:", style="Titulo.TLabel")
+        lbl_t.pack(anchor="w")
+        lbl_sub = ttk.Label(
+            quadro,
+            text="As fotos serão baixadas em uma pasta temporária e apagadas ao fechar o programa ou atingir o limite de memória.",
+            style="Fraco.TLabel",
+            justify="left",
+        )
+        lbl_sub.pack(anchor="w", pady=(2, 8))
+        quadro.bind("<Configure>", lambda e: lbl_sub.configure(wraplength=max(320, e.width - 28)), add="+")
 
         linha = ttk.Frame(quadro)
-        linha.pack(fill="x", pady=(0, 10))
+        linha.pack(fill="x", pady=(0, 6))
         link_var = tk.StringVar()
         try:
             clip = self.root.clipboard_get().strip()
@@ -3056,25 +3419,34 @@ class Aplicativo:
 
         ttk.Button(linha, text="Colar", command=colar_clip).pack(side="right")
 
-        botoes = ttk.Frame(quadro)
+        botoes = ttk.Frame(rodape)
         botoes.pack(fill="x")
 
         def confirmar():
             url = link_var.get().strip()
             if not url:
                 return
-            janela.grab_release()
+            try:
+                janela.grab_release()
+            except tk.TclError:
+                pass
             janela.destroy()
             self._executar_download_drive(url)
 
-        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right")
+        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right", padx=(0, 10))
         ttk.Button(botoes, text="Baixar Fotos", style="Primario.TButton", command=confirmar).pack(side="right", padx=(0, 6))
         janela.bind("<Return>", lambda _e: confirmar())
         janela.bind("<Escape>", lambda _e: janela.destroy())
-        janela.update_idletasks()
-        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - janela.winfo_width()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - janela.winfo_height()) // 2)
-        janela.geometry("+%d+%d" % (x, y))
+        tema.configurar_janela_secundaria(
+            janela,
+            pai=self,
+            chave="janela_drive",
+            largura=600,
+            altura=230,
+            min_largura=440,
+            min_altura=200,
+        )
+        janela.grab_set()
 
     def _executar_download_drive(self, url):
         tipo_id, drive_id, resourcekey = self._extrair_id_drive(url)
@@ -3233,17 +3605,20 @@ class Aplicativo:
 
     def _drop_geral(self, evento):
         self.adicionar_caminhos(entrada.caminhos_do_drop(self.root, evento.data))
-        return evento.action
+        return getattr(evento, "action", "copy")
 
     def _drop_lamina(self, evento):
         caminhos = entrada.caminhos_do_drop(self.root, evento.data)
+        if any(Path(c).is_dir() for c in caminhos):
+            self.adicionar_caminhos(caminhos, None)
+            return getattr(evento, "action", "copy")
         x = evento.x_root - self.canvas.winfo_rootx()
         y = evento.y_root - self.canvas.winfo_rooty()
         destino = None
         if self._shift_no_drop(evento) and len(caminhos) == 1 and Path(caminhos[0]).suffix.lower() in EXTENSOES \
                 and self._dentro_da_lamina(x, y) and self._dono_do_fundo() is not None:
             self.definir_imagem_fundo(caminhos[0])
-            return evento.action
+            return getattr(evento, "action", "copy")
         if isinstance(self.atual, int) and self.projeto["laminas"]:
             indice = self._espaco_em(x, y)
             if indice is not None:
@@ -3251,7 +3626,7 @@ class Aplicativo:
             elif self._dentro_da_lamina(x, y):
                 destino = ("lamina", self.atual)
         self.adicionar_caminhos(caminhos, destino)
-        return evento.action
+        return getattr(evento, "action", "copy")
 
     @staticmethod
     def _shift_no_drop(evento):
@@ -3267,10 +3642,41 @@ class Aplicativo:
 
     def _drop_timeline(self, evento):
         caminhos = entrada.caminhos_do_drop(self.root, evento.data)
+        if any(Path(c).is_dir() for c in caminhos):
+            self.adicionar_caminhos(caminhos, None)
+            return getattr(evento, "action", "copy")
         item = self._timeline_em(self._eixo_tl_root(evento.x_root, evento.y_root))
         destino = ("lamina", item) if isinstance(item, int) else None
         self.adicionar_caminhos(caminhos, destino)
-        return evento.action
+        return getattr(evento, "action", "copy")
+
+    def _receber_drop_nativo_windows(self, caminhos_brutos, x_root, y_root):
+        """Trata pastas ou fotos soltas via WM_DROPFILES nativo do Windows."""
+        caminhos = entrada.caminhos_do_drop(self.root, caminhos_brutos)
+        if not caminhos:
+            return
+        if any(Path(c).is_dir() for c in caminhos):
+            self.adicionar_caminhos(caminhos, None)
+            return
+        alvo_w = None
+        try:
+            alvo_w = self.root.winfo_containing(x_root, y_root)
+        except Exception:
+            pass
+        destino = None
+        if alvo_w is self.canvas and isinstance(self.atual, int) and self.projeto["laminas"]:
+            x = x_root - self.canvas.winfo_rootx()
+            y = y_root - self.canvas.winfo_rooty()
+            indice = self._espaco_em(x, y)
+            if indice is not None:
+                destino = ("espaco", self.atual, indice)
+            elif self._dentro_da_lamina(x, y):
+                destino = ("lamina", self.atual)
+        elif alvo_w is self.canvas_timeline:
+            item = self._timeline_em(self._eixo_tl_root(x_root, y_root))
+            if isinstance(item, int):
+                destino = ("lamina", item)
+        self.adicionar_caminhos(caminhos, destino)
 
     def _colocar_no_destino(self, fotos, destino):
         fotos = [f for f in fotos if normalizar_caminho(f) in self.info]
@@ -3356,21 +3762,22 @@ class Aplicativo:
         paginas = max(1, int(self.produto["paginas_por_lamina"]))
 
         janela = tk.Toplevel(self.root)
-        janela.title("Diagramação Automática · Motor Elástico & Cenários (Photoshop CC)")
+        janela.title("Diagramação Automática · Motor Elástico & Ordem por Grupos (Photoshop CC)")
         janela.configure(bg=tema.PAINEL)
         janela.transient(self.root)
-        janela.resizable(False, False)
-        janela.grab_set()
 
         tema.criar_cabecalho_janela(
             janela,
-            "Diagramação Automática — Motor Elástico e Cenários",
-            "Configure o escopo, separação por pastas/cenários, limite de corte elástico e layouts 60/40 e 70/30",
+            "Diagramação Automática — Motor Elástico e Grupos Numerados",
+            "Configure o escopo, separação por grupos de ordem/pastas, limite de corte elástico e layouts 60/40 e 70/30",
             icone="❖",
         )
 
-        quadro = ttk.Frame(janela, padding=14)
-        quadro.pack(fill="both", expand=True)
+        # Rodapé fixo na base da janela para continuar sempre visível ao redimensionar
+        rodape_fixo = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=9)
+        rodape_fixo.pack(side="bottom", fill="x")
+
+        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(janela, padding=14)
 
         # --- 1. Escopo da Diagramação ---
         quadro_escopo = ttk.LabelFrame(quadro, text="1. O que você deseja diagramar?", padding=10)
@@ -3430,50 +3837,61 @@ class Aplicativo:
         if not fotos_livres:
             rb_livres.configure(state="disabled")
 
-        # --- 2. Pastas e Reconhecimento de Cenário ---
-        quadro_cenario = ttk.LabelFrame(quadro, text="2. Divisão por Pastas e Reconhecimento de Cenário", padding=10)
-        quadro_cenario.pack(fill="x", pady=(0, 8))
+        # --- 2. Pastas e Ordem por Grupos Numerados ---
+        quadro_grupos = ttk.LabelFrame(quadro, text="2. Ordem das Fotos e Grupos Numerados (Sem Misturar Grupos)", padding=10)
+        quadro_grupos.pack(fill="x", pady=(0, 8))
 
         separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
-        cenario_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
-        limiar_cenario_var = tk.DoubleVar(value=round(float(cfg.get("limiar_cenario", 0.28)), 2))
+        respeitar_grupos_var = tk.BooleanVar(value=bool(cfg.get("respeitar_grupos_manuais", True)))
 
         ttk.Checkbutton(
-            quadro_cenario,
+            quadro_grupos,
             text="Respeitar divisão por pastas (nunca misturar pastas diferentes na mesma lâmina)",
             variable=separar_pastas_var,
         ).pack(anchor="w", pady=2)
         ttk.Checkbutton(
-            quadro_cenario,
-            text="Reconhecer cenário visual e juntar fotos do mesmo ambiente em lâminas seguidas",
-            variable=cenario_var,
+            quadro_grupos,
+            text="Respeitar ordem e grupos numerados definidos (nunca misturar grupos diferentes na mesma lâmina)",
+            variable=respeitar_grupos_var,
         ).pack(anchor="w", pady=2)
 
-        linha_limiar = ttk.Frame(quadro_cenario)
-        linha_limiar.pack(fill="x", pady=(4, 0))
-        ttk.Label(linha_limiar, text="Sensibilidade de mudança de cenário:").pack(side="left")
-
-        spin_limiar = ttk.Spinbox(
-            linha_limiar,
-            from_=0.15,
-            to=0.45,
-            increment=0.02,
-            textvariable=limiar_cenario_var,
-            width=6,
+        linha_grupos_btn = ttk.Frame(quadro_grupos)
+        linha_grupos_btn.pack(fill="x", pady=(6, 0))
+        lbl_resumo_grupos = ttk.Label(
+            linha_grupos_btn,
+            text="",
+            style="Fraco.TLabel",
         )
-        spin_limiar.pack(side="right")
+        lbl_resumo_grupos.pack(side="left")
 
-        def _aplicar_preset_limiar(valor):
-            limiar_cenario_var.set(valor)
+        def _atualizar_resumo_grupos():
+            grupos_atuais = proj.listar_grupos_ordem(self.projeto)
+            qtd_g = len(grupos_atuais)
+            nomes_g = ", ".join("%s (%d)" % (g["nome"], len(g["fotos"])) for g in grupos_atuais[:4])
+            if qtd_g > 4:
+                nomes_g += "…"
+            lbl_resumo_grupos.configure(
+                text="Grupos configurados: %d — %s" % (qtd_g, nomes_g if nomes_g else "Grupo 1")
+            )
 
-        botoes_limiar = ttk.Frame(linha_limiar)
-        botoes_limiar.pack(side="right", padx=(0, 8))
-        for rot_l, val_l in (("Alta (0.20)", 0.20), ("Padrão (0.28)", 0.28), ("Suave (0.36)", 0.36)):
-            ttk.Button(
-                botoes_limiar,
-                text=rot_l,
-                command=lambda v=val_l: _aplicar_preset_limiar(v),
-            ).pack(side="left", padx=2)
+        _atualizar_resumo_grupos()
+
+        def _abrir_janela_grupos_daqui():
+            def _depois_salvar_grupos():
+                nonlocal todas_fotos, fotos_livres
+                todas_fotos = proj.fotos_para_diagramar(self.projeto, self.info)
+                fotos_livres = proj.fotos_para_diagramar(self.projeto, self.info, somente_nao_usadas=True)
+                _atualizar_resumo_grupos()
+                _atualizar_previa()
+
+            self.abrir_ordem_grupos(ao_salvar=_depois_salvar_grupos, janela_pai=janela)
+
+        ttk.Button(
+            linha_grupos_btn,
+            text="🗂 Organizar Ordem e Grupos de Fotos...",
+            style="PrimarioCompacto.TButton",
+            command=_abrir_janela_grupos_daqui,
+        ).pack(side="right")
 
         # --- 3. Geometria Elástica, Limite de Corte e Layouts no Meio ---
         quadro_geom = ttk.LabelFrame(
@@ -3595,11 +4013,18 @@ class Aplicativo:
 
         # --- 5. Prévia ao Vivo da Diagramação ---
         quadro_previa = ttk.LabelFrame(quadro, text="Prévia ao vivo do resultado", padding=10)
-        quadro_previa.pack(fill="x", pady=(0, 10))
-        lbl_previa_1 = ttk.Label(quadro_previa, text="", font=("Segoe UI", 9, "bold"))
-        lbl_previa_1.pack(anchor="w")
-        lbl_previa_2 = ttk.Label(quadro_previa, text="", style="Fraco.TLabel")
-        lbl_previa_2.pack(anchor="w", pady=(2, 0))
+        quadro_previa.pack(fill="x", pady=(0, 6))
+        lbl_previa_1 = ttk.Label(quadro_previa, text="", font=("Segoe UI", 9, "bold"), justify="left")
+        lbl_previa_1.pack(anchor="w", fill="x")
+        lbl_previa_2 = ttk.Label(quadro_previa, text="", style="Fraco.TLabel", justify="left")
+        lbl_previa_2.pack(anchor="w", fill="x", pady=(2, 0))
+
+        def _ajustar_wraps_diag(evento):
+            larg = max(360, int(evento.width) - 48)
+            lbl_previa_1.configure(wraplength=larg)
+            lbl_previa_2.configure(wraplength=larg)
+
+        quadro.bind("<Configure>", _ajustar_wraps_diag, add="+")
 
         def _obter_fotos_escopo():
             esc = escopo_var.get()
@@ -3632,10 +4057,6 @@ class Aplicativo:
             except (tk.TclError, ValueError):
                 esp = float(cfg["espacamento_mm"])
             try:
-                lim_cen = max(0.12, min(0.55, float(limiar_cenario_var.get())))
-            except (tk.TclError, ValueError):
-                lim_cen = 0.28
-            try:
                 pct_c = max(5, min(35, int(corte_max_pct_var.get())))
             except (tk.TclError, ValueError):
                 pct_c = 22
@@ -3655,8 +4076,7 @@ class Aplicativo:
                 "espacamento_mm": esp,
                 "auto_salvar_minutos": auto_min,
                 "separar_pastas": bool(separar_pastas_var.get()),
-                "reconhecer_cenarios": bool(cenario_var.get()),
-                "limiar_cenario": lim_cen,
+                "respeitar_grupos_manuais": bool(respeitar_grupos_var.get()),
                 "modo_corte": modo_corte_var.get(),
                 "corte_maximo": 1.0 + (pct_c / 100.0),
                 "permitir_transpasse": bool(transpasse_var.get()),
@@ -3679,11 +4099,11 @@ class Aplicativo:
                 cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
-                text="Fotos: %d  |  Pastas: %d  |  Cenários: %d  |  👥 %d rosto(s) em %d foto(s)  →  %d lâmina(s)"
+                text="Fotos: %d  |  Pastas: %d  |  Grupos: %d  |  👥 %d rosto(s) em %d foto(s)  →  %d lâmina(s)"
                 % (
                     prev["total_fotos"],
                     prev["pastas"],
-                    prev["cenarios"],
+                    prev.get("grupos", prev.get("cenarios", 1)),
                     prev.get("total_rostos", 0),
                     prev.get("fotos_com_rostos", 0),
                     prev["laminas_estimadas"],
@@ -3696,6 +4116,8 @@ class Aplicativo:
             if prev["laminas_extras_vazias"] > 0:
                 detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
             detalhes += ")."
+            if respeitar_grupos_var.get():
+                detalhes += " Grupos numerados isolados (sem misturar na mesma lâmina)."
             if nao_cortar_pessoas_var.get():
                 detalhes += " Proteção ativa: nenhuma pessoa será cortada."
             if prev["sobras"] > 0:
@@ -3706,8 +4128,7 @@ class Aplicativo:
             escopo_var,
             pasta_escolhida_var,
             separar_pastas_var,
-            cenario_var,
-            limiar_cenario_var,
+            respeitar_grupos_var,
             modo_corte_var,
             corte_max_pct_var,
             transpasse_var,
@@ -3721,8 +4142,8 @@ class Aplicativo:
 
         _atualizar_previa()
 
-        botoes = ttk.Frame(quadro)
-        botoes.pack(fill="x", pady=(6, 0))
+        botoes = ttk.Frame(rodape_fixo)
+        botoes.pack(fill="x")
 
         def _calcular_laminas_ideais():
             fotos_esc = _obter_fotos_escopo()
@@ -3773,7 +4194,10 @@ class Aplicativo:
                     return
             cfg_novo = _montar_cfg_atual()
             cfg_novo["laminas_desejadas"] = lam_des
-            janela.grab_release()
+            try:
+                janela.grab_release()
+            except tk.TclError:
+                pass
             janela.destroy()
             self.diagramar_tudo(
                 confirmar=False,
@@ -3783,16 +4207,708 @@ class Aplicativo:
                 pasta_alvo=pasta_alvo_ch,
             )
 
-        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right")
+        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right", padx=(0, 10))
         ttk.Button(botoes, text="Diagramar Agora", style="Primario.TButton", command=iniciar).pack(
             side="right", padx=(0, 6)
         )
         janela.bind("<Escape>", lambda _e: janela.destroy())
         janela.bind("<Return>", lambda _e: iniciar())
-        janela.update_idletasks()
-        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - janela.winfo_width()) // 2)
-        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - janela.winfo_height()) // 2)
-        janela.geometry("+%d+%d" % (x, y))
+        tema.configurar_janela_secundaria(
+            janela,
+            pai=self,
+            chave="janela_diagramar",
+            largura=720,
+            altura=620,
+            min_largura=490,
+            min_altura=350,
+        )
+        janela.grab_set()
+        janela.focus_set()
+
+    def mover_fotos_para_grupo(self, fotos_caminhos, numero_grupo=None):
+        """Move fotos selecionadas para um grupo numerado (ou cria um novo grupo se numero_grupo for None)."""
+        if not fotos_caminhos:
+            return
+        grupos = proj.listar_grupos_ordem(self.projeto)
+        chaves_alvo = {normalizar_caminho(c) for c in fotos_caminhos}
+        fotos_extraidas = []
+        for g in grupos:
+            restantes = []
+            for f in g["fotos"]:
+                if normalizar_caminho(f["caminho"]) in chaves_alvo:
+                    fotos_extraidas.append(f)
+                else:
+                    restantes.append(f)
+            g["fotos"] = restantes
+
+        if not fotos_extraidas:
+            return
+
+        if numero_grupo is None:
+            novo_num = len(grupos) + 1
+            grupos.append({
+                "grupo_ordem": novo_num,
+                "nome": "Grupo %d" % novo_num,
+                "fotos": fotos_extraidas,
+            })
+        else:
+            encontrado = False
+            for g in grupos:
+                if int(g.get("grupo_ordem", 1)) == int(numero_grupo):
+                    g["fotos"].extend(fotos_extraidas)
+                    encontrado = True
+                    break
+            if not encontrado:
+                grupos.append({
+                    "grupo_ordem": int(numero_grupo),
+                    "nome": "Grupo %d" % int(numero_grupo),
+                    "fotos": fotos_extraidas,
+                })
+
+        grupos_limpos = [g for g in grupos if g["fotos"]]
+        if not grupos_limpos:
+            return
+        self.marcar_historico()
+        proj.aplicar_grupos_ordem(self.projeto, grupos_limpos)
+        self._marcar_modificado()
+        self.atualizar_fotos()
+        self.registrar("%d foto(s) atribuída(s) ao grupo de ordem (sem alterar arquivos no disco)." % len(fotos_extraidas))
+
+    def abrir_ordem_grupos(self, ao_salvar=None, janela_pai=None):
+        """
+        Janela dedicada para definir a ordem das fotos e organizá-las em grupos numerados
+        (Grupo 1, Grupo 2, Grupo 3...) sem renomear nem alterar os arquivos originais no PC.
+        Ao diagramar, os grupos são distribuídos na sequência definida e nunca se misturam na mesma lâmina.
+        """
+        if not self.projeto.get("fotos"):
+            self.registrar("Adicione fotos ao projeto antes de organizar a ordem e os grupos.")
+            return
+
+        pai_win = janela_pai if (janela_pai is not None and janela_pai.winfo_exists()) else self.root
+        janela = tk.Toplevel(pai_win)
+        janela.title("Ordem das Fotos e Grupos Numerados · Smart Album")
+        janela.configure(bg=tema.PAINEL)
+        janela.transient(pai_win)
+
+        tema.criar_cabecalho_janela(
+            janela,
+            "Ordem das Fotos e Grupos Numerados (Sem Alterar Arquivos)",
+            "Crie grupos numerados (Grupo 1, Grupo 2...) e arraste fotos entre eles. Grupos diferentes NUNCA se misturam na mesma lâmina.",
+            icone="🗂",
+        )
+
+        # Estado de trabalho em memória (lista de dicts: {"nome": str, "fotos": [dict_foto, ...]})
+        grupos_iniciais = proj.listar_grupos_ordem(self.projeto)
+        estado_grupos = [
+            {
+                "nome": str(g.get("nome") or ("Grupo %d" % (idx + 1))),
+                "fotos": [dict(f) for f in g.get("fotos", [])],
+            }
+            for idx, g in enumerate(grupos_iniciais)
+        ]
+        if not estado_grupos:
+            estado_grupos = [{"nome": "Grupo 1", "fotos": [dict(f) for f in self.projeto.get("fotos", [])]}]
+
+        grupo_ativo_idx = [0]
+        fotos_sel_chaves = set()
+        ultima_clicada_chave = [None]
+        arrasto_interno = {"ativo": False, "chaves": [], "x0": 0, "y0": 0}
+
+        # Rodapé fixo
+        rodape = tk.Frame(
+            janela,
+            bg=tema.CABECALHO,
+            highlightthickness=1,
+            highlightbackground=tema.BORDA,
+            padx=14,
+            pady=9,
+        )
+        rodape.pack(side="bottom", fill="x")
+
+        # Barra de ações de topo (compacta para caber em 1440x900 e 1366x768)
+        barra_acoes = tk.Frame(janela, bg=tema.PAINEL_2, padx=8, pady=6, highlightthickness=1, highlightbackground=tema.BORDA)
+        barra_acoes.pack(side="top", fill="x")
+
+        ttk.Button(
+            barra_acoes,
+            text="＋ Novo Grupo",
+            style="PrimarioCompacto.TButton",
+            command=lambda: _criar_novo_grupo(),
+        ).pack(side="left", padx=(0, 2))
+        ttk.Button(
+            barra_acoes,
+            text="✎ Renomear",
+            style="Compacto.TButton",
+            command=lambda: _renomear_grupo_ativo(),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="▲ Subir",
+            style="Compacto.TButton",
+            command=lambda: _mover_grupo(-1),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="▼ Descer",
+            style="Compacto.TButton",
+            command=lambda: _mover_grupo(1),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="🗑 Excluir/Mesclar",
+            style="Compacto.TButton",
+            command=lambda: _excluir_grupo_ativo(),
+        ).pack(side="left", padx=1)
+
+        tk.Frame(barra_acoes, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=5)
+
+        ttk.Button(
+            barra_acoes,
+            text="📁 1 Grupo/Pasta",
+            style="Compacto.TButton",
+            command=lambda: _dividir_por_pastas(),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="↺ Tudo no Grupo 1",
+            style="Compacto.TButton",
+            command=lambda: _juntar_tudo(),
+        ).pack(side="left", padx=1)
+
+        lbl_status_topo = ttk.Label(barra_acoes, text="", style="Fraco.TLabel")
+        lbl_status_topo.pack(side="right", padx=(4, 0))
+
+        # Barra secundária de movimentação de fotos selecionadas
+        barra_fotos_op = tk.Frame(janela, bg=tema.PAINEL, padx=8, pady=5)
+        barra_fotos_op.pack(side="top", fill="x")
+
+        ttk.Label(barra_fotos_op, text="Seleção:", style="Fraco.TLabel").pack(side="left", padx=(0, 3))
+        ttk.Button(
+            barra_fotos_op,
+            text="⏮ Início",
+            style="Compacto.TButton",
+            command=lambda: _deslocar_fotos_no_grupo(-9999),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="◀ Antes",
+            style="Compacto.TButton",
+            command=lambda: _deslocar_fotos_no_grupo(-1),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="Depois ▶",
+            style="Compacto.TButton",
+            command=lambda: _deslocar_fotos_no_grupo(1),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="Fim ⏭",
+            style="Compacto.TButton",
+            command=lambda: _deslocar_fotos_no_grupo(9999),
+        ).pack(side="left", padx=1)
+
+        tk.Frame(barra_fotos_op, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=5)
+        ttk.Label(barra_fotos_op, text="Mover p/:", style="Fraco.TLabel").pack(side="left", padx=(0, 3))
+        destino_grupo_var = tk.StringVar(value="")
+        combo_destino = ttk.Combobox(barra_fotos_op, textvariable=destino_grupo_var, state="readonly", width=18)
+        combo_destino.pack(side="left", padx=(0, 3))
+        ttk.Button(
+            barra_fotos_op,
+            text="↪ Mover p/ Grupo",
+            style="Compacto.TButton",
+            command=lambda: _mover_selecao_para_combo(),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="＋ Grupo c/ Seleção",
+            style="Compacto.TButton",
+            command=lambda: _criar_novo_grupo(com_selecao=True),
+        ).pack(side="left", padx=2)
+
+        # Canvas principal onde os grupos e suas fotos são desenhados e suportam drag-and-drop
+        quadro_canvas = tk.Frame(janela, bg=tema.FUNDO, highlightthickness=1, highlightbackground=tema.BORDA)
+        quadro_canvas.pack(side="top", fill="both", expand=True, padx=12, pady=(2, 8))
+
+        barra_rol_v = ttk.Scrollbar(quadro_canvas, orient="vertical")
+        barra_rol_v.pack(side="right", fill="y")
+        canvas_g = tk.Canvas(
+            quadro_canvas,
+            bg=tema.FUNDO,
+            highlightthickness=0,
+            yscrollcommand=barra_rol_v.set,
+        )
+        canvas_g.pack(side="left", fill="both", expand=True)
+        barra_rol_v.configure(command=canvas_g.yview)
+
+        regioes_grupos = []   # [{"idx_g": int, "y0": int, "y1": int}]
+        regioes_fotos = []    # [{"idx_g": int, "idx_f": int, "chave": str, "x0": int, "y0": int, "x1": int, "y1": int}]
+
+        CORES_GRUPOS = ("#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777", "#0891b2", "#4f46e5", "#ea580c")
+
+        def _atualizar_combo_destino():
+            opcoes = ["%d. %s (%d fotos)" % (i + 1, g["nome"], len(g["fotos"])) for i, g in enumerate(estado_grupos)]
+            combo_destino["values"] = opcoes
+            if opcoes:
+                idx_at = min(len(opcoes) - 1, max(0, grupo_ativo_idx[0]))
+                destino_grupo_var.set(opcoes[idx_at])
+
+        def _redesenhar_canvas(_ev=None):
+            if not canvas_g.winfo_exists():
+                return
+            canvas_g.delete("all")
+            regioes_grupos.clear()
+            regioes_fotos.clear()
+            _atualizar_combo_destino()
+
+            larg = max(560, canvas_g.winfo_width())
+            margem_x = 14
+            y_cursor = 12
+            card_w = 112
+            card_h = 118
+            esp_x = 10
+            esp_y = 10
+            colunas = max(3, (larg - margem_x * 2 - 20) // (card_w + esp_x))
+
+            total_fotos_proj = sum(len(g["fotos"]) for g in estado_grupos)
+            lbl_status_topo.configure(
+                text="%d grupo(s) numerado(s) · %d foto(s) · %d selecionada(s)"
+                % (len(estado_grupos), total_fotos_proj, len(fotos_sel_chaves))
+            )
+
+            seq_global = 0
+            for idx_g, g in enumerate(estado_grupos):
+                cor_g = CORES_GRUPOS[idx_g % len(CORES_GRUPOS)]
+                ativo = (idx_g == grupo_ativo_idx[0])
+                fotos_g = g["fotos"]
+                linhas = max(1, int(math.ceil(max(1, len(fotos_g)) / float(colunas))))
+                altura_bloco = 46 + linhas * (card_h + esp_y) + 10
+                y0 = y_cursor
+                y1 = y0 + altura_bloco
+
+                canvas_g.create_rectangle(
+                    margem_x,
+                    y0,
+                    larg - margem_x,
+                    y1,
+                    fill=tema.PAINEL if not ativo else "#1e2736",
+                    outline=cor_g if ativo else tema.BORDA,
+                    width=2 if ativo else 1,
+                )
+                # Cabeçalho do grupo
+                canvas_g.create_rectangle(
+                    margem_x,
+                    y0,
+                    larg - margem_x,
+                    y0 + 34,
+                    fill=tema.PAINEL_2,
+                    outline="",
+                )
+                canvas_g.create_rectangle(
+                    margem_x + 8,
+                    y0 + 6,
+                    margem_x + 92,
+                    y0 + 28,
+                    fill=cor_g,
+                    outline="",
+                )
+                canvas_g.create_text(
+                    margem_x + 50,
+                    y0 + 17,
+                    text="GRUPO %d" % (idx_g + 1),
+                    fill="#ffffff",
+                    font=tema.FONTE_FORTE,
+                )
+                canvas_g.create_text(
+                    margem_x + 104,
+                    y0 + 17,
+                    anchor="w",
+                    text="%s  —  %d foto(s) · Lâminas exclusivas (não mistura com outros grupos)"
+                    % (g["nome"], len(fotos_g)),
+                    fill=tema.TEXTO,
+                    font=tema.FONTE_FORTE if ativo else tema.FONTE_NORMAL,
+                )
+
+                regioes_grupos.append({"idx_g": idx_g, "y0": y0, "y1": y1})
+
+                if not fotos_g:
+                    canvas_g.create_text(
+                        larg // 2,
+                        y0 + 82,
+                        text="Arraste fotos para cá ou use '↪ Mover para Grupo' para adicionar fotos ao Grupo %d" % (idx_g + 1),
+                        fill=tema.TEXTO_FRACO,
+                        font=tema.FONTE_NORMAL,
+                    )
+                else:
+                    for idx_f, f in enumerate(fotos_g):
+                        seq_global += 1
+                        col = idx_f % colunas
+                        lin = idx_f // colunas
+                        fx0 = margem_x + 12 + col * (card_w + esp_x)
+                        fy0 = y0 + 44 + lin * (card_h + esp_y)
+                        fx1 = fx0 + card_w
+                        fy1 = fy0 + card_h
+                        ch_f = normalizar_caminho(f["caminho"])
+                        sel = ch_f in fotos_sel_chaves
+
+                        canvas_g.create_rectangle(
+                            fx0,
+                            fy0,
+                            fx1,
+                            fy1,
+                            fill=tema.DESTAQUE_ESCURO if sel else tema.PAINEL_2,
+                            outline=tema.DESTAQUE if sel else tema.BORDA,
+                            width=2 if sel else 1,
+                        )
+                        img_tk = self._miniatura_tk(f["caminho"], usada=False)
+                        cx = (fx0 + fx1) // 2
+                        cy = fy0 + 50
+                        if img_tk is not None:
+                            canvas_g.create_image(cx, cy, image=img_tk)
+                        else:
+                            canvas_g.create_rectangle(fx0 + 10, fy0 + 16, fx1 - 10, fy0 + 80, fill=tema.PAINEL_3, outline="")
+                            canvas_g.create_text(cx, cy, text="...", fill=tema.TEXTO_FRACO)
+
+                        # Badge da ordem dentro do grupo (#1, #2...) e global
+                        canvas_g.create_rectangle(fx0 + 4, fy0 + 4, fx0 + 44, fy0 + 20, fill=cor_g, outline="")
+                        canvas_g.create_text(
+                            fx0 + 24,
+                            fy0 + 12,
+                            text="%dº (G%d)" % (idx_f + 1, idx_g + 1),
+                            fill="#ffffff",
+                            font=("Segoe UI", 7, "bold"),
+                        )
+
+                        nome_arq = Path(f["caminho"]).name
+                        curto = nome_arq if len(nome_arq) <= 14 else nome_arq[:12] + "…"
+                        canvas_g.create_text(
+                            cx,
+                            fy1 - 18,
+                            text=curto,
+                            fill=tema.TEXTO if sel else tema.TEXTO_FRACO,
+                            font=tema.FONTE_PEQUENA,
+                        )
+                        nome_p = proj.nome_pasta_da_foto(f)
+                        curto_p = nome_p if len(nome_p) <= 15 else nome_p[:13] + "…"
+                        canvas_g.create_text(
+                            cx,
+                            fy1 - 6,
+                            text="📁 " + curto_p,
+                            fill=tema.TEXTO_FRACO,
+                            font=("Segoe UI", 7),
+                        )
+
+                        regioes_fotos.append({
+                            "idx_g": idx_g,
+                            "idx_f": idx_f,
+                            "chave": ch_f,
+                            "x0": fx0,
+                            "y0": fy0,
+                            "x1": fx1,
+                            "y1": fy1,
+                        })
+
+                y_cursor = y1 + 12
+
+            canvas_g.configure(scrollregion=(0, 0, larg, max(400, y_cursor + 10)))
+
+        def _achar_foto_em(x_c, y_c):
+            for r in regioes_fotos:
+                if r["x0"] <= x_c <= r["x1"] and r["y0"] <= y_c <= r["y1"]:
+                    return r
+            return None
+
+        def _achar_grupo_em(y_c):
+            for rg in regioes_grupos:
+                if rg["y0"] <= y_c <= rg["y1"]:
+                    return rg["idx_g"]
+            if regioes_grupos:
+                if y_c < regioes_grupos[0]["y0"]:
+                    return 0
+                return regioes_grupos[-1]["idx_g"]
+            return 0
+
+        def _todas_chaves_ordenadas():
+            saida = []
+            for g in estado_grupos:
+                for f in g["fotos"]:
+                    saida.append(normalizar_caminho(f["caminho"]))
+            return saida
+
+        def _ao_clicar_canvas(evento):
+            x_c = canvas_g.canvasx(evento.x)
+            y_c = canvas_g.canvasy(evento.y)
+            rf = _achar_foto_em(x_c, y_c)
+            rg_idx = _achar_grupo_em(y_c)
+            grupo_ativo_idx[0] = rg_idx
+
+            if rf is None:
+                if not (evento.state & 0x0004) and not (evento.state & 0x0001):
+                    fotos_sel_chaves.clear()
+                _redesenhar_canvas()
+                return
+
+            ch = rf["chave"]
+            if evento.state & 0x0004:  # Ctrl
+                if ch in fotos_sel_chaves:
+                    fotos_sel_chaves.discard(ch)
+                else:
+                    fotos_sel_chaves.add(ch)
+            elif evento.state & 0x0001 and ultima_clicada_chave[0]:  # Shift
+                todas_ch = _todas_chaves_ordenadas()
+                if ultima_clicada_chave[0] in todas_ch and ch in todas_ch:
+                    i0, i1 = sorted((todas_ch.index(ultima_clicada_chave[0]), todas_ch.index(ch)))
+                    for c_it in todas_ch[i0:i1 + 1]:
+                        fotos_sel_chaves.add(c_it)
+                else:
+                    fotos_sel_chaves.add(ch)
+            else:
+                if ch not in fotos_sel_chaves:
+                    fotos_sel_chaves.clear()
+                    fotos_sel_chaves.add(ch)
+            ultima_clicada_chave[0] = ch
+            arrasto_interno["ativo"] = False
+            arrasto_interno["chaves"] = [c for c in _todas_chaves_ordenadas() if c in fotos_sel_chaves]
+            arrasto_interno["x0"] = evento.x
+            arrasto_interno["y0"] = evento.y
+            _redesenhar_canvas()
+
+        def _ao_arrastar_canvas(evento):
+            if not arrasto_interno["chaves"]:
+                return
+            if abs(evento.x - arrasto_interno["x0"]) + abs(evento.y - arrasto_interno["y0"]) >= 6:
+                arrasto_interno["ativo"] = True
+                canvas_g.configure(cursor="fleur")
+
+        def _ao_soltar_canvas(evento):
+            canvas_g.configure(cursor="")
+            if not arrasto_interno["ativo"] or not arrasto_interno["chaves"]:
+                arrasto_interno["ativo"] = False
+                return
+            arrasto_interno["ativo"] = False
+            x_c = canvas_g.canvasx(evento.x)
+            y_c = canvas_g.canvasy(evento.y)
+            rf_alvo = _achar_foto_em(x_c, y_c)
+            rg_destino = rf_alvo["idx_g"] if rf_alvo is not None else _achar_grupo_em(y_c)
+            pos_destino = rf_alvo["idx_f"] if rf_alvo is not None else len(estado_grupos[rg_destino]["fotos"])
+
+            chaves_mov = set(arrasto_interno["chaves"])
+            extraidas = []
+            for g in estado_grupos:
+                novas_f = []
+                for f in g["fotos"]:
+                    if normalizar_caminho(f["caminho"]) in chaves_mov:
+                        extraidas.append(f)
+                    else:
+                        novas_f.append(f)
+                g["fotos"] = novas_f
+
+            if not extraidas:
+                return
+            fotos_dest = estado_grupos[rg_destino]["fotos"]
+            pos_inserir = max(0, min(len(fotos_dest), pos_destino))
+            estado_grupos[rg_destino]["fotos"] = fotos_dest[:pos_inserir] + extraidas + fotos_dest[pos_inserir:]
+            grupo_ativo_idx[0] = rg_destino
+            _redesenhar_canvas()
+
+        def _criar_novo_grupo(com_selecao=False):
+            novo_num = len(estado_grupos) + 1
+            extraidas = []
+            if com_selecao and fotos_sel_chaves:
+                for g in estado_grupos:
+                    rest = []
+                    for f in g["fotos"]:
+                        if normalizar_caminho(f["caminho"]) in fotos_sel_chaves:
+                            extraidas.append(f)
+                        else:
+                            rest.append(f)
+                    g["fotos"] = rest
+            estado_grupos.append({
+                "nome": "Grupo %d" % novo_num,
+                "fotos": extraidas,
+            })
+            grupo_ativo_idx[0] = len(estado_grupos) - 1
+            _redesenhar_canvas()
+
+        def _renomear_grupo_ativo():
+            idx = grupo_ativo_idx[0]
+            if not (0 <= idx < len(estado_grupos)):
+                return
+            atual_n = estado_grupos[idx]["nome"]
+            novo_n = simpledialog.askstring(
+                "Renomear Grupo %d" % (idx + 1),
+                "Nome de identificação para o Grupo %d:" % (idx + 1),
+                initialvalue=atual_n,
+                parent=janela,
+            )
+            if novo_n and novo_n.strip():
+                estado_grupos[idx]["nome"] = novo_n.strip()
+                _redesenhar_canvas()
+
+        def _mover_grupo(delta):
+            idx = grupo_ativo_idx[0]
+            novo_idx = idx + delta
+            if not (0 <= idx < len(estado_grupos)) or not (0 <= novo_idx < len(estado_grupos)):
+                return
+            estado_grupos[idx], estado_grupos[novo_idx] = estado_grupos[novo_idx], estado_grupos[idx]
+            grupo_ativo_idx[0] = novo_idx
+            _redesenhar_canvas()
+
+        def _excluir_grupo_ativo():
+            if len(estado_grupos) <= 1:
+                messagebox.showinfo("Grupos", "É necessário manter pelo menos 1 grupo.", parent=janela)
+                return
+            idx = grupo_ativo_idx[0]
+            g_rem = estado_grupos.pop(idx)
+            destino = max(0, idx - 1)
+            if g_rem["fotos"]:
+                estado_grupos[destino]["fotos"].extend(g_rem["fotos"])
+            grupo_ativo_idx[0] = destino
+            _redesenhar_canvas()
+
+        def _dividir_por_pastas():
+            todas = [f for g in estado_grupos for f in g["fotos"]]
+            mapa_p = {}
+            ordem_p = []
+            for f in todas:
+                ch_p = proj.pasta_da_foto(f)
+                if ch_p not in mapa_p:
+                    mapa_p[ch_p] = []
+                    ordem_p.append((ch_p, proj.nome_pasta_da_foto(f)))
+                mapa_p[ch_p].append(f)
+            if not ordem_p:
+                return
+            estado_grupos.clear()
+            for idx_p, (ch_p, nome_p) in enumerate(ordem_p):
+                estado_grupos.append({
+                    "nome": "Grupo %d — %s" % (idx_p + 1, nome_p),
+                    "fotos": mapa_p[ch_p],
+                })
+            grupo_ativo_idx[0] = 0
+            _redesenhar_canvas()
+
+        def _juntar_tudo():
+            todas = [f for g in estado_grupos for f in g["fotos"]]
+            estado_grupos.clear()
+            estado_grupos.append({"nome": "Grupo 1", "fotos": todas})
+            grupo_ativo_idx[0] = 0
+            _redesenhar_canvas()
+
+        def _mover_selecao_para_combo():
+            if not fotos_sel_chaves:
+                messagebox.showinfo("Mover Fotos", "Selecione uma ou mais fotos clicando nelas primeiro.", parent=janela)
+                return
+            opcoes = list(combo_destino["values"])
+            escolha = destino_grupo_var.get()
+            idx_dest = opcoes.index(escolha) if escolha in opcoes else grupo_ativo_idx[0]
+            if not (0 <= idx_dest < len(estado_grupos)):
+                return
+            extraidas = []
+            for g in estado_grupos:
+                rest = []
+                for f in g["fotos"]:
+                    if normalizar_caminho(f["caminho"]) in fotos_sel_chaves:
+                        extraidas.append(f)
+                    else:
+                        rest.append(f)
+                g["fotos"] = rest
+            estado_grupos[idx_dest]["fotos"].extend(extraidas)
+            grupo_ativo_idx[0] = idx_dest
+            _redesenhar_canvas()
+
+        def _deslocar_fotos_no_grupo(passo):
+            if not fotos_sel_chaves:
+                return
+            for g in estado_grupos:
+                lista = g["fotos"]
+                n = len(lista)
+                if n <= 1:
+                    continue
+                indices_sel = [i for i, f in enumerate(lista) if normalizar_caminho(f["caminho"]) in fotos_sel_chaves]
+                if not indices_sel:
+                    continue
+                if passo <= -999:
+                    sel_f = [lista[i] for i in indices_sel]
+                    resto_f = [lista[i] for i in range(n) if i not in set(indices_sel)]
+                    g["fotos"] = sel_f + resto_f
+                elif passo >= 999:
+                    sel_f = [lista[i] for i in indices_sel]
+                    resto_f = [lista[i] for i in range(n) if i not in set(indices_sel)]
+                    g["fotos"] = resto_f + sel_f
+                elif passo < 0:
+                    for i in indices_sel:
+                        if i > 0 and normalizar_caminho(lista[i - 1]["caminho"]) not in fotos_sel_chaves:
+                            lista[i - 1], lista[i] = lista[i], lista[i - 1]
+                elif passo > 0:
+                    for i in reversed(indices_sel):
+                        if i < n - 1 and normalizar_caminho(lista[i + 1]["caminho"]) not in fotos_sel_chaves:
+                            lista[i + 1], lista[i] = lista[i], lista[i + 1]
+            _redesenhar_canvas()
+
+        canvas_g.bind("<ButtonPress-1>", _ao_clicar_canvas)
+        canvas_g.bind("<B1-Motion>", _ao_arrastar_canvas)
+        canvas_g.bind("<ButtonRelease-1>", _ao_soltar_canvas)
+        canvas_g.bind("<Configure>", _redesenhar_canvas)
+        canvas_g.bind("<MouseWheel>", lambda e: canvas_g.yview_scroll(-int(e.delta / 120), "units"))
+
+        def _salvar_grupos(diagramar_agora=False):
+            grupos_validos = [g for g in estado_grupos if g["fotos"]]
+            if not grupos_validos:
+                grupos_validos = estado_grupos[:1]
+            self.marcar_historico()
+            proj.aplicar_grupos_ordem(self.projeto, grupos_validos)
+            self.projeto.setdefault("config", {})["respeitar_grupos_manuais"] = True
+            self.ordem_var.set("grupos")
+            self._marcar_modificado()
+            self.atualizar_fotos()
+            self.registrar(
+                "Ordem salva: %d grupo(s) numerado(s) (%d fotos). Arquivos originais intactos."
+                % (len(grupos_validos), len(self.projeto.get("fotos", [])))
+            )
+            if callable(ao_salvar):
+                try:
+                    ao_salvar()
+                except Exception:
+                    pass
+            try:
+                janela.grab_release()
+            except tk.TclError:
+                pass
+            janela.destroy()
+            if diagramar_agora:
+                self.diagramar_tudo(confirmar=True)
+
+        ttk.Label(
+            rodape,
+            text="Dica: Arraste fotos para mudar quem vem primeiro ou movê-las de grupo. Os arquivos no PC não são alterados.",
+            style="Fraco.TLabel",
+        ).pack(side="left")
+
+        ttk.Button(rodape, text="Cancelar", command=janela.destroy).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            rodape,
+            text="✦ Salvar e Diagramar Agora",
+            style="Primario.TButton",
+            command=lambda: _salvar_grupos(diagramar_agora=True),
+        ).pack(side="right", padx=(0, 6))
+        ttk.Button(
+            rodape,
+            text="✓ Salvar Ordem e Grupos",
+            style="Compacto.TButton",
+            command=lambda: _salvar_grupos(diagramar_agora=False),
+        ).pack(side="right", padx=(0, 6))
+
+        janela.bind("<Escape>", lambda _e: janela.destroy())
+        tema.configurar_janela_secundaria(
+            janela,
+            pai=self,
+            chave="janela_ordem_grupos",
+            largura=820,
+            altura=600,
+            min_largura=540,
+            min_altura=380,
+        )
+        janela.grab_set()
         janela.focus_set()
 
     def _sem_repetidas(self, fotos, parar, ao_progresso=None):
@@ -5198,26 +6314,23 @@ class Aplicativo:
         return None
 
     def mostrar_guia_rapido(self):
-        """Janela amigável com o passo a passo e atalhos principais para usuários novos."""
+        """Janela amigável e redimensionável com o passo a passo e atalhos principais para usuários novos."""
         jan = tk.Toplevel(self.root)
         jan.title("Guia Rápido — Como usar o Smart Album")
         jan.configure(bg=tema.PAINEL)
-        jan.resizable(False, False)
         jan.transient(self.root)
 
-        quadro = ttk.Frame(jan, padding=18)
-        quadro.pack(fill="both", expand=True)
+        tema.criar_cabecalho_janela(
+            jan,
+            "Bem-vindo ao Smart Album Studio",
+            "Monte álbuns profissionais em poucos cliques seguindo este fluxo rápido",
+            icone="✦",
+        )
 
-        ttk.Label(
-            quadro,
-            text="Bem-vindo ao Smart Album Studio",
-            font=("Segoe UI Semibold", 14),
-        ).pack(anchor="w", pady=(0, 4))
-        ttk.Label(
-            quadro,
-            text="Monte álbuns profissionais em poucos cliques seguindo este fluxo rápido:",
-            style="Fraco.TLabel",
-        ).pack(anchor="w", pady=(0, 12))
+        rodape_fixo = tk.Frame(jan, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=9)
+        rodape_fixo.pack(side="bottom", fill="x")
+
+        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(jan, padding=16)
 
         etapas = [
             (
@@ -5244,19 +6357,184 @@ class Aplicativo:
             ),
         ]
 
+        labels_etapas = []
         for titulo_e, texto_e in etapas:
             bloco = tk.Frame(quadro, bg=tema.PAINEL_2, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
             bloco.pack(fill="x", pady=4)
             tk.Label(bloco, text=titulo_e, bg=tema.PAINEL_2, fg=tema.DESTAQUE, font=tema.FONTE_FORTE, anchor="w").pack(fill="x")
-            tk.Label(bloco, text=texto_e, bg=tema.PAINEL_2, fg=tema.TEXTO, font=tema.FONTE, justify="left", anchor="w").pack(fill="x", pady=(3, 0))
+            lbl_txt = tk.Label(bloco, text=texto_e, bg=tema.PAINEL_2, fg=tema.TEXTO, font=tema.FONTE, justify="left", anchor="w")
+            lbl_txt.pack(fill="x", pady=(3, 0))
+            labels_etapas.append(lbl_txt)
 
-        rodape = ttk.Frame(quadro)
-        rodape.pack(fill="x", pady=(14, 0))
+        def _ajustar_wraps_guia(evento):
+            larg = max(360, int(evento.width) - 56)
+            for lb in labels_etapas:
+                lb.configure(wraplength=larg)
+
+        quadro.bind("<Configure>", _ajustar_wraps_guia, add="+")
+
+        rodape = ttk.Frame(rodape_fixo)
+        rodape.pack(fill="x")
         self._botao(rodape, "📁 Carregar Pasta Agora", lambda: (jan.destroy(), self.escolher_pasta()),
                     estilo="PrimarioCompacto.TButton").pack(side="left")
         self._botao(rodape, "☁ Importar do Google Drive", lambda: (jan.destroy(), self.importar_link_drive()),
                     estilo="Compacto.TButton").pack(side="left", padx=6)
-        self._botao(rodape, "Fechar", jan.destroy, estilo="Compacto.TButton").pack(side="right")
+        self._botao(rodape, "Fechar", jan.destroy, estilo="Compacto.TButton").pack(side="right", padx=(0, 10))
+        jan.bind("<Escape>", lambda _e: jan.destroy())
+        tema.configurar_janela_secundaria(
+            jan,
+            pai=self,
+            chave="guia_rapido",
+            largura=740,
+            altura=540,
+            min_largura=480,
+            min_altura=340,
+        )
+
+    def _desenhar_anel_brilho(self, ocultar=None):
+        """Desenha o efeito suave de brilho (ring effect) ao redor de um ou múltiplos espaços selecionados."""
+        c = self.canvas
+        c.delete("anel_brilho")
+        if self._geo is None:
+            return
+        lamina = self._lamina()
+        if lamina is None:
+            return
+        selecionados = self._indices_espacos_selecionados()
+        if not selecionados and self.espaco_sel is not None and 0 <= self.espaco_sel < len(lamina.get("espacos", [])):
+            selecionados = {self.espaco_sel}
+        if not selecionados:
+            return
+
+        dw, dh, ox, oy = self._geo
+        editando = self.editar_layout.get()
+        multi = len(selecionados) > 1
+        agora = time.perf_counter()
+        inicio = getattr(self, "_anel_brilho_inicio", agora)
+        decorrido = max(0.0, agora - inicio)
+
+        # Fase 1 (0..0.42s): Onda de expansão suave (ripple ring) ao selecionar
+        t_onda = min(1.0, decorrido / 0.42)
+        suave_onda = 1.0 - (1.0 - t_onda) ** 3
+
+        # Fase 2: Respiração suave contínua (senoide de 2.0s)
+        pulso = 0.5 + 0.5 * math.sin(decorrido * 3.14159)
+
+        # Paleta de cores interpoladas para o halo externo, anel médio e núcleo brilhante
+        cores_onda = ("#e0f2fe", "#7dd3fc", "#38bdf8", "#0d99ff", "#0369a1", "#0c4a6e")
+        idx_cor_onda = min(len(cores_onda) - 1, int(suave_onda * len(cores_onda)))
+        cor_onda = cores_onda[idx_cor_onda]
+
+        if multi or editando:
+            cor_halo_ext = "#0369a1" if pulso < 0.5 else "#0284c7"
+            cor_halo_med = "#0ea5e9" if pulso < 0.5 else "#38bdf8"
+            cor_nucleo = "#00e5ff" if pulso < 0.5 else "#7dd3fc"
+        else:
+            cor_halo_ext = "#075985" if pulso < 0.5 else "#0369a1"
+            cor_halo_med = "#0284c7" if pulso < 0.5 else "#0ea5e9"
+            cor_nucleo = tema.DESTAQUE if pulso < 0.5 else "#38bdf8"
+
+        ordem_lista = sorted(selecionados)
+        for pos_sel, i in enumerate(ordem_lista, start=1):
+            if i < 0 or i >= len(lamina["espacos"]):
+                continue
+            if ("espaco", i) == ocultar or (isinstance(ocultar, tuple) and ocultar[0] == "grupo" and i in ocultar[1]):
+                continue
+            e = lamina["espacos"][i]
+            x0, y0 = ox + e["x"] * dw, oy + e["y"] * dh
+            x1, y1 = x0 + e["w"] * dw, y0 + e["h"] * dh
+
+            # Onda expansiva inicial (ripple) ao clicar/selecionar
+            if t_onda < 1.0:
+                dist_onda = 1.5 + 7.5 * suave_onda
+                larg_onda = 2 if t_onda < 0.55 else 1
+                c.create_rectangle(
+                    x0 - dist_onda, y0 - dist_onda, x1 + dist_onda, y1 + dist_onda,
+                    outline=cor_onda, width=larg_onda, tags=("espaco", "anel_brilho")
+                )
+
+            # Camada 1: Halo externo difuso pulsante
+            d_ext = 3.0 + 1.5 * pulso
+            c.create_rectangle(
+                x0 - d_ext, y0 - d_ext, x1 + d_ext, y1 + d_ext,
+                outline=cor_halo_ext, width=1, tags=("espaco", "anel_brilho")
+            )
+            # Camada 2: Anel luminoso intermediário
+            d_med = 1.5 + 0.8 * pulso
+            c.create_rectangle(
+                x0 - d_med, y0 - d_med, x1 + d_med, y1 + d_med,
+                outline=cor_halo_med, width=2, tags=("espaco", "anel_brilho")
+            )
+            # Camada 3: Anel principal nítido
+            c.create_rectangle(
+                x0, y0, x1, y1,
+                outline=cor_nucleo, width=2 if (i == self.espaco_sel or multi) else 1,
+                tags=("espaco", "anel_brilho")
+            )
+            # Camada 4: Filete interno de alto contraste
+            if (x1 - x0) > 16 and (y1 - y0) > 16:
+                c.create_rectangle(
+                    x0 + 1, y0 + 1, x1 - 1, y1 - 1,
+                    outline="#e0f2fe" if pulso > 0.65 else "#bae6fd",
+                    width=1, tags=("espaco", "anel_brilho")
+                )
+
+            # Selo indicador quando múltiplos espaços estão selecionados
+            if multi and (x1 - x0) > 48 and (y1 - y0) > 28:
+                txt_sel = "✦ %d/%d" % (pos_sel, len(ordem_lista))
+                tw = max(38, len(txt_sel) * 6 + 8)
+                bx1, by0 = x1 - 5, y0 + 5
+                bx0, by1 = bx1 - tw, by0 + 17
+                c.create_rectangle(
+                    bx0, by0, bx1, by1,
+                    fill="#002f4b", outline=cor_nucleo, width=1,
+                    tags=("espaco", "anel_brilho")
+                )
+                c.create_text(
+                    (bx0 + bx1) / 2, (by0 + by1) / 2,
+                    text=txt_sel, fill="#7dd3fc", font=tema.FONTE_PEQUENA,
+                    tags=("espaco", "anel_brilho")
+                )
+
+        # Brilho ao redor da caixa de grupo quando múltiplos espaços estão selecionados
+        if multi and not (isinstance(ocultar, tuple) and ocultar[0] == "grupo"):
+            grupo = self._caixa_selecao_espacos(selecionados)
+            if grupo:
+                gx0, gy0 = ox + grupo["x"] * dw, oy + grupo["y"] * dh
+                gx1, gy1 = gx0 + grupo["w"] * dw, gy0 + grupo["h"] * dh
+                d_g = 2.0 + 1.5 * pulso
+                c.create_rectangle(
+                    gx0 - d_g, gy0 - d_g, gx1 + d_g, gy1 + d_g,
+                    outline=cor_halo_ext, width=1, dash=(6, 4),
+                    tags=("espaco", "anel_brilho")
+                )
+                c.create_rectangle(
+                    gx0, gy0, gx1, gy1,
+                    outline=cor_nucleo, width=1, dash=(4, 3),
+                    tags=("espaco", "anel_brilho")
+                )
+
+    def _iniciar_animacao_anel_brilho(self):
+        """Inicia ou reinicia a animação suave de brilho (ring effect) para os espaços selecionados."""
+        self._anel_brilho_inicio = time.perf_counter()
+        self._passo_anel_brilho()
+
+    def _passo_anel_brilho(self):
+        if self._geo is None or self._lamina() is None:
+            return
+        selecionados = self._indices_espacos_selecionados()
+        if not selecionados and self.espaco_sel is None:
+            self.canvas.delete("anel_brilho")
+            return
+        ocultar = None
+        if getattr(self, "_acao_layout", None):
+            ocultar = self._acao_layout.get("alvo")
+        self._desenhar_anel_brilho(ocultar=ocultar)
+        decorrido = time.perf_counter() - getattr(self, "_anel_brilho_inicio", 0.0)
+        # Mantém a animação fluida a ~30fps durante a seleção (4.5s de ciclo suave)
+        if decorrido < 4.5:
+            intervalo = 24 if decorrido < 0.45 else 45
+            self.agendar("anel_brilho", intervalo, self._passo_anel_brilho)
 
     def _desenhar_espacos(self, ocultar=None):
         c = self.canvas
@@ -5270,6 +6548,14 @@ class Aplicativo:
         editando = self.editar_layout.get()
         alvo = self._alvo_sel()
         selecionados = self._indices_espacos_selecionados()
+
+        assinatura_sel = ( self.atual, tuple(sorted(selecionados)), self.espaco_sel )
+        if selecionados and assinatura_sel != getattr(self, "_ultima_assinatura_anel", None):
+            self._ultima_assinatura_anel = assinatura_sel
+            self._anel_brilho_inicio = time.perf_counter()
+            self.agendar("anel_brilho", 24, self._passo_anel_brilho)
+        elif not selecionados:
+            self._ultima_assinatura_anel = None
 
         # Linhas guias contínuas ciano no estilo Adobe Photoshop (Safe Zone e Sangria)
         if self.guias.get():
@@ -5307,18 +6593,15 @@ class Aplicativo:
                 c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, tags="espaco")
                 c.create_text((x0 + x1) / 2, (y0 + y1) / 2, text="+", fill=tema.TEXTO_FRACO,
                               font=("Segoe UI", 18), tags="espaco")
-            # Sem pontilhado nas fotos não selecionadas! Apenas a(s) selecionada(s) recebem contorno contínuo:
-            if i in selecionados or (not editando and i == self.espaco_sel):
-                c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff" if editando else tema.DESTAQUE,
-                                   width=2 if i == self.espaco_sel else 1, tags="espaco")
+
+        # Desenha o anel de brilho animado (ring effect) nos espaços selecionados
+        self._desenhar_anel_brilho(ocultar=ocultar)
+
         if editando and len(selecionados) > 1 and not (isinstance(ocultar, tuple) and ocultar[0] == "grupo"):
             grupo = self._caixa_selecao_espacos(selecionados)
-            x0, y0 = ox + grupo["x"] * dw, oy + grupo["y"] * dh
-            x1, y1 = x0 + grupo["w"] * dw, y0 + grupo["h"] * dh
-            c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff", width=1, tags="espaco")
             for hx, hy in self._alcas(grupo).values():
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
-                                   outline=tema.DESTAQUE, width=1, tags="espaco")
+                                   outline="#00e5ff", width=1, tags="espaco")
         elif editando and alvo and alvo != ocultar:
             cor = tema.DESTAQUE if alvo[0] == "espaco" else tema.ALERTA
             for hx, hy in self._alcas(self._item_layout(alvo, lamina)).values():
@@ -7613,6 +8896,14 @@ class Aplicativo:
                 c.create_text(direita - 7, 13, text=str(usos), fill="#0b2a1c", font=tema.FONTE_FORTE)
             if foto.get("destaque"):
                 c.create_text(cx - lado // 2 + 6, 12, text="★", fill=tema.ALERTA, font=("Segoe UI", 12))
+            if foto.get("grupo_ordem"):
+                num_g = max(1, int(foto.get("grupo_ordem") or 1))
+                gx0 = cx - lado // 2 + 2
+                gy0 = 4
+                gx1 = gx0 + (22 if num_g < 10 else 28)
+                gy1 = 18
+                c.create_rectangle(gx0, gy0, gx1, gy1, fill="#1e3a8a", outline="#60a5fa", width=1)
+                c.create_text((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0, text="G%d" % num_g, fill="#ffffff", font=("Segoe UI", 7, "bold"))
             # Selo com a quantidade de rostos identificados na foto (ex.: 👤 1 ou 👥 5)
             dados_f = self.info.get(normalizar_caminho(foto["caminho"]))
             rosto_f = dados_f.get("rosto") if isinstance(dados_f, dict) else None
@@ -7751,6 +9042,25 @@ class Aplicativo:
                          command=self.abrir_aba_degrade)
         menu.add_command(label="Alternar destaque (%s foto(s))" % quantidade,
                          command=lambda: self.alternar_destaque(fotos))
+        menu.add_separator()
+        menu_grupos = tk.Menu(menu, tearoff=0)
+        for g_info in proj.listar_grupos_ordem(self.projeto):
+            num_g = int(g_info.get("grupo_ordem", 1))
+            nome_g = g_info.get("nome") or ("Grupo %d" % num_g)
+            menu_grupos.add_command(
+                label="Mover para %s (%d fotos)" % (nome_g, len(g_info.get("fotos", []))),
+                command=lambda ng=num_g: self.mover_fotos_para_grupo(fotos, ng),
+            )
+        menu_grupos.add_separator()
+        menu_grupos.add_command(
+            label="＋ Criar Novo Grupo com %s foto(s)" % quantidade,
+            command=lambda: self.mover_fotos_para_grupo(fotos, None),
+        )
+        menu_grupos.add_command(
+            label="🗂 Abrir Janela de Ordem e Grupos...",
+            command=self.abrir_ordem_grupos,
+        )
+        menu.add_cascade(label="🗂 Ordem e Grupos (%s foto(s))" % quantidade, menu=menu_grupos)
         menu.add_separator()
         menu.add_command(label="Selecionar todas da pasta '%s'" % nome_pasta,
                          command=lambda: self._selecionar_pasta_inteira(pasta_atual))
@@ -9159,15 +10469,71 @@ class Aplicativo:
         self.janela_exportar = janela_exportar.JanelaExportar(self)
         return self.janela_exportar
 
+    def parar_fila_exportacao(self):
+        """Cancela a exportação atual em background e esvazia os jobs pendentes da fila de exportação."""
+        if hasattr(self, "fila_jobs_exportacao"):
+            self.fila_jobs_exportacao.clear()
+        tarefa_exp = getattr(self, "_tarefa_exportacao_atual", None)
+        if tarefa_exp is not None:
+            tarefa_exp.parada.set()
+            self.registrar("Parando fila de exportação em background...")
+        if self.tarefa is not None:
+            self.parar_tarefa()
+
+    def _iniciar_proximo_job_exportacao(self):
+        if getattr(self, "exportacao_worker_ativo", False):
+            return
+        fila_jobs = getattr(self, "fila_jobs_exportacao", None)
+        if not fila_jobs:
+            self.exportacao_worker_ativo = False
+            self._tarefa_exportacao_atual = None
+            self._job_exportacao_atual = None
+            self._atualizar_barra_abas_albuns()
+            return
+
+        job = fila_jobs.pop(0)
+        self.exportacao_worker_ativo = True
+        self._job_exportacao_atual = job
+        tarefa = Tarefa(self)
+        self._tarefa_exportacao_atual = tarefa
+        self.botao_parar.configure(state="normal")
+        self._atualizar_barra_abas_albuns()
+        self.registrar("⚡ [Fila Worker] Iniciando exportação isolada de %s (%d threads)..." % (job["nome_album"], job["workers"]))
+
+        def _rodar_worker_job():
+            gravados, erro = [], None
+            try:
+                gravados = job["trabalho"](tarefa)
+            except Exception as e:
+                erro = e
+                self.fila.put(("aviso", "ERRO na exportação: %s" % e))
+                traceback.print_exc()
+
+            def _concluir_na_ui():
+                self.exportacao_worker_ativo = False
+                self._tarefa_exportacao_atual = None
+                self._job_exportacao_atual = None
+                if not getattr(self, "fila_jobs_exportacao", []):
+                    self.botao_parar.configure(state="disabled")
+                    self.barra.configure(value=0)
+                self._atualizar_barra_abas_albuns()
+                try:
+                    job["fim"](gravados, erro)
+                finally:
+                    self._iniciar_proximo_job_exportacao()
+
+            self.fila.put(("chamar", _concluir_na_ui))
+
+        threading.Thread(target=_rodar_worker_job, daemon=True, name="SmartAlbumExportQueueDispatcher").start()
+
     def executar_exportacao(self, op, janela=None):
         """
-        Exporta com as opções da janela:
-        - Cria a pasta principal 'Album <TAMANHO>' (ex.: 'Album 30X20') direto na pasta base (sem etapa de pasta 'saida')
+        Enfileira um job de exportação na Fila de Processamento Worker-based em background:
+        - Congela um snapshot imutável (copy.deepcopy) de projeto, produto, info e opções no instante do clique
+        - Permite ao usuário criar ou alternar para outra aba de álbum e editar livremente sem confundir páginas
+        - Cria a subpasta exclusiva 'Album <TAMANHO> - <Nome do Álbum>' na pasta base
         - Dentro dela cria APENAS as subpastas dos formatos marcados ('JPG', 'PSD', 'PDF').
         """
-        if self.tarefa is not None:
-            messagebox.showinfo("Aguarde", "Ainda estou terminando: %s" % self.tarefa[0], parent=janela or self.root)
-            return False
         ativos = exportar.formatos_ativos(op)
         if not ativos:
             messagebox.showwarning("Exportar", "Marque pelo menos um formato de saída (JPG, PSD ou PDF).", parent=janela or self.root)
@@ -9182,8 +10548,12 @@ class Aplicativo:
             op["pasta"] = self.projeto.get("pasta_fotos") or (
                 str(Path(self.caminho_projeto).parent) if self.caminho_projeto else str(Path.home())
             )
-        pasta_album = janela_exportar.pasta_final(op, self.projeto, self.produto)
-        previstos = janela_exportar.arquivos_previstos(op, self.projeto, self.produto, itens)
+        # Snapshot imutável (deep copy) antes de qualquer troca de aba ou edição subsequente
+        copia_projeto = copy.deepcopy(self.projeto)
+        copia_produto = copy.deepcopy(self.produto)
+        copia_info = copy.deepcopy(self.info)
+        pasta_album = janela_exportar.pasta_final(op, copia_projeto, copia_produto)
+        previstos = janela_exportar.arquivos_previstos(op, copia_projeto, copia_produto, itens)
         existentes = [arq for arq in previstos if (pasta_album / arq).exists()]
         modo = op["existentes"]
         if modo == "perguntar" and existentes:
@@ -9197,9 +10567,20 @@ class Aplicativo:
             modo = "substituir"
         self.guardar_opcoes_exportacao(op)
         janela_exportar.lembrar_pasta(self.arquivo_exportacao(), op["pasta"])
-        opcoes = dict(op, indices=indices, existentes=modo)
-        copia = json.loads(json.dumps(self.projeto))
-        produto, info = self.produto, dict(self.info)
+        num_workers = max(1, min(8, int(op.get("workers") or min(4, max(2, os.cpu_count() or 2)))))
+        opcoes = copy.deepcopy(dict(op, indices=list(indices), existentes=modo, workers=num_workers))
+
+        if not hasattr(self, "fila_jobs_exportacao"):
+            self.fila_jobs_exportacao = []
+        if not hasattr(self, "exportacao_worker_ativo"):
+            self.exportacao_worker_ativo = False
+
+        if janela is not None:
+            self.janela_tarefa = janela
+
+        id_aba_origem = None
+        if hasattr(self, "abas_albuns") and 0 <= getattr(self, "aba_album_ativa", 0) < len(self.abas_albuns):
+            id_aba_origem = self.abas_albuns[self.aba_album_ativa].get("id")
 
         def trabalho(t):
             gravados = []
@@ -9207,32 +10588,46 @@ class Aplicativo:
             if "jpg" in ativos and not t.parar():
                 pasta_jpg = janela_exportar.pasta_do_formato(pasta_album, "jpg")
                 pasta_jpg.mkdir(parents=True, exist_ok=True)
-                gravados += exportar.exportar_jpg(copia, produto, info, pasta_jpg, t.aviso, t.parar, t.progresso, opcoes)
+                gravados += exportar.exportar_jpg(copia_projeto, copia_produto, copia_info, pasta_jpg, t.aviso, t.parar, t.progresso, opcoes)
             if "psd" in ativos and not t.parar():
                 import exportar_psd
                 pasta_psd = janela_exportar.pasta_do_formato(pasta_album, "psd")
                 pasta_psd.mkdir(parents=True, exist_ok=True)
-                gravados += exportar_psd.exportar_psd(copia, produto, info, pasta_psd, t.aviso, t.parar, t.progresso, opcoes)
+                gravados += exportar_psd.exportar_psd(copia_projeto, copia_produto, copia_info, pasta_psd, t.aviso, t.parar, t.progresso, opcoes)
             if "pdf" in ativos and not t.parar():
                 pasta_pdf = janela_exportar.pasta_do_formato(pasta_album, "pdf")
                 pasta_pdf.mkdir(parents=True, exist_ok=True)
-                gravados += exportar.exportar_pdf(copia, produto, info, pasta_pdf, t.aviso, t.parar, t.progresso, opcoes)
+                gravados += exportar.exportar_pdf(copia_projeto, copia_produto, copia_info, pasta_pdf, t.aviso, t.parar, t.progresso, opcoes)
             if not t.parar():
-                caminho_json_alb = pasta_album / exportar.nome_json_projeto(copia, produto)
-                proj.salvar(copia, caminho_json_alb)
+                caminho_json_alb = pasta_album / exportar.nome_json_projeto(copia_projeto, copia_produto)
+                proj.salvar(copia_projeto, caminho_json_alb)
                 gravados.append(caminho_json_alb)
             return gravados
 
         def fim(gravados, erro):
             if janela is not None and janela.winfo_exists():
-                janela.terminou(gravados, erro)
+                janela.terminou(gravados, erro, pasta_exportada=pasta_album)
             elif erro:
                 messagebox.showerror("Exportar", str(erro), parent=self.root)
-            elif gravados and messagebox.askyesno("Exportar", "%s arquivo(s) gravados em\n%s\n\nAbrir a pasta?" % (
-                    len(gravados), pasta_album), parent=self.root):
-                os.startfile(str(pasta_album))
+            elif gravados:
+                self.registrar("✓ Exportação em background concluída: %d arquivo(s) em %s" % (len(gravados), pasta_album))
 
-        return self.executar("Exportando", trabalho, fim, janela=janela)
+        self.fila_jobs_exportacao.append({
+            "id_aba": id_aba_origem,
+            "nome_album": pasta_album.name,
+            "pasta_album": str(pasta_album),
+            "workers": num_workers,
+            "trabalho": trabalho,
+            "fim": fim,
+        })
+        self._atualizar_barra_abas_albuns()
+        if janela is not None and janela.winfo_exists():
+            janela.aviso(
+                "⚡ Job isolado adicionado à Fila (%s · %d Workers · %s)"
+                % (pasta_album.name, num_workers, ", ".join(f.upper() for f in ativos))
+            )
+        self._iniciar_proximo_job_exportacao()
+        return True
 
     def exportar(self, tipo=None):
         """Sem tipo abre a janela Exportar; com tipo exporta direto com as opções guardadas no álbum."""
@@ -9257,7 +10652,14 @@ class Aplicativo:
 def main():
     try:
         argumentos = [a for a in sys.argv[1:] if a]
-        root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
+        root = None
+        if TkinterDnD is not None:
+            try:
+                root = TkinterDnD.Tk()
+            except Exception:
+                root = None
+        if root is None:
+            root = tk.Tk()
         Aplicativo(root, argumentos)
         root.mainloop()
     except Exception:

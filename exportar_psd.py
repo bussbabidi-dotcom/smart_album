@@ -8,7 +8,11 @@ Exportação em PSD (Photoshop) em camadas editáveis:
 - Imagem composta mesclada embutida no final do PSD (Maximize Compatibility) + resolução em DPI (0x03ED) + perfil de cor ICC (0x040F: sRGB ou Adobe RGB 1998)
 """
 
+import concurrent.futures
+import copy
+import os
 import struct
+import threading
 from pathlib import Path
 
 from PIL import Image, ImageChops
@@ -453,8 +457,11 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
     Exporta as lâminas escolhidas em arquivos .psd multicamadas na pasta `pasta_saida`.
     Grava diretamente o binário PSD em camadas (sem depender de COM/JSX do Photoshop, evitando erros ao gravar).
     """
+    projeto = copy.deepcopy(projeto or {})
+    produto = copy.deepcopy(produto or {})
+    info = copy.deepcopy(info or {})
     op = exportar.opcoes_padrao()
-    op.update(opcoes or {})
+    op.update(copy.deepcopy(opcoes or {}))
     prod_dpi = exportar.produto_com_dpi(produto, op.get("dpi"))
     dpi_escolhido = int(prod_dpi.get("dpi", 300))
     perfil_cor = op.get("perfil_cor", "sRGB")
@@ -469,25 +476,35 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
     pasta_saida.mkdir(parents=True, exist_ok=True)
 
     itens = exportar.itens_exportacao(projeto, op.get("indices"), op["padrao"], prod_dpi)
+    if not itens:
+        return []
     total_album = len(projeto.get("laminas", []))
-    gravados = []
+    total_itens = len(itens)
+    acao_cfg = op.get("acao")
+    tem_acao_ps = isinstance(acao_cfg, dict) and acao_cfg.get("conjunto") and acao_cfg.get("acao")
+    num_workers = 1 if tem_acao_ps else max(1, min(8, int(op.get("workers") or min(4, max(2, os.cpu_count() or 2)))))
 
-    for n, (nome, item) in enumerate(itens, start=1):
+    trava = threading.Lock()
+    concluidos = [0]
+    resultados_ordenados = {}
+
+    def _processar_psd_worker(n, nome, item):
         if parar and parar():
-            if aviso:
-                aviso("Parado.")
-            break
+            return None
         destino = pasta_saida / (nome + ".psd")
         if op.get("existentes") == "pular" and destino.exists():
+            with trava:
+                concluidos[0] += 1
+                atual_c = concluidos[0]
             if aviso:
                 aviso("Pulou %s (já existe)" % destino.name)
             if ao_progresso:
-                ao_progresso(n, len(itens))
-            continue
+                ao_progresso(atual_c, total_itens)
+            return None
 
         lamina = projeto["laminas"][item] if isinstance(item, int) else None
         if lamina is None:
-            continue
+            return None
 
         problemas = []
         composta = exportar._renderizar_item_exportacao(
@@ -501,6 +518,8 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
             problemas,
         )
         try:
+            if parar and parar():
+                return None
             if op.get("icc", True):
                 composta_final = exportar.converter_para_perfil(composta, perfil_cor)
             else:
@@ -535,22 +554,24 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
                 icc_bytes=icc,
             )
 
-            # Caso uma ação opcional do Photoshop tenha sido configurada
-            acao_cfg = op.get("acao")
-            if isinstance(acao_cfg, dict) and acao_cfg.get("conjunto") and acao_cfg.get("acao"):
+            if tem_acao_ps:
                 try:
                     photoshop.aplicar_acao_em_arquivo(destino, acao_cfg["conjunto"], acao_cfg["acao"])
                 except Exception as e_acao:
                     if aviso:
                         aviso("PSD gravado, mas a ação do Photoshop não pôde rodar: %s" % e_acao)
 
+            with trava:
+                concluidos[0] += 1
+                atual_c = concluidos[0]
+                resultados_ordenados[n] = destino
+
             for linha in problemas:
                 if aviso:
                     aviso(linha)
-            gravados.append(destino)
             if aviso:
                 aviso(
-                    "Gravou %s (%d camadas · %d DPI · %s%s)"
+                    "[Worker] Gravou %s (%d camadas · %d DPI · %s%s)"
                     % (
                         destino.name,
                         len(camadas_psd),
@@ -566,6 +587,20 @@ def exportar_psd(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
                 pass
 
         if ao_progresso:
-            ao_progresso(n, len(itens))
+            ao_progresso(atual_c, total_itens)
+        return destino
 
-    return gravados
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="SmartAlbumPsdWorker") as pool:
+        futuros = [
+            pool.submit(_processar_psd_worker, n, nome, item)
+            for n, (nome, item) in enumerate(itens, start=1)
+        ]
+        for fut in concurrent.futures.as_completed(futuros):
+            if parar and parar():
+                break
+            fut.result()
+
+    if parar and parar() and aviso:
+        aviso("Parado.")
+
+    return [resultados_ordenados[k] for k in sorted(resultados_ordenados.keys())]

@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-EXTENSOES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+EXTENSOES = {".jpg", ".jpeg", ".jfif", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 EXTENSOES_IMAGEM = EXTENSOES
 EXTENSOES_RAW = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".dng", ".pef", ".srw"}
 

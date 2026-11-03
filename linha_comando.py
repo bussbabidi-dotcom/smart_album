@@ -69,7 +69,7 @@ def main(argv=None):
     if a.salvar:
         print("Projeto salvo em %s" % proj.salvar(projeto, a.salvar))
 
-    saida = Path(a.saida) if a.saida else Path(projeto.get("pasta_fotos") or ".") / "saida"
+    saida = Path(a.saida) if a.saida else Path(projeto.get("pasta_fotos") or ".")
     if a.jpg or not a.psd:
         exportar.exportar_jpg(projeto, produto, info, saida)
     if a.psd:

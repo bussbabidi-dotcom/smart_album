@@ -5,10 +5,13 @@ com escolha de DPI (150/300), perfil de cor (sRGB/AdobeRGB) e marcas de registro
 para corte industrial (marcas de guilhotina, dobra central, alvos ⊕ e tira técnica).
 """
 
+import concurrent.futures
+import copy
 import io
 import os
 import re
 import struct
+import threading
 from pathlib import Path
 
 from PIL import Image, ImageCms, ImageDraw, ImageFont
@@ -45,6 +48,7 @@ def opcoes_padrao():
         "intervalo": "",
         "padrao": PADRAO_NOME,
         "existentes": "substituir",
+        "workers": min(4, max(2, (os.cpu_count() or 2))),
     }
 
 
@@ -85,9 +89,26 @@ def tamanho_produto_texto(produto):
     return "%sX%s" % (cw, ch)
 
 
-def nome_pasta_album(produto):
-    """Nome da pasta principal de exportação: 'Album <TAMANHO>' (ex.: 'Album 30X20')."""
-    return "Album %s" % tamanho_produto_texto(produto)
+def nome_pasta_album(produto, projeto=None):
+    """
+    Nome da pasta principal de exportação:
+    - Quando o álbum/projeto possui nome próprio, inclui o nome na subpasta ('Album <TAMANHO> - <Nome>')
+      para nunca misturar nem sobrescrever páginas de álbuns diferentes na mesma pasta base.
+    - Caso contrário, usa 'Album <TAMANHO>' (ex.: 'Album 30X20').
+    """
+    tam = tamanho_produto_texto(produto)
+    prefixo = "Album %s" % tam
+    nome_bruto = ""
+    if isinstance(projeto, dict):
+        nome_bruto = str(projeto.get("nome") or "").strip()
+    elif isinstance(projeto, str):
+        nome_bruto = projeto.strip()
+    nome_limpo = re.sub(CARACTERES_PROIBIDOS, "_", nome_bruto).strip().rstrip(".")
+    if nome_limpo and nome_limpo.casefold() not in ("novo álbum", "novo album", "album", "álbum", prefixo.casefold()):
+        if nome_limpo.casefold().startswith(prefixo.casefold()):
+            return nome_limpo
+        return "%s - %s" % (prefixo, nome_limpo)
+    return prefixo
 
 
 
@@ -582,50 +603,89 @@ def _renderizar_item_exportacao(projeto, prod_dpi, info, item, numero_lamina, to
 
 def exportar_jpg(projeto, produto, info, pasta_saida, aviso=print, parar=lambda: False, ao_progresso=None, opcoes=None):
     """
-    Grava os JPGs respeitando DPI (150/300), Perfil de Cor (sRGB/AdobeRGB) e Marcas de Registro.
+    Grava os JPGs respeitando DPI (150/300), Perfil de Cor (sRGB/AdobeRGB) e Marcas de Registro,
+    usando um pool de Workers em background (ThreadPoolExecutor) para manter a UI responsiva.
     Devolve a lista de arquivos gravados (vazia se parou no começo).
     """
+    projeto = copy.deepcopy(projeto or {})
+    produto = copy.deepcopy(produto or {})
+    info = copy.deepcopy(info or {})
     op = opcoes_padrao()
-    op.update(opcoes or {})
+    op.update(copy.deepcopy(opcoes or {}))
     prod_dpi = produto_com_dpi(produto, op.get("dpi"))
     perfil_cor = op.get("perfil_cor", "sRGB")
     pasta_saida = Path(pasta_saida)
     pasta_saida.mkdir(parents=True, exist_ok=True)
     itens = itens_exportacao(projeto, op.get("indices"), op["padrao"], prod_dpi)
+    if not itens:
+        return []
     total_album = len(projeto.get("laminas", []))
-    gravados = []
-    for n, (nome, item) in enumerate(itens, start=1):
-        if parar():
-            aviso("Parado.")
-            break
+    total_itens = len(itens)
+    num_workers = max(1, min(8, int(op.get("workers") or min(4, max(2, os.cpu_count() or 2)))))
+
+    trava = threading.Lock()
+    concluidos = [0]
+    resultados_ordenados = {}
+
+    def _processar_lamina_worker(idx_ordem, nome, item):
+        if parar and parar():
+            return None
         destino = pasta_saida / (nome + ".jpg")
         if op["existentes"] == "pular" and destino.exists():
-            aviso("Pulou %s (já existe)" % destino.name)
+            with trava:
+                concluidos[0] += 1
+                atual_c = concluidos[0]
+            if aviso:
+                aviso("Pulou %s (já existe)" % destino.name)
             if ao_progresso:
-                ao_progresso(n, len(itens))
-            continue
+                ao_progresso(atual_c, total_itens)
+            return None
+
         problemas = []
         img = _renderizar_item_exportacao(
             projeto, prod_dpi, info, item,
-            (item + 1) if isinstance(item, int) else n,
+            (item + 1) if isinstance(item, int) else idx_ordem,
             total_album, op, problemas,
         )
         try:
+            if parar and parar():
+                return None
             salvar_jpg(img, destino, prod_dpi, op["qualidade"], op["icc"], prod_dpi["dpi"], perfil_cor)
         finally:
             img.close()
+
+        with trava:
+            concluidos[0] += 1
+            atual_c = concluidos[0]
+            resultados_ordenados[idx_ordem] = destino
         for linha in problemas:
-            aviso(linha)
-        gravados.append(destino)
-        aviso("Gravou %s (%d DPI · %s%s)" % (
-            destino.name,
-            prod_dpi["dpi"],
-            perfil_cor,
-            " · c/ marcas de corte" if op.get("marcas_registro") else "",
-        ))
+            if aviso:
+                aviso(linha)
+        if aviso:
+            aviso("[Worker] Gravou %s (%d DPI · %s%s)" % (
+                destino.name,
+                prod_dpi["dpi"],
+                perfil_cor,
+                " · c/ marcas de corte" if op.get("marcas_registro") else "",
+            ))
         if ao_progresso:
-            ao_progresso(n, len(itens))
-    return gravados
+            ao_progresso(atual_c, total_itens)
+        return destino
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="SmartAlbumJpgWorker") as pool:
+        futuros = [
+            pool.submit(_processar_lamina_worker, n, nome, item)
+            for n, (nome, item) in enumerate(itens, start=1)
+        ]
+        for fut in concurrent.futures.as_completed(futuros):
+            if parar and parar():
+                break
+            fut.result()
+
+    if parar and parar() and aviso:
+        aviso("Parado.")
+
+    return [resultados_ordenados[k] for k in sorted(resultados_ordenados.keys())]
 
 
 def exportar_pdf(projeto, produto, info, pasta_saida, aviso=print, parar=lambda: False, ao_progresso=None, opcoes=None):
@@ -634,8 +694,11 @@ def exportar_pdf(projeto, produto, info, pasta_saida, aviso=print, parar=lambda:
     e opção de marcas de registro para corte industrial.
     Por padrão gera um arquivo PDF único multipágina ({album}.pdf); se pdf_unico=False, gera 1 PDF por lâmina.
     """
+    projeto = copy.deepcopy(projeto or {})
+    produto = copy.deepcopy(produto or {})
+    info = copy.deepcopy(info or {})
     op = opcoes_padrao()
-    op.update(opcoes or {})
+    op.update(copy.deepcopy(opcoes or {}))
     prod_dpi = produto_com_dpi(produto, op.get("dpi"))
     perfil_cor = op.get("perfil_cor", "sRGB")
     pasta_saida = Path(pasta_saida)

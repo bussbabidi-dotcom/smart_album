@@ -553,19 +553,47 @@ def analisar_fotos(caminhos, ao_progresso=None, parar=lambda: False, trabalhador
     return info, erros
 
 
-PASTAS_IGNORADAS = {"saida", "saída"}
+PASTAS_IGNORADAS = {"saida", "saída", ".git", "__pycache__"}
 
 
 def listar_imagens(pasta, subpastas=True):
-    """Imagens da pasta (e subpastas), sem entrar nas pastas de saída do álbum."""
+    """Imagens da pasta (e subpastas), sem entrar nas pastas de saída do álbum e ignorando erros de permissão."""
     pasta = Path(pasta)
     if not pasta.is_dir():
         return []
-    iterador = pasta.rglob("*") if subpastas else pasta.iterdir()
-    fotos = [
-        f for f in iterador
-        if f.is_file() and f.suffix.lower() in EXTENSOES and not f.name.startswith(".")
-        and not f.name.endswith(".parcial")
-        and not any(p.casefold() in PASTAS_IGNORADAS for p in f.relative_to(pasta).parts[:-1])
-    ]
-    return sorted(fotos, key=lambda f: [chave_natural(p) for p in f.relative_to(pasta).parts])
+    fotos = []
+    if not subpastas:
+        try:
+            for f in pasta.iterdir():
+                if (
+                    f.is_file()
+                    and f.suffix.lower() in EXTENSOES
+                    and not f.name.startswith(".")
+                    and not f.name.endswith(".parcial")
+                ):
+                    fotos.append(f)
+        except OSError:
+            pass
+    else:
+        for raiz, dirs, arqs in os.walk(str(pasta), onerror=lambda _e: None):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".")
+                and d.casefold() not in PASTAS_IGNORADAS
+                and not d.casefold().startswith("album ")
+            ]
+            pasta_raiz = Path(raiz)
+            for nome_arq in arqs:
+                if nome_arq.startswith(".") or nome_arq.endswith(".parcial"):
+                    continue
+                if Path(nome_arq).suffix.lower() in EXTENSOES:
+                    fotos.append(pasta_raiz / nome_arq)
+
+    def _chave_rel(f):
+        try:
+            return [chave_natural(p) for p in f.relative_to(pasta).parts]
+        except ValueError:
+            return [chave_natural(p) for p in f.parts]
+
+    return sorted(fotos, key=_chave_rel)
+

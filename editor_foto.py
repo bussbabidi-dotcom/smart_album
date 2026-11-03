@@ -22,7 +22,7 @@ import recorte
 import tema
 from composicao import rosto_de
 
-LADO_PREVIA_FINAL = 280
+LADO_PREVIA_FINAL = 240
 ZOOM_MAXIMO = recorte.ZOOM_MAXIMO
 
 CONTROLES_LIGHTROOM = (
@@ -47,8 +47,6 @@ class EditorFoto(tk.Toplevel):
         self.app = app
         self.title("Editar foto · Lightroom & Enquadramento")
         self.configure(bg=tema.FUNDO)
-        self.geometry("1220x820")
-        self.minsize(920, 600)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.alvo = None
         self.espaco = None
@@ -66,6 +64,15 @@ class EditorFoto(tk.Toplevel):
         self._sincronizando = False
         self._agendado = None
         self._montar()
+        tema.configurar_janela_secundaria(
+            self,
+            pai=app.root,
+            chave="editor_foto",
+            largura=1060,
+            altura=680,
+            min_largura=640,
+            min_altura=420,
+        )
         self.bind("<Left>", lambda e: self.navegar(-1))
         self.bind("<Right>", lambda e: self.navegar(1))
         self.bind("<Escape>", lambda e: self.fechar())
@@ -83,20 +90,28 @@ class EditorFoto(tk.Toplevel):
             "Arraste para enquadrar · Roda do mouse para zoom · Duplo clique nos controles para restaurar",
             icone="📷",
         )
-        corpo = ttk.Frame(self, style="Fundo.TFrame")
+        corpo = tk.PanedWindow(
+            self,
+            orient="horizontal",
+            bg=tema.BORDA,
+            sashwidth=4,
+            bd=0,
+            relief="flat",
+            opaqueresize=True,
+        )
         corpo.pack(fill="both", expand=True)
+
         self.canvas = tk.Canvas(corpo, bg=tema.FUNDO, highlightthickness=0, cursor="fleur")
-        self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._agendar_desenho())
         self.canvas.bind("<ButtonPress-1>", self._pressionou)
         self.canvas.bind("<B1-Motion>", self._moveu)
         self.canvas.bind("<ButtonRelease-1>", self._soltou)
         self.canvas.bind("<MouseWheel>", self._roda)
 
-        # Painel lateral direito com rolagem suave para caber todos os controles Lightroom / Camera Raw
-        container_lado = tk.Frame(corpo, width=356, bg=tema.PAINEL, highlightthickness=1, highlightbackground=tema.BORDA)
-        container_lado.pack(side="right", fill="y")
-        container_lado.pack_propagate(False)
+        # Painel lateral direito redimensionável com rolagem suave para caber todos os controles Lightroom / Camera Raw
+        container_lado = tk.Frame(corpo, width=360, bg=tema.PAINEL, highlightthickness=1, highlightbackground=tema.BORDA)
+        corpo.add(self.canvas, minsize=380, stretch="always")
+        corpo.add(container_lado, minsize=300, width=360, stretch="never")
 
         barra_rol = ttk.Scrollbar(container_lado, orient="vertical")
         barra_rol.pack(side="right", fill="y")
@@ -108,7 +123,13 @@ class EditorFoto(tk.Toplevel):
         lado = ttk.Frame(self.canvas_lado, padding=10)
         self._janela_lado = self.canvas_lado.create_window((0, 0), window=lado, anchor="nw")
         lado.bind("<Configure>", lambda e: self.canvas_lado.configure(scrollregion=self.canvas_lado.bbox("all")))
-        self.canvas_lado.bind("<Configure>", lambda e: self.canvas_lado.itemconfigure(self._janela_lado, width=e.width))
+
+        def _ajustar_largura_lado(evento):
+            self.canvas_lado.itemconfigure(self._janela_lado, width=evento.width)
+            if hasattr(self, "rotulo_nome"):
+                self.rotulo_nome.configure(wraplength=max(200, evento.width - 24))
+
+        self.canvas_lado.bind("<Configure>", _ajustar_largura_lado)
 
         nav = ttk.Frame(lado)
         nav.pack(fill="x", pady=(0, 6))
@@ -120,7 +141,7 @@ class EditorFoto(tk.Toplevel):
         self.rotulo_nome.pack(anchor="w")
         self.rotulo_lugar = ttk.Label(lado, text="", style="Fraco.TLabel")
         self.rotulo_lugar.pack(anchor="w", pady=(0, 4))
-        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=160, bg=tema.FUNDO,
+        self.previa = tk.Canvas(lado, width=LADO_PREVIA_FINAL, height=130, bg=tema.FUNDO,
                                 highlightthickness=1, highlightbackground=tema.BORDA)
         self.previa.pack(pady=(0, 6))
 

@@ -43,8 +43,7 @@ def configuracao(produto, projeto_cfg=None):
         "max_fotos_pagina": MAX_POR_PAGINA,
         "laminas_desejadas": produto["laminas_min"],
         "separar_pastas": True,
-        "reconhecer_cenarios": True,
-        "limiar_cenario": 0.28,
+        "respeitar_grupos_manuais": True,
         "reconhecer_rostos": True,
         "nao_cortar_pessoas": True,
         "permitir_transpasse": True,
@@ -1719,68 +1718,40 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_f
 
 
 # ------------------------------------------------------------
-# Reconhecimento de Cenário e Divisão Estrita por Pastas e Cenários
+# Divisão Estrita por Grupos Numerados (Ordem Manual) e Pastas
 # ------------------------------------------------------------
 
-def distancia_cenario(cenario_a, cenario_b):
-    """Distância de Bhattacharyya (0.0 = idêntico, 1.0 = totalmente distinto) entre duas assinaturas de cenário."""
-    if not cenario_a or not cenario_b or len(cenario_a) != len(cenario_b):
-        return 0.0
-    afinidade = sum(math.sqrt(max(0.0, float(x)) * max(0.0, float(y))) for x, y in zip(cenario_a, cenario_b))
-    return math.sqrt(max(0.0, 1.0 - min(1.0, afinidade)))
-
-
-def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
+def ordenar_e_agrupar_por_grupos(fotos):
     """
-    Agrupa fotos com o mesmo cenário visual (dentro da mesma pasta) em blocos
-    contíguos para que fiquem em páginas/lâminas seguidas sem se misturar.
-    Cada foto recebe `foto["cenario_grupo"] = 1, 2, ...`.
+    Ordena e agrupa fotos conforme os grupos numerados definidos manualmente pelo usuário
+    (`grupo_ordem` = 1, 2, 3... e `ordem_manual`), sem alterar os arquivos em disco.
+    Fotos de grupos diferentes nunca se misturam na mesma lâmina.
     """
     if not fotos:
         return []
-    limiar = max(0.10, min(0.65, float(limiar or 0.28)))
-    clusters = []  # [{"id": int, "centro": list, "fotos": list, "ultima_pos": int}]
+    enriquecidas = []
     for pos, foto in enumerate(fotos):
-        ass = foto.get("cenario") or foto.get("assinatura_cenario")
-        if not ass:
-            if clusters:
-                clusters[-1]["fotos"].append(dict(foto, cenario_grupo=clusters[-1]["id"]))
-                clusters[-1]["ultima_pos"] = pos
-            else:
-                clusters.append({"id": 1, "centro": None, "fotos": [dict(foto, cenario_grupo=1)], "ultima_pos": pos})
-            continue
+        try:
+            gid = max(1, int(foto.get("grupo_ordem") or 1))
+        except (TypeError, ValueError):
+            gid = 1
+        try:
+            ord_m = int(foto.get("ordem_manual")) if foto.get("ordem_manual") is not None else pos
+        except (TypeError, ValueError):
+            ord_m = pos
+        copia = dict(foto)
+        copia["grupo_ordem"] = gid
+        copia["cenario_grupo"] = gid
+        copia["ordem_manual"] = ord_m
+        enriquecidas.append((gid, ord_m, pos, copia))
 
-        melhor_idx = None
-        melhor_dist = 999.0
-        for idx_c, cl in enumerate(clusters):
-            if not cl["centro"]:
-                continue
-            d = distancia_cenario(ass, cl["centro"])
-            # Bônus leve de continuidade se era o cenário imediatamente anterior
-            d_efetiva = d - (0.035 if cl["ultima_pos"] == pos - 1 else 0.0)
-            if d_efetiva <= limiar and d_efetiva < melhor_dist:
-                melhor_dist = d_efetiva
-                melhor_idx = idx_c
+    enriquecidas.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in enriquecidas]
 
-        if melhor_idx is not None:
-            cl = clusters[melhor_idx]
-            k = len(cl["fotos"])
-            cl["centro"] = [(c * k + float(v)) / (k + 1.0) for c, v in zip(cl["centro"], ass)]
-            cl["fotos"].append(dict(foto, cenario_grupo=cl["id"]))
-            cl["ultima_pos"] = pos
-        else:
-            novo_id_c = len(clusters) + 1
-            clusters.append({
-                "id": novo_id_c,
-                "centro": [float(v) for v in ass],
-                "fotos": [dict(foto, cenario_grupo=novo_id_c)],
-                "ultima_pos": pos,
-            })
 
-    saida = []
-    for cl in clusters:
-        saida.extend(cl["fotos"])
-    return saida
+def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
+    """Mantido por compatibilidade: delega para a ordenação por grupos numerados manuais."""
+    return ordenar_e_agrupar_por_grupos(fotos)
 
 
 def _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=True):
@@ -1803,7 +1774,7 @@ def _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=True):
 
 
 def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
-    """Divide um único bloco homogêneo (mesma pasta e mesmo cenário) em lâminas."""
+    """Divide um único bloco homogêneo (mesmo grupo numerado / pasta) em lâminas."""
     n = len(fotos)
     if n == 0:
         return []
@@ -1866,64 +1837,91 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
 
 def _blocos_pastas_e_cenarios(fotos, cfg):
     """
-    Organiza a lista de fotos em blocos homogêneos respeitando `separar_pastas`
-    e `reconhecer_cenarios` (com sensibilidade `limiar_cenario`).
-    Devolve (blocos_finais, qtd_pastas, qtd_cenarios).
+    Organiza a lista de fotos em blocos sequenciais respeitando:
+    - Grupos numerados e ordem manual definida pelo usuário (`respeitar_grupos_manuais`, ativo por padrão):
+      Fotos do Grupo 1 vêm primeiro, depois Grupo 2, Grupo 3, etc., sem nunca misturar grupos diferentes na mesma lâmina.
+    - Divisão por pastas (`separar_pastas`), quando ativada.
+    Devolve (blocos_finais, qtd_pastas, qtd_grupos).
     """
     if not fotos:
         return [], 0, 0
 
     pastas_unicas = []
-    mapa_pastas = {}
     for f in fotos:
         ch_pasta = f.get("pasta") or f.get("nome_pasta") or ""
-        if ch_pasta not in mapa_pastas:
-            mapa_pastas[ch_pasta] = []
+        if ch_pasta not in pastas_unicas:
             pastas_unicas.append(ch_pasta)
-        mapa_pastas[ch_pasta].append(f)
 
-    if cfg.get("separar_pastas", True):
-        blocos_pasta = [mapa_pastas[ch] for ch in pastas_unicas]
+    respeitar_grupos = bool(cfg.get("respeitar_grupos_manuais", True))
+    separar_pastas = bool(cfg.get("separar_pastas", True))
+
+    tem_multiplos_grupos = len({int(f.get("grupo_ordem") or 1) for f in fotos}) > 1
+
+    if respeitar_grupos:
+        ordenadas = ordenar_e_agrupar_por_grupos(fotos)
+        grupos_map = {}
+        ordem_gids = []
+        for f in ordenadas:
+            gid = int(f.get("grupo_ordem") or 1)
+            if gid not in grupos_map:
+                grupos_map[gid] = []
+                ordem_gids.append(gid)
+            grupos_map[gid].append(f)
+
+        blocos_finais = []
+        for gid in ordem_gids:
+            fotos_g = grupos_map[gid]
+            # Se todos estão num único grupo padrão (Grupo 1) e separar_pastas está ativo, separa por pasta.
+            # Se o usuário criou múltiplos grupos numerados mas também ativou separar_pastas, sub-separa por pasta
+            # apenas se desejar, mantendo a prioridade estrita da ordem dos grupos numerados (Grupo 1 -> Grupo 2 -> ...).
+            if separar_pastas and not tem_multiplos_grupos:
+                sub_pastas = {}
+                ordem_p = []
+                for f in fotos_g:
+                    ch_p = f.get("pasta") or f.get("nome_pasta") or ""
+                    if ch_p not in sub_pastas:
+                        sub_pastas[ch_p] = []
+                        ordem_p.append(ch_p)
+                    sub_pastas[ch_p].append(f)
+                for ch_p in ordem_p:
+                    blocos_finais.append(sub_pastas[ch_p])
+            else:
+                blocos_finais.append(fotos_g)
     else:
-        blocos_pasta = [list(fotos)]
+        if separar_pastas:
+            mapa_pastas = {}
+            ordem_p = []
+            for f in fotos:
+                ch_pasta = f.get("pasta") or f.get("nome_pasta") or ""
+                if ch_pasta not in mapa_pastas:
+                    mapa_pastas[ch_pasta] = []
+                    ordem_p.append(ch_pasta)
+                mapa_pastas[ch_pasta].append(f)
+            blocos_finais = [mapa_pastas[ch] for ch in ordem_p]
+        else:
+            blocos_finais = [list(fotos)]
 
-    limiar = float(cfg.get("limiar_cenario", 0.28))
-    blocos_finais = []
-    if cfg.get("reconhecer_cenarios", True):
-        for fotos_p in blocos_pasta:
-            agrupadas = ordenar_e_agrupar_por_cenario(fotos_p, limiar=limiar)
-            sub_blocos = {}
-            ordem_cen = []
-            for f in agrupadas:
-                cid = f.get("cenario_grupo", 1)
-                if cid not in sub_blocos:
-                    sub_blocos[cid] = []
-                    ordem_cen.append(cid)
-                sub_blocos[cid].append(f)
-            for cid in ordem_cen:
-                blocos_finais.append(sub_blocos[cid])
-    else:
-        blocos_finais = blocos_pasta
-
-    return blocos_finais, max(1, len(pastas_unicas)), max(1, len(blocos_finais))
+    qtd_grupos = max(1, len({int(f.get("grupo_ordem") or 1) for f in fotos})) if respeitar_grupos else max(1, len(blocos_finais))
+    return blocos_finais, max(1, len(pastas_unicas)), max(qtd_grupos, len(blocos_finais))
 
 
 def dividir(fotos, produto, cfg):
     """
     Grupos de fotos (um por lâmina) e as fotos que não couberam.
-    - Quando `separar_pastas` está ativo, fotos de pastas diferentes nunca se misturam.
-    - Quando `reconhecer_cenarios` está ativo, agrupa fotos com o mesmo cenário visual em
-      páginas/lâminas seguidas sem nunca misturar cenários diferentes na mesma lâmina.
-    - Distribui proporcionalmente `laminas_desejadas` entre os blocos quando viável.
+    - Quando `respeitar_grupos_manuais` está ativo, respeita a sequência de grupos numerados (Grupo 1, Grupo 2...)
+      e a ordem manual das fotos dentro de cada grupo, sem nunca misturar grupos diferentes na mesma lâmina.
+    - Quando `separar_pastas` está ativo, evita misturar pastas diferentes.
+    - Distribui proporcionalmente `laminas_desejadas` entre os blocos respeitando os limites do produto.
     """
     maximo = max(1, int(cfg["max_fotos_lamina"]))
     capacidade = produto["laminas_max"] * maximo
-    sobras = list(fotos[capacidade:])
-    fotos = list(fotos[:capacidade])
-    if not fotos:
+    fotos_ordenadas = ordenar_e_agrupar_por_grupos(fotos) if cfg.get("respeitar_grupos_manuais", True) else list(fotos)
+    sobras = list(fotos_ordenadas[capacidade:])
+    fotos_validas = list(fotos_ordenadas[:capacidade])
+    if not fotos_validas:
         return [], sobras
 
-    blocos_finais, _n_pastas, _n_cenarios = _blocos_pastas_e_cenarios(fotos, cfg)
+    blocos_finais, _n_pastas, _n_grupos = _blocos_pastas_e_cenarios(fotos_validas, cfg)
     if not blocos_finais:
         return [], sobras
 
@@ -1948,7 +1946,7 @@ def dividir(fotos, produto, cfg):
         desejadas = int(cfg.get("laminas_desejadas", sum(alvos_b)))
         desejadas = max(sum(mins_b), min(produto["laminas_max"], sum(maxs_b), desejadas))
         por_lamina = max(1, int(cfg["fotos_por_lamina"]))
-        total_fotos = len(fotos)
+        total_fotos = len(fotos_validas)
         media_desejada = total_fotos / float(max(1, desejadas))
         # Permite ajustar os blocos se a média por lâmina continuar razoável (entre 1 e max_fotos_lamina)
         if 1.0 <= media_desejada <= maximo and abs(media_desejada - por_lamina) <= max(2.0, por_lamina * 0.65):
@@ -1967,7 +1965,7 @@ def dividir(fotos, produto, cfg):
                 melhor_i = min(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
                 alvos_b[melhor_i] -= 1
 
-    # 3. Divide cada bloco independente em lâminas seguidas (sem misturar blocos)
+    # 3. Divide cada bloco independente em lâminas seguidas (sem misturar grupos/blocos)
     todos_grupos = []
     for bloco, s_alvo in zip(blocos_finais, alvos_b):
         grupos_b = _dividir_bloco_unico(bloco, produto, cfg, s_alvo=s_alvo)
@@ -1989,6 +1987,7 @@ def previa_diagramacao(fotos, produto, cfg):
         return {
             "total_fotos": 0,
             "pastas": 0,
+            "grupos": 0,
             "cenarios": 0,
             "total_rostos": 0,
             "fotos_com_rostos": 0,
@@ -1998,7 +1997,7 @@ def previa_diagramacao(fotos, produto, cfg):
             "sobras": 0,
             "media_fotos_lamina": 0.0,
         }
-    _blocos, qtd_pastas, qtd_cenarios = _blocos_pastas_e_cenarios(fotos_lista, cfg)
+    _blocos, qtd_pastas, qtd_grupos = _blocos_pastas_e_cenarios(fotos_lista, cfg)
     grupos, sobras = dividir(fotos_lista, produto, cfg)
     laminas_com_fotos = len(grupos)
     desejadas = int(cfg.get("laminas_desejadas", produto.get("laminas_min", 0)))
@@ -2018,7 +2017,8 @@ def previa_diagramacao(fotos, produto, cfg):
     return {
         "total_fotos": len(fotos_lista),
         "pastas": qtd_pastas,
-        "cenarios": qtd_cenarios,
+        "grupos": qtd_grupos,
+        "cenarios": qtd_grupos,
         "total_rostos": total_rostos,
         "fotos_com_rostos": fotos_com_rostos,
         "laminas_com_fotos": laminas_com_fotos,
@@ -2031,7 +2031,7 @@ def previa_diagramacao(fotos, produto, cfg):
 
 def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
     """
-    fotos: [{"caminho", "proporcao", "data", "destaque", "cenario", "pasta"}] na ordem do álbum.
+    fotos: [{"caminho", "proporcao", "data", "destaque", "grupo_ordem", "ordem_manual", "pasta"}] na ordem do álbum.
     Devolve (lâminas, sobras).
     """
     grupos, sobras = dividir(list(fotos), produto, cfg)
@@ -2049,8 +2049,11 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         lamina["modelo"] = melhor["modelo"]
         if melhor.get("tipo_layout"):
             lamina["tipo_layout"] = melhor.get("tipo_layout")
-        if grupo and grupo[0].get("cenario_grupo"):
-            lamina["cenario_grupo"] = grupo[0].get("cenario_grupo")
+        if grupo and grupo[0].get("grupo_ordem"):
+            lamina["grupo_ordem"] = grupo[0].get("grupo_ordem")
+            lamina["cenario_grupo"] = grupo[0].get("grupo_ordem")
+        if grupo and grupo[0].get("nome_grupo"):
+            lamina["nome_grupo"] = grupo[0].get("nome_grupo")
         if grupo and grupo[0].get("nome_pasta"):
             lamina["nome_pasta"] = grupo[0].get("nome_pasta")
         if grupo and grupo[0].get("pasta"):

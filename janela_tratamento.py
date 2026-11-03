@@ -29,7 +29,7 @@ class JanelaTratamento(tk.Toplevel):
         self.title("Tratamento de Fotos · Photoshop & Lightroom Classic")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.minsize(660, 480)
+        self.minsize(500, 350)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.fotos_escolhidas = [f for f in (fotos or []) if f]
@@ -50,9 +50,15 @@ class JanelaTratamento(tk.Toplevel):
         self.conjunto.trace_add("write", lambda *a: self._listar_acoes_do_conjunto())
         self.atualizar_fotos()
         self.atualizar_lightroom()
-        self.update_idletasks()
-        x = app.root.winfo_rootx() + max(0, (app.root.winfo_width() - self.winfo_reqwidth()) // 2)
-        self.geometry("+%d+%d" % (x, app.root.winfo_rooty() + 26))
+        tema.configurar_janela_secundaria(
+            self,
+            pai=app.root,
+            chave="janela_tratamento",
+            largura=710,
+            altura=530,
+            min_largura=500,
+            min_altura=350,
+        )
 
     # ---------------- montagem ----------------
 
@@ -64,10 +70,13 @@ class JanelaTratamento(tk.Toplevel):
             icone="⚡",
         )
 
-        quadro = ttk.Frame(self, padding=12)
-        quadro.pack(fill="both", expand=True)
-        quadro.columnconfigure(0, weight=1)
-        quadro.columnconfigure(1, weight=1)
+        rodape_fixo = tk.Frame(self, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+        rodape_fixo.pack(side="bottom", fill="x")
+        self._rodape_fixo = rodape_fixo
+
+        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(self, padding=12)
+        quadro.columnconfigure(0, weight=1, uniform="col_trat")
+        quadro.columnconfigure(1, weight=1, uniform="col_trat")
 
         quais = ttk.LabelFrame(quadro, text="Escopo de Fotos Selecionadas", padding=8)
         quais.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
@@ -121,16 +130,27 @@ class JanelaTratamento(tk.Toplevel):
             side="left", fill="x", expand=True, padx=(0, 3))
         ttk.Button(linha, text="📂 Pasta do Plugin", style="Compacto.TButton", command=self.abrir_pasta_plugin).pack(
             side="left", fill="x", expand=True)
-        ttk.Label(lr, text="Instalar: no Lightroom Classic, Arquivo > Gerenciador de plug-ins > Adicionar, e escolha "
-                  "a pasta AlbumPonte.lrplugin.", style="Fraco.TLabel", wraplength=280, justify="left").pack(anchor="w", pady=(6, 0))
+        lbl_instalar_lr = ttk.Label(
+            lr,
+            text="Instalar: no Lightroom Classic, Arquivo > Gerenciador de plug-ins > Adicionar, e escolha a pasta AlbumPonte.lrplugin.",
+            style="Fraco.TLabel",
+            wraplength=280,
+            justify="left",
+        )
+        lbl_instalar_lr.pack(anchor="w", pady=(6, 0))
         self.botao_lr = ttk.Button(lr, text="▶ Tratar no Lightroom", style="PrimarioCompacto.TButton", command=self.tratar_lightroom)
         self.botao_lr.pack(fill="x", pady=(8, 0))
 
         aviso = ttk.LabelFrame(quadro, text="Confirmação de Substituição de Originais", padding=8)
         aviso.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
-        ttk.Label(aviso, text="Rodar a Ação ou o Lightroom SUBSTITUI as fotos originais pelas tratadas, no mesmo lugar e "
-                  "com o mesmo nome, sem cópia. Não dá para desfazer pelo programa.", foreground=tema.ALERTA,
-                  wraplength=600, justify="left").pack(anchor="w")
+        lbl_aviso_sub = ttk.Label(
+            aviso,
+            text="Rodar a Ação ou o Lightroom SUBSTITUI as fotos originais pelas tratadas, no mesmo lugar e com o mesmo nome, sem cópia. Não dá para desfazer pelo programa.",
+            foreground=tema.ALERTA,
+            wraplength=600,
+            justify="left",
+        )
+        lbl_aviso_sub.pack(anchor="w")
         ttk.Checkbutton(aviso, text="Entendi: autorizo substituir os arquivos originais no disco", variable=self.entendi).pack(anchor="w", pady=(4, 0))
 
         andamento = ttk.Frame(quadro)
@@ -144,12 +164,22 @@ class JanelaTratamento(tk.Toplevel):
         self.rotulo_resumo = ttk.Label(andamento, text="", wraplength=600, justify="left")
         self.rotulo_resumo.pack(anchor="w", pady=(4, 0))
 
-        botoes = ttk.Frame(quadro)
-        botoes.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        botoes = ttk.Frame(self._rodape_fixo)
+        botoes.pack(fill="x")
         self.botao_parar = ttk.Button(botoes, text="Parar", style="Compacto.TButton", command=self.app.parar_tarefa,
                                       state="disabled")
         self.botao_parar.pack(side="left")
-        ttk.Button(botoes, text="Fechar", style="Compacto.TButton", command=self.fechar).pack(side="right")
+        ttk.Button(botoes, text="Fechar", style="Compacto.TButton", command=self.fechar).pack(side="right", padx=(0, 10))
+
+        def _ajustar_wraps_tratamento(evento):
+            larg_total = max(460, int(evento.width) - 48)
+            larg_col = max(210, larg_total // 2 - 24)
+            self.rotulo_lr.configure(wraplength=larg_col)
+            lbl_instalar_lr.configure(wraplength=larg_col)
+            lbl_aviso_sub.configure(wraplength=larg_total)
+            self.rotulo_resumo.configure(wraplength=larg_total)
+
+        quadro.bind("<Configure>", _ajustar_wraps_tratamento, add="+")
 
     # ---------------- fotos ----------------
 

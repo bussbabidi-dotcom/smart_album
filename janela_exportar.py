@@ -72,11 +72,11 @@ def _limpar_pasta_saida_legada(caminho_str, projeto=None):
 
 def pasta_final(opcoes, projeto=None, produto=None):
     """
-    Pasta raiz do álbum exportado: '<pasta_base>/Album <TAMANHO>' (ex.: 'Album 30X20').
-    Se a pasta escolhida já terminar com 'Album <TAMANHO>', não duplica.
+    Pasta raiz do álbum exportado: '<pasta_base>/Album <TAMANHO> - <Nome>' (ex.: 'Album 30X20 - Casamento').
+    Se a pasta escolhida já terminar com esse nome, não duplica.
     """
     base = Path(_limpar_pasta_saida_legada((opcoes or {}).get("pasta"), projeto))
-    nome_album = exportar.nome_pasta_album(produto)
+    nome_album = exportar.nome_pasta_album(produto, projeto)
     if base.name.casefold() == nome_album.casefold():
         return base
     return base / nome_album
@@ -151,13 +151,14 @@ class JanelaExportar(tk.Toplevel):
         self.title("Exportar Álbum · Photoshop CC (JPG · PSD · PDF)")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.minsize(680, 520)
+        self.minsize(520, 360)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.gravados = []
         self.rodando = False
         self.problemas = []
         self._agendado = None
+        self.ultima_pasta_exportada = None
 
         op = app.opcoes_exportacao()
         ativos = exportar.formatos_ativos(op)
@@ -181,15 +182,21 @@ class JanelaExportar(tk.Toplevel):
             "intervalo": tk.StringVar(value=op.get("intervalo", "")),
             "padrao": tk.StringVar(value=op.get("padrao", exportar.PADRAO_NOME)),
             "existentes": tk.StringVar(value=op.get("existentes", "substituir")),
+            "workers": tk.IntVar(value=int(op.get("workers", min(4, max(2, os.cpu_count() or 2))))),
         }
         self._montar()
         for var in self.vars.values():
             var.trace_add("write", lambda *a: self._agendar())
         self.atualizar()
-        self.update_idletasks()
-        x = app.root.winfo_rootx() + max(0, (app.root.winfo_width() - self.winfo_reqwidth()) // 2)
-        y = max(20, app.root.winfo_rooty() + 24)
-        self.geometry("+%d+%d" % (x, y))
+        tema.configurar_janela_secundaria(
+            self,
+            pai=app.root,
+            chave="janela_exportar",
+            largura=750,
+            altura=580,
+            min_largura=520,
+            min_altura=360,
+        )
 
     def _montar(self):
         tema.criar_cabecalho_janela(
@@ -199,10 +206,13 @@ class JanelaExportar(tk.Toplevel):
             icone="⇪",
         )
 
-        quadro = ttk.Frame(self, padding=12)
-        quadro.pack(fill="both", expand=True)
-        quadro.columnconfigure(0, weight=1)
-        quadro.columnconfigure(1, weight=1)
+        # Rodapé de botões fixo na base para estar sempre visível ao redimensionar
+        rodape_fixo = tk.Frame(self, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+        rodape_fixo.pack(side="bottom", fill="x")
+
+        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(self, padding=12)
+        quadro.columnconfigure(0, weight=1, uniform="col_exp")
+        quadro.columnconfigure(1, weight=1, uniform="col_exp")
 
         # --- Coluna 1: Formatos (Escolha Múltipla: JPG, PSD, PDF) e Impressão ---
         formato = ttk.LabelFrame(quadro, text="Formatos de Saída (Escolha Múltipla)", padding=10)
@@ -247,12 +257,23 @@ class JanelaExportar(tk.Toplevel):
         )
         ttk.Radiobutton(linha_cor, text="sRGB", value="sRGB", variable=self.vars["perfil_cor"]).pack(side="right")
 
-        # Qualidade do JPG
+        # Qualidade do JPG e Workers em Background
         linha_qual = ttk.Frame(formato)
         linha_qual.pack(fill="x", pady=(4, 0))
         ttk.Label(linha_qual, text="Qualidade do JPG:").pack(side="left")
         ttk.Spinbox(linha_qual, from_=60, to=100, increment=1, width=5, textvariable=self.vars["qualidade"]).pack(
             side="right"
+        )
+
+        linha_wrk = ttk.Frame(formato)
+        linha_wrk.pack(fill="x", pady=(4, 0))
+        ttk.Label(linha_wrk, text="Workers (Threads em Background):").pack(side="left")
+        sp_wrk = ttk.Spinbox(linha_wrk, from_=1, to=8, increment=1, width=5, textvariable=self.vars["workers"])
+        sp_wrk.pack(side="right")
+        tema.dica(
+            sp_wrk,
+            "Quantidade de threads paralelas na Fila de Processamento (Worker Pool)\n"
+            "para exportar arquivos PSD/JPG em segundo plano mantendo a UI 100% livre.",
         )
 
         # Opções de ICC, Marca de Registro Industrial e PDF Único
@@ -374,22 +395,34 @@ class JanelaExportar(tk.Toplevel):
         )
         self.registro.pack(fill="both", expand=True, pady=(4, 0))
 
-        # --- Linha 4: Rodapé de botões ---
-        botoes = ttk.Frame(quadro)
-        botoes.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        # --- Linha 4: Rodapé de botões (fixo na base da janela) ---
+        botoes = ttk.Frame(rodape_fixo)
+        botoes.pack(fill="x")
         self.botao_exportar = ttk.Button(
-            botoes, text="⇪ Exportar Álbum", style="Primario.TButton", command=self.exportar
+            botoes, text="⚡ Enfileirar Exportação (Background)", style="Primario.TButton", command=self.exportar
         )
         self.botao_exportar.pack(side="left")
         self.botao_parar = ttk.Button(
-            botoes, text="Parar", style="Compacto.TButton", command=self.app.parar_tarefa, state="disabled"
+            botoes, text="Parar Fila", style="Compacto.TButton", command=self.app.parar_fila_exportacao, state="disabled"
         )
         self.botao_parar.pack(side="left", padx=6)
-        ttk.Button(botoes, text="Fechar", style="Compacto.TButton", command=self.fechar).pack(side="right")
+        self.rotulo_fila_status = ttk.Label(botoes, text="Fila livre", style="Fraco.TLabel")
+        self.rotulo_fila_status.pack(side="left", padx=(6, 0))
+        ttk.Button(botoes, text="Minimizar / Fechar", style="Compacto.TButton", command=self.fechar).pack(side="right", padx=(0, 10))
         self.botao_abrir = ttk.Button(
             botoes, text="📂 Abrir Pasta do Álbum", style="Compacto.TButton", command=self.abrir_pasta
         )
         self.botao_abrir.pack(side="right", padx=6)
+
+        def _ajustar_wraps_exportar(evento):
+            larg_total = max(480, int(evento.width) - 48)
+            larg_col = max(220, larg_total // 2 - 24)
+            self.rotulo_especificacoes.configure(wraplength=larg_col)
+            self.rotulo_exemplo.configure(wraplength=larg_col)
+            self.rotulo_destino.configure(wraplength=larg_total)
+            self.rotulo_conferencia.configure(wraplength=larg_total)
+
+        quadro.bind("<Configure>", _ajustar_wraps_exportar, add="+")
 
     # ---------------- leitura das escolhas ----------------
 
@@ -422,6 +455,10 @@ class JanelaExportar(tk.Toplevel):
             op["perfil_cor"] = "sRGB"
         op["marcas_registro"] = bool(op.get("marcas_registro"))
         op["pdf_unico"] = bool(op.get("pdf_unico", True))
+        try:
+            op["workers"] = max(1, min(8, int(op.get("workers", 2))))
+        except (tk.TclError, ValueError):
+            op["workers"] = min(4, max(2, os.cpu_count() or 2))
         op["pasta"] = _limpar_pasta_saida_legada(op.get("pasta"), self.app.projeto)
         op["subpasta"] = True
         return op
@@ -477,7 +514,7 @@ class JanelaExportar(tk.Toplevel):
                 )
             )
 
-        nome_pasta_alb = exportar.nome_pasta_album(produto)
+        nome_pasta_alb = exportar.nome_pasta_album(produto, projeto)
         partes_est = ["📂 %s/" % SUBPASTAS_FORMATO[f] for f in ativos]
         if ativos:
             partes_est.append("📄 %s" % exportar.nome_json_projeto(projeto, produto))
@@ -534,8 +571,18 @@ class JanelaExportar(tk.Toplevel):
             foreground=tema.ERRO if problemas else (tema.ALERTA if avisos else tema.VERDE),
         )
         self.problemas = problemas
-        if not self.rodando:
-            self.botao_exportar.configure(state="disabled" if problemas else "normal")
+        self.botao_exportar.configure(state="disabled" if problemas else "normal")
+        qtd_fila = len(getattr(self.app, "fila_jobs_exportacao", []))
+        rodando_bg = bool(getattr(self.app, "exportacao_worker_ativo", False))
+        if rodando_bg or qtd_fila > 0:
+            self.botao_parar.configure(state="normal")
+            self.rotulo_fila_status.configure(
+                text="⚡ %d job(s) na fila de background" % (qtd_fila + (1 if rodando_bg else 0)),
+                foreground=tema.DESTAQUE,
+            )
+        else:
+            self.botao_parar.configure(state="disabled")
+            self.rotulo_fila_status.configure(text="Fila livre (UI 100% responsiva)", foreground=tema.TEXTO_FRACO)
 
     def _escolheu_existentes(self, _evento=None):
         texto = self.combo_existentes.get()
@@ -569,19 +616,21 @@ class JanelaExportar(tk.Toplevel):
         if not fotos and not recentes:
             menu.add_command(label="(sem pastas recentes)", state="disabled")
 
-    # ---------------- exportação ----------------
+    # ---------------- exportação (Worker Queue em Background) ----------------
 
     def exportar(self):
         self.atualizar()
         if self.problemas:
             return
-        self._limpar_registro()
-        self.gravados = []
-        if self.app.executar_exportacao(self.opcoes(), janela=self):
+        if not self.rodando:
+            self._limpar_registro()
+            self.gravados = []
+        op_atual = self.opcoes()
+        self.ultima_pasta_exportada = pasta_final(op_atual, self.app.projeto, self.app.produto)
+        if self.app.executar_exportacao(op_atual, janela=self):
             self.rodando = True
-            self.botao_exportar.configure(state="disabled")
             self.botao_parar.configure(state="normal")
-            self.barra.configure(value=0, maximum=1)
+            self.atualizar()
 
     def aviso(self, texto):
         self.registro.configure(state="normal")
@@ -591,11 +640,13 @@ class JanelaExportar(tk.Toplevel):
 
     def progresso(self, n, total):
         self.barra.configure(maximum=max(1, total), value=n)
+        self.atualizar()
 
-    def terminou(self, gravados, erro):
-        self.rodando = False
-        self.botao_parar.configure(state="disabled")
+    def terminou(self, gravados, erro, pasta_exportada=None):
+        self.rodando = bool(getattr(self.app, "exportacao_worker_ativo", False))
         self.gravados = list(gravados or [])
+        if pasta_exportada is not None:
+            self.ultima_pasta_exportada = Path(pasta_exportada)
         if erro:
             self.aviso("ERRO: %s" % erro)
         self.aviso("Concluído: %s arquivo(s) gravado(s)." % len(self.gravados))
@@ -608,12 +659,14 @@ class JanelaExportar(tk.Toplevel):
 
     def abrir_pasta(self):
         op = self.opcoes()
-        if not op["pasta"]:
+        destino = self.ultima_pasta_exportada or (
+            pasta_final(op, self.app.projeto, self.app.produto) if op.get("pasta") else None
+        )
+        if destino is None:
             return
-        destino = pasta_final(op, self.app.projeto, self.app.produto)
         if destino.is_dir():
             os.startfile(str(destino))
-        elif Path(op["pasta"]).is_dir():
+        elif op.get("pasta") and Path(op["pasta"]).is_dir():
             os.startfile(str(Path(op["pasta"])))
         else:
             self.aviso("A pasta ainda não existe: %s" % destino)

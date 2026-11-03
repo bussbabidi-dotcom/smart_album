@@ -67,6 +67,14 @@ def adicionar_fotos(projeto, caminhos, pasta_origem=None):
     """Acrescenta no fim, mantendo a divisão por pasta e sem repetir. Devolve as que entraram."""
     existentes = {normalizar_caminho(f["caminho"]) for f in projeto["fotos"]}
     novas = []
+    # Se já existirem grupos numerados, novas fotos entram no último grupo ou no Grupo 1
+    ultimo_grupo = 1
+    ultimo_nome_grupo = "Grupo 1"
+    for f in projeto.get("fotos", []):
+        g = int(f.get("grupo_ordem") or 1)
+        if g >= ultimo_grupo:
+            ultimo_grupo = g
+            ultimo_nome_grupo = f.get("nome_grupo") or ("Grupo %d" % g)
     for caminho in caminhos:
         chave = normalizar_caminho(caminho)
         if chave in existentes:
@@ -77,9 +85,86 @@ def adicionar_fotos(projeto, caminhos, pasta_origem=None):
             "caminho": str(Path(caminho)),
             "destaque": False,
             "pasta": p_foto,
+            "grupo_ordem": ultimo_grupo,
+            "nome_grupo": ultimo_nome_grupo,
+            "ordem_manual": len(projeto["fotos"]) + 1,
         })
         novas.append(str(Path(caminho)))
     return novas
+
+
+def listar_grupos_ordem(projeto):
+    """
+    Devolve a lista ordenada de grupos numerados do projeto:
+    [{"id": 1, "nome": "Grupo 1", "fotos": [dict_foto, ...]}, ...]
+    Sem alterar nenhum arquivo no disco.
+    """
+    fotos = projeto.get("fotos", [])
+    if not fotos:
+        return []
+    grupos_map = {}
+    ordem_ids = []
+    for idx, f in enumerate(fotos):
+        try:
+            gid = max(1, int(f.get("grupo_ordem") or 1))
+        except (TypeError, ValueError):
+            gid = 1
+        if gid not in grupos_map:
+            nome_g = f.get("nome_grupo") or ("Grupo %d" % gid)
+            grupos_map[gid] = {"id": gid, "nome": nome_g, "fotos": []}
+            ordem_ids.append(gid)
+        grupos_map[gid]["fotos"].append((int(f.get("ordem_manual") or (idx + 1)), idx, f))
+
+    ordem_ids.sort()
+    saida = []
+    for novo_num, gid in enumerate(ordem_ids, start=1):
+        g = grupos_map[gid]
+        g["fotos"].sort(key=lambda it: (it[0], it[1]))
+        fotos_ordenadas = [it[2] for it in g["fotos"]]
+        nome_atual = g["nome"]
+        if not nome_atual or nome_atual.startswith("Grupo "):
+            nome_atual = "Grupo %d" % novo_num
+        saida.append({
+            "id": novo_num,
+            "nome": nome_atual,
+            "fotos": fotos_ordenadas,
+        })
+    return saida
+
+
+def aplicar_grupos_ordem(projeto, grupos_lista):
+    """
+    Atualiza `grupo_ordem`, `nome_grupo`, `ordem_manual` e a ordem da lista `projeto["fotos"]`
+    conforme os grupos numerados definidos na janela de Ordem e Grupos, sem alterar arquivos no PC.
+    """
+    nova_lista = []
+    seq = 1
+    vistos = set()
+    for num_g, g in enumerate(grupos_lista, start=1):
+        nome_g = (g.get("nome") or ("Grupo %d" % num_g)).strip() or ("Grupo %d" % num_g)
+        for f in g.get("fotos", []):
+            ch = normalizar_caminho(f["caminho"])
+            if ch in vistos:
+                continue
+            vistos.add(ch)
+            f["grupo_ordem"] = num_g
+            f["cenario_grupo"] = num_g
+            f["nome_grupo"] = nome_g
+            f["ordem_manual"] = seq
+            seq += 1
+            nova_lista.append(f)
+
+    # Preserva eventuais fotos que não estavam na lista
+    for f in projeto.get("fotos", []):
+        ch = normalizar_caminho(f["caminho"])
+        if ch not in vistos:
+            vistos.add(ch)
+            f["grupo_ordem"] = max(1, len(grupos_lista))
+            f["ordem_manual"] = seq
+            seq += 1
+            nova_lista.append(f)
+
+    projeto["fotos"] = nova_lista
 
 
 def remover_fotos(projeto, caminhos):
@@ -206,55 +291,38 @@ def registro_foto(projeto, caminho):
 
 
 def ordenar_fotos(projeto, info, por="nome"):
-    """Ordena as fotos dentro de cada pasta sem misturar pastas diferentes."""
+    """Ordena as fotos respeitando os grupos numerados e/ou pastas sem alterar arquivos em disco."""
     from comum import chave_natural
-    import diagramar
 
     pastas_ordem = {chave: idx for idx, (chave, _p, _n, _q) in enumerate(listar_pastas_projeto(projeto))}
 
-    if por == "cenario":
-        # Agrupa por pasta e dentro de cada pasta agrupa fotos do mesmo cenário juntas
-        por_pasta = {}
-        for f in projeto["fotos"]:
-            ch_p = normalizar_caminho(pasta_da_foto(f))
-            por_pasta.setdefault(ch_p, []).append(f)
-        nova_lista = []
-        for ch_p in sorted(por_pasta.keys(), key=lambda c: pastas_ordem.get(c, 9999)):
-            grupo_f = por_pasta[ch_p]
-            enriquecidas = []
-            for f in grupo_f:
-                dados = info.get(normalizar_caminho(f["caminho"])) or {}
-                enriquecidas.append({
-                    "ref": f,
-                    "caminho": f["caminho"],
-                    "data": dados.get("data") or 0,
-                    "cenario": dados.get("cenario"),
-                })
-            ordenadas_cen = diagramar.ordenar_e_agrupar_por_cenario(enriquecidas)
-            for item in ordenadas_cen:
-                item["ref"]["cenario_grupo"] = item.get("cenario_grupo", 1)
-                nova_lista.append(item["ref"])
-        projeto["fotos"] = nova_lista
+    if por in ("grupos", "ordem", "cenario"):
+        grupos = listar_grupos_ordem(projeto)
+        aplicar_grupos_ordem(projeto, grupos)
         return
 
     if por == "data":
         def chave(f):
+            gid = int(f.get("grupo_ordem") or 1)
             ch_p = normalizar_caminho(pasta_da_foto(f))
             dados = info.get(normalizar_caminho(f["caminho"])) or {}
-            return (pastas_ordem.get(ch_p, 9999), dados.get("data") or 0, chave_natural(f["caminho"]))
+            return (gid, pastas_ordem.get(ch_p, 9999), dados.get("data") or 0, chave_natural(f["caminho"]))
     else:
         def chave(f):
+            gid = int(f.get("grupo_ordem") or 1)
             ch_p = normalizar_caminho(pasta_da_foto(f))
-            return (pastas_ordem.get(ch_p, 9999), [chave_natural(p) for p in Path(f["caminho"]).parts])
+            return (gid, pastas_ordem.get(ch_p, 9999), [chave_natural(p) for p in Path(f["caminho"]).parts])
     projeto["fotos"].sort(key=chave)
+    for idx, f in enumerate(projeto["fotos"], start=1):
+        f["ordem_manual"] = idx
 
 
 def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=None):
-    """Fotos analisadas, na ordem do projeto, com pasta, cenário e rosto para o diagramar."""
+    """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, pasta e rosto para o diagramar."""
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
     chave_pasta_alvo = normalizar_caminho(pasta_alvo) if pasta_alvo else None
     saida = []
-    for foto in projeto["fotos"]:
+    for idx, foto in enumerate(projeto["fotos"], start=1):
         chave = normalizar_caminho(foto["caminho"])
         dados = info.get(chave)
         if not dados or ja_usadas.get(chave):
@@ -262,12 +330,16 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
         ch_pasta = normalizar_caminho(pasta_da_foto(foto))
         if chave_pasta_alvo and not pertence_a_pasta(ch_pasta, chave_pasta_alvo):
             continue
+        gid = max(1, int(foto.get("grupo_ordem") or 1))
+        ord_m = int(foto.get("ordem_manual") or idx)
         saida.append({
             "caminho": foto["caminho"],
             "proporcao": dados_proporcao(dados),
             "data": dados.get("data"),
             "destaque": bool(foto.get("destaque")),
-            "cenario": dados.get("cenario"),
+            "grupo_ordem": gid,
+            "nome_grupo": foto.get("nome_grupo") or ("Grupo %d" % gid),
+            "ordem_manual": ord_m,
             "rosto": dados.get("rosto"),
             "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),

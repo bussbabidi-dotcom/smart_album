@@ -239,7 +239,6 @@ class EditorFundo(tk.Toplevel):
         self.title("Propriedades do Fundo · Photoshop CC")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.bind("<Control-z>", lambda e: self.app.desfazer())
@@ -253,8 +252,11 @@ class EditorFundo(tk.Toplevel):
             icone="◐",
         )
 
-        quadro = ttk.Frame(self, padding=12)
-        quadro.pack(fill="both", expand=True)
+        # Rodapé fixo na base para estar sempre acessível mesmo em janelas redimensionadas menores
+        rodape_fixo = tk.Frame(self, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+        rodape_fixo.pack(side="bottom", fill="x")
+
+        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(self, padding=12)
 
         self.vars = {}
         self.rotulos = {}
@@ -368,9 +370,9 @@ class EditorFundo(tk.Toplevel):
 
         self._escala(tingir, "tingir_forca", "Intensidade", 0, 100)
 
-        # Rodapé de ações (Zerar, Aplicar nas selecionadas, Aplicar em todas, OK)
-        botoes = ttk.Frame(quadro)
-        botoes.pack(fill="x", pady=(6, 0))
+        # Rodapé de ações fixo (Zerar, Aplicar nas selecionadas, Aplicar em todas, OK)
+        botoes = ttk.Frame(rodape_fixo)
+        botoes.pack(fill="x")
 
         bt_zerar = ttk.Button(botoes, text="↺ Zerar", style="Compacto.TButton", command=self.zerar)
         bt_zerar.pack(side="left", padx=(0, 4))
@@ -393,17 +395,29 @@ class EditorFundo(tk.Toplevel):
         bt_todas.pack(side="left", padx=(0, 4))
         self._controles.append(bt_todas)
 
-        ttk.Button(botoes, text="OK", style="PrimarioCompacto.TButton", command=self.fechar).pack(side="right")
+        ttk.Button(botoes, text="OK", style="PrimarioCompacto.TButton", command=self.fechar).pack(side="right", padx=(0, 10))
 
         self.mostrar()
-        self.update_idletasks()
+        tema.configurar_janela_secundaria(
+            self,
+            pai=app.root,
+            chave="editor_fundo",
+            largura=460,
+            altura=520,
+            min_largura=370,
+            min_altura=310,
+            centralizar=False,
+        )
         lateral = getattr(app, "quadro_lateral", None)
         if lateral is not None and lateral.winfo_ismapped() and lateral.winfo_rootx() > app.canvas.winfo_rootx():
-            x = lateral.winfo_rootx() + lateral.winfo_width() - self.winfo_reqwidth()
-            y = lateral.winfo_rooty() + 30
+            x = lateral.winfo_rootx() + lateral.winfo_width() - self.winfo_width()
+            y = lateral.winfo_rooty() + 24
         else:
             x, y = app.canvas.winfo_rootx() + 20, app.canvas.winfo_rooty() + 20
-        self.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        wx, wy, ww, wh = tema.area_util_tela(self)
+        x = max(wx + 8, min(x, wx + ww - self.winfo_width() - 12))
+        y = max(wy + 8, min(y, wy + wh - self.winfo_height() - 36))
+        self.geometry("+%d+%d" % (x, y))
 
     def _escala(self, pai, chave, texto, de, ate):
         linha = ttk.Frame(pai)

@@ -67,7 +67,7 @@ def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
         guardada = _CACHE_MASCARAS_DEG.get(chave_m)
         if guardada is not None:
             _CACHE_MASCARAS_DEG.move_to_end(chave_m)
-            return guardada
+            return guardada.copy()
 
     inicio = ini_int / 100.0
     fim = fim_int / 100.0
@@ -124,7 +124,7 @@ def gerar_mascara_degrade(tamanho, degrade=None, opacidade_geral=100):
         _CACHE_MASCARAS_DEG[chave_m] = res
         while len(_CACHE_MASCARAS_DEG) > 120:
             _CACHE_MASCARAS_DEG.popitem(last=False)
-    return res
+    return res.copy()
 
 
 def rosto_de(info, caminho):
@@ -345,7 +345,7 @@ def _mascara_fusao_horizontal(W, H, fusao):
         guardada = _CACHE_MASCARAS_FUSAO.get(chave_f)
         if guardada is not None:
             _CACHE_MASCARAS_FUSAO.move_to_end(chave_f)
-            return guardada
+            return guardada.copy()
     meio = W / 2.0
     zona = (fusao_int / 100.0) * (W * 0.36)
     linha = Image.new("L", (W, 1))
@@ -371,7 +371,7 @@ def _mascara_fusao_horizontal(W, H, fusao):
         _CACHE_MASCARAS_FUSAO[chave_f] = res
         while len(_CACHE_MASCARAS_FUSAO) > 40:
             _CACHE_MASCARAS_FUSAO.popitem(last=False)
-    return res
+    return res.copy()
 
 
 def _renderizar_lado_em_lamina(cor_base, fundo_img_lamina, cor_lado, fundo_img_lado, tamanho, lado, fusao, rapido=False):
