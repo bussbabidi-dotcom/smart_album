@@ -2183,34 +2183,37 @@ def dividir(fotos, produto, cfg):
     if not blocos_finais:
         return [], sobras
 
+    por_lamina = max(1, int(cfg["fotos_por_lamina"]))
+    laminas_naturais_totais = max(1, int(math.ceil(len(fotos_validas) / float(por_lamina))))
+    laminas_max_prod = max(1, int(produto["laminas_max"]))
+
     # Se a subdivisão por cenários dentro de um mesmo grupo gerou mais sub-blocos do que
-    # a quantidade de lâminas desejada pelo usuário, mescla sub-blocos de cenário adjacentes
-    # APENAS dentro do mesmo grupo numerado (nunca mistura grupos numerados diferentes!)
-    if "laminas_desejadas" in cfg or produto.get("laminas_min", 0) > 0:
-        desejadas_lim = max(
-            int(produto.get("laminas_min", 1)),
-            min(int(produto["laminas_max"]), int(cfg.get("laminas_desejadas", len(blocos_finais)))),
-        )
-        while len(blocos_finais) > desejadas_lim:
-            # Procura dois sub-blocos adjacentes do MESMO grupo numerado e mesma pasta com menor soma de fotos
-            melhor_par = -1
-            menor_tam = 999999
-            for idx_b in range(len(blocos_finais) - 1):
-                b1 = blocos_finais[idx_b]
-                b2 = blocos_finais[idx_b + 1]
-                g1 = int(b1[0].get("grupo_ordem") or 1) if b1 else 1
-                g2 = int(b2[0].get("grupo_ordem") or 1) if b2 else 1
-                p1 = (b1[0].get("pasta") or "") if b1 else ""
-                p2 = (b2[0].get("pasta") or "") if b2 else ""
-                if g1 == g2 and (not cfg.get("separar_pastas", True) or p1 == p2):
-                    soma_t = len(b1) + len(b2)
-                    if soma_t < menor_tam:
-                        menor_tam = soma_t
-                        melhor_par = idx_b
-            if melhor_par == -1:
-                break
-            blocos_finais[melhor_par] = blocos_finais[melhor_par] + blocos_finais[melhor_par + 1]
-            blocos_finais.pop(melhor_par + 1)
+    # a quantidade natural/desejada de lâminas (ou que o máximo do produto), mescla sub-blocos
+    # de cenário adjacentes APENAS dentro do mesmo grupo numerado (nunca mistura grupos diferentes!)
+    desejadas_cfg = int(cfg.get("laminas_desejadas", laminas_naturais_totais))
+    desejadas_lim = max(
+        int(produto.get("laminas_min", 1)),
+        min(laminas_max_prod, max(desejadas_cfg, laminas_naturais_totais)),
+    )
+    while len(blocos_finais) > desejadas_lim:
+        melhor_par = -1
+        menor_tam = 999999
+        for idx_b in range(len(blocos_finais) - 1):
+            b1 = blocos_finais[idx_b]
+            b2 = blocos_finais[idx_b + 1]
+            g1 = int(b1[0].get("grupo_ordem") or 1) if b1 else 1
+            g2 = int(b2[0].get("grupo_ordem") or 1) if b2 else 1
+            p1 = (b1[0].get("pasta") or "") if b1 else ""
+            p2 = (b2[0].get("pasta") or "") if b2 else ""
+            if g1 == g2 and (not cfg.get("separar_pastas", True) or p1 == p2):
+                soma_t = len(b1) + len(b2)
+                if soma_t < menor_tam:
+                    menor_tam = soma_t
+                    melhor_par = idx_b
+        if melhor_par == -1:
+            break
+        blocos_finais[melhor_par] = blocos_finais[melhor_par] + blocos_finais[melhor_par + 1]
+        blocos_finais.pop(melhor_par + 1)
 
     # Calcula quantidades mínimas, máximas e naturais de lâminas para cada bloco
     mins_b = []
@@ -2227,25 +2230,31 @@ def dividir(fotos, produto, cfg):
         maxs_b.append(s_max)
         alvos_b.append(s_nat)
 
+    # Garante que a soma de alvos_b nunca ultrapasse laminas_max_prod enquanto houver margem nos blocos,
+    # evitando descartar fotos em `sobras` apenas porque muitos sub-blocos de cenário foram criados
+    while sum(alvos_b) > laminas_max_prod:
+        candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] > mins_b[i]]
+        if not candidatos:
+            break
+        melhor_i = min(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
+        alvos_b[melhor_i] -= 1
+
     # Se o usuário definiu laminas_desejadas compatível com a capacidade dos blocos,
     # ajusta proporcionalmente os alvos por bloco para aproximar do total desejado
     if produto.get("laminas_min", 0) > 0 or "laminas_desejadas" in cfg:
         desejadas = int(cfg.get("laminas_desejadas", sum(alvos_b)))
-        desejadas = max(sum(mins_b), min(produto["laminas_max"], sum(maxs_b), desejadas))
-        por_lamina = max(1, int(cfg["fotos_por_lamina"]))
+        desejadas = max(sum(mins_b), min(laminas_max_prod, sum(maxs_b), desejadas))
         total_fotos = len(fotos_validas)
         media_desejada = total_fotos / float(max(1, desejadas))
         # Permite ajustar os blocos se a média por lâmina continuar razoável (entre 1 e max_fotos_lamina)
         if 1.0 <= media_desejada <= maximo and abs(media_desejada - por_lamina) <= max(2.0, por_lamina * 0.65):
             while sum(alvos_b) < desejadas:
-                # Escolhe o bloco com maior densidade de fotos por lâmina para ganhar +1 lâmina
                 candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] < maxs_b[i]]
                 if not candidatos:
                     break
                 melhor_i = max(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
                 alvos_b[melhor_i] += 1
             while sum(alvos_b) > desejadas:
-                # Escolhe o bloco com menor densidade de fotos por lâmina para reduzir -1 lâmina
                 candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] > mins_b[i]]
                 if not candidatos:
                     break
@@ -2257,7 +2266,7 @@ def dividir(fotos, produto, cfg):
     for bloco, s_alvo in zip(blocos_finais, alvos_b):
         grupos_b = _dividir_bloco_unico(bloco, produto, cfg, s_alvo=s_alvo)
         for g in grupos_b:
-            if len(todos_grupos) < produto["laminas_max"]:
+            if len(todos_grupos) < laminas_max_prod:
                 todos_grupos.append(g)
             else:
                 sobras.extend(g)

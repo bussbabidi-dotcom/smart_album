@@ -580,7 +580,6 @@ def listar_imagens(pasta, subpastas=True):
                 d for d in dirs
                 if not d.startswith(".")
                 and d.casefold() not in PASTAS_IGNORADAS
-                and not d.casefold().startswith("album ")
             ]
             pasta_raiz = Path(raiz)
             for nome_arq in arqs:

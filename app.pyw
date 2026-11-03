@@ -2716,59 +2716,51 @@ class Aplicativo:
             if messagebox.askyesno("Produto", "Diagramar o álbum de novo para o tamanho %s?" % nome, parent=self.root):
                 self.diagramar_tudo(False)
 
-    def _executar_limpeza_programada_temp_drive(self, limite_mb=250):
+    def _executar_limpeza_programada_temp_drive(self, limite_mb=4096):
         """
-        Limpeza programada periódica: monitora o uso de memória/disco das pastas temporárias
-        do Google Drive na sessão atual e remove fotos/pastas temporárias não utilizadas
-        nas lâminas caso o limite (padrão 250 MB) seja atingido.
+        Limpeza programada periódica: remove do disco apenas arquivos temporários órfãos
+        que JÁ FORAM REMOVIDOS do projeto pelo usuário (nunca apaga fotos presentes em
+        `self.projeto["fotos"]`, nas lâminas ou em outras abas abertas).
+        As pastas temporárias em uso pelo projeto ativo são apagadas somente ao fechar o
+        programa ou ao iniciar/abrir outro projeto.
         """
         try:
             pastas = [p for p in list(getattr(self, "_pastas_temp_drive", [])) if p and Path(p).exists()]
-            if pastas:
-                usadas = {
-                    normalizar_caminho(e["foto"])
-                    for e in proj.todos_espacos(self.projeto)
-                    if e.get("foto")
-                }
-                arquivos_temp = []
-                bytes_total = 0
+            if pastas and self.tarefa is None:
+                projetos_abertos = [self.projeto]
+                for aba in getattr(self, "abas_albuns", []) or []:
+                    if isinstance(aba, dict) and isinstance(aba.get("projeto"), dict):
+                        projetos_abertos.append(aba["projeto"])
+
+                ativas_no_projeto = set()
+                for prj in projetos_abertos:
+                    for f in prj.get("fotos", []):
+                        if isinstance(f, dict) and f.get("caminho"):
+                            ativas_no_projeto.add(normalizar_caminho(f["caminho"]))
+                    for e in proj.todos_espacos(prj):
+                        if e.get("foto"):
+                            ativas_no_projeto.add(normalizar_caminho(e["foto"]))
+                    capa = prj.get("capa") or {}
+                    if capa.get("foto"):
+                        ativas_no_projeto.add(normalizar_caminho(capa["foto"]))
+                    for d in proj.fundos_imagem(prj):
+                        if d.get("caminho"):
+                            ativas_no_projeto.add(normalizar_caminho(d["caminho"]))
+
                 for p in pastas:
                     for arq in Path(p).rglob("*"):
                         if arq.is_file():
-                            try:
-                                tam = arq.stat().st_size
-                                bytes_total += tam
-                                arquivos_temp.append((arq, tam, normalizar_caminho(arq) in usadas))
-                            except OSError:
-                                pass
-
-                limite_bytes = max(32, int(limite_mb)) * 1024 * 1024
-                if bytes_total > limite_bytes and self.tarefa is None:
-                    meta_bytes = int(limite_bytes * 0.75)
-                    removidas = []
-                    for arq, tam, em_uso in arquivos_temp:
-                        if bytes_total <= meta_bytes:
-                            break
-                        if not em_uso:
-                            try:
-                                ch = str(arq)
-                                if hasattr(self, "observador") and self.observador:
-                                    self.observador.esquecer(ch)
-                                analise.esquecer_miniaturas(ch)
-                                arq.unlink(missing_ok=True)
-                                removidas.append(ch)
-                                bytes_total -= tam
-                            except OSError:
-                                pass
-                    if removidas:
-                        proj.remover_fotos(self.projeto, removidas)
-                        for r in removidas:
-                            self.info.pop(normalizar_caminho(r), None)
-                        self.atualizar_fotos()
-                        self.registrar(
-                            "Limpeza programada de memória: %d foto(s) temporária(s) não usada(s) do Drive removida(s)."
-                            % len(removidas)
-                        )
+                            ch_norm = normalizar_caminho(arq)
+                            if ch_norm not in ativas_no_projeto:
+                                try:
+                                    ch = str(arq)
+                                    if hasattr(self, "observador") and self.observador:
+                                        self.observador.esquecer(ch)
+                                    analise.esquecer_miniaturas(ch)
+                                    arq.unlink(missing_ok=True)
+                                    self.info.pop(ch_norm, None)
+                                except OSError:
+                                    pass
         except Exception:
             pass
         finally:
@@ -2855,10 +2847,10 @@ class Aplicativo:
             self.projeto["nome"] = pasta_origem.name if pasta_origem else "Novo álbum"
             self.projeto["pasta_fotos"] = str(pasta_origem) if pasta_origem else ""
             self.projeto["pasta_saida"] = str(pasta_origem) if pasta_origem else ""
-            if pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
+            if pasta_origem and not self._eh_pasta_temporaria_drive(pasta_origem):
                 entrada.adicionar_recente("pasta", pasta_origem)
             self._carregar_ui_do_projeto()
-        elif pasta_origem and str(pasta_origem) not in getattr(self, "_pastas_temp_drive", []):
+        elif pasta_origem and not self._eh_pasta_temporaria_drive(pasta_origem):
             entrada.adicionar_recente("pasta", pasta_origem)
         self.marcar_historico()
         novas = proj.adicionar_fotos(self.projeto, fotos)
@@ -3588,8 +3580,7 @@ class Aplicativo:
             self.registrar(
                 "Google Drive: %d de %d foto(s) baixada(s) na pasta temporária (auto-excluída ao fechar)." % (len(baixados), esperadas)
             )
-            self.adicionar_caminhos([str(estado_destino["pasta"])], perguntar_diagramar=True)
-            self.agendar("limpeza_temp_drive", 4000, self._executar_limpeza_programada_temp_drive)
+            self.adicionar_caminhos([str(p) for p in baixados], perguntar_diagramar=True)
 
         self.executar("Baixando fotos do Google Drive", trabalho, fim)
 
