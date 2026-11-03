@@ -27,6 +27,7 @@ ALERTA = "#e0a040"
 ERRO = "#e05555"
 
 FONTE = ("Segoe UI", 9)
+FONTE_NORMAL = FONTE
 FONTE_FORTE = ("Segoe UI Semibold", 9)
 FONTE_TITULO = ("Segoe UI Semibold", 10)
 FONTE_CABECALHO = ("Segoe UI Semibold", 11)

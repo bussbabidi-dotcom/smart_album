@@ -3838,11 +3838,12 @@ class Aplicativo:
             rb_livres.configure(state="disabled")
 
         # --- 2. Pastas e Ordem por Grupos Numerados ---
-        quadro_grupos = ttk.LabelFrame(quadro, text="2. Ordem das Fotos e Grupos Numerados (Sem Misturar Grupos)", padding=10)
+        quadro_grupos = ttk.LabelFrame(quadro, text="2. Ordem das Fotos, Grupos Numerados e Prioridade (Individual vs. Grupo)", padding=10)
         quadro_grupos.pack(fill="x", pady=(0, 8))
 
         separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
         respeitar_grupos_var = tk.BooleanVar(value=bool(cfg.get("respeitar_grupos_manuais", True)))
+        ordem_pessoas_var = tk.StringVar(value=str(cfg.get("ordem_pessoas_grupo", "manter") or "manter"))
 
         ttk.Checkbutton(
             quadro_grupos,
@@ -3854,6 +3855,33 @@ class Aplicativo:
             text="Respeitar ordem e grupos numerados definidos (nunca misturar grupos diferentes na mesma lâmina)",
             variable=respeitar_grupos_var,
         ).pack(anchor="w", pady=2)
+
+        ttk.Separator(quadro_grupos, orient="horizontal").pack(fill="x", pady=6)
+
+        ttk.Label(
+            quadro_grupos,
+            text="Ordem de fotos Individuais vs. Em Grupo/Turma dentro de cada grupo numerado (permite dividir a mesma lâmina):",
+            font=tema.FONTE_FORTE,
+        ).pack(anchor="w", pady=(0, 3))
+
+        ttk.Radiobutton(
+            quadro_grupos,
+            text="Manter a ordem manual exata definida dentro de cada grupo",
+            value="manter",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=1)
+        ttk.Radiobutton(
+            quadro_grupos,
+            text="👤 Fotos Individuais primeiro em cada grupo (1 pessoa → depois fotos em grupo/turma)",
+            value="individuais_primeiro",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=1)
+        ttk.Radiobutton(
+            quadro_grupos,
+            text="👥 Fotos em Grupo/Turma primeiro em cada grupo (2+ pessoas → depois fotos individuais)",
+            value="turma_primeiro",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=1)
 
         linha_grupos_btn = ttk.Frame(quadro_grupos)
         linha_grupos_btn.pack(fill="x", pady=(6, 0))
@@ -4077,6 +4105,7 @@ class Aplicativo:
                 "auto_salvar_minutos": auto_min,
                 "separar_pastas": bool(separar_pastas_var.get()),
                 "respeitar_grupos_manuais": bool(respeitar_grupos_var.get()),
+                "ordem_pessoas_grupo": str(ordem_pessoas_var.get() or "manter"),
                 "modo_corte": modo_corte_var.get(),
                 "corte_maximo": 1.0 + (pct_c / 100.0),
                 "permitir_transpasse": bool(transpasse_var.get()),
@@ -4099,13 +4128,13 @@ class Aplicativo:
                 cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
-                text="Fotos: %d  |  Pastas: %d  |  Grupos: %d  |  👥 %d rosto(s) em %d foto(s)  →  %d lâmina(s)"
+                text="Fotos: %d (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d  |  Pastas: %d  →  %d lâmina(s)"
                 % (
                     prev["total_fotos"],
-                    prev["pastas"],
+                    prev.get("fotos_individuais", 0),
+                    prev.get("fotos_em_grupo", 0),
                     prev.get("grupos", prev.get("cenarios", 1)),
-                    prev.get("total_rostos", 0),
-                    prev.get("fotos_com_rostos", 0),
+                    prev["pastas"],
                     prev["laminas_estimadas"],
                 )
             )
@@ -4117,7 +4146,12 @@ class Aplicativo:
                 detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
             detalhes += ")."
             if respeitar_grupos_var.get():
-                detalhes += " Grupos numerados isolados (sem misturar na mesma lâmina)."
+                detalhes += " Grupos numerados isolados (sem misturar grupos)."
+            modo_p = ordem_pessoas_var.get()
+            if modo_p == "individuais_primeiro":
+                detalhes += " Ordem: Individuais primeiro em cada grupo."
+            elif modo_p == "turma_primeiro":
+                detalhes += " Ordem: Fotos em Grupo/Turma primeiro em cada grupo."
             if nao_cortar_pessoas_var.get():
                 detalhes += " Proteção ativa: nenhuma pessoa será cortada."
             if prev["sobras"] > 0:
@@ -4129,6 +4163,7 @@ class Aplicativo:
             pasta_escolhida_var,
             separar_pastas_var,
             respeitar_grupos_var,
+            ordem_pessoas_var,
             modo_corte_var,
             corte_max_pct_var,
             transpasse_var,
@@ -4218,7 +4253,7 @@ class Aplicativo:
             pai=self,
             chave="janela_diagramar",
             largura=720,
-            altura=620,
+            altura=640,
             min_largura=490,
             min_altura=350,
         )
@@ -4274,11 +4309,40 @@ class Aplicativo:
         self.atualizar_fotos()
         self.registrar("%d foto(s) atribuída(s) ao grupo de ordem (sem alterar arquivos no disco)." % len(fotos_extraidas))
 
+    def definir_tipo_pessoas_fotos(self, fotos_caminhos, tipo_pessoas="auto"):
+        """Define manualmente se as fotos selecionadas são 'individual', 'grupo' ou 'auto' (pelo nº de rostos)."""
+        if not fotos_caminhos:
+            return
+        chaves = {normalizar_caminho(c) for c in fotos_caminhos}
+        tp = str(tipo_pessoas or "auto").strip().lower()
+        alteradas = 0
+        self.marcar_historico()
+        for f in self.projeto.get("fotos", []):
+            if normalizar_caminho(f["caminho"]) in chaves:
+                if tp in ("individual", "grupo"):
+                    f["tipo_pessoas"] = tp
+                else:
+                    f.pop("tipo_pessoas", None)
+                alteradas += 1
+        if alteradas:
+            self._marcar_modificado()
+            self.atualizar_fotos()
+            rotulo = (
+                "Foto Individual (1 pessoa)"
+                if tp == "individual"
+                else ("Foto em Grupo / Turma (2+ pessoas)" if tp == "grupo" else "Automático (pelo nº de rostos)")
+            )
+            self.registrar("%d foto(s) marcada(s) como: %s." % (alteradas, rotulo))
+
     def abrir_ordem_grupos(self, ao_salvar=None, janela_pai=None):
         """
         Janela dedicada para definir a ordem das fotos e organizá-las em grupos numerados
         (Grupo 1, Grupo 2, Grupo 3...) sem renomear nem alterar os arquivos originais no PC.
-        Ao diagramar, os grupos são distribuídos na sequência definida e nunca se misturam na mesma lâmina.
+        Suporta:
+        - Fechar/recolher (▶) e abrir/expandir (▼) a aba de cada grupo para visualizar todos os grupos na tela
+        - Soltar fotos diretamente sobre grupos recolhidos ou abertos
+        - Atalho Ctrl + Scroll para aumentar/diminuir o tamanho das miniaturas
+        - Classificação Individual (👤 1p) vs. Em Grupo/Turma (👥 2+p) automática e manual
         """
         if not self.projeto.get("fotos"):
             self.registrar("Adicione fotos ao projeto antes de organizar a ordem e os grupos.")
@@ -4293,26 +4357,33 @@ class Aplicativo:
         tema.criar_cabecalho_janela(
             janela,
             "Ordem das Fotos e Grupos Numerados (Sem Alterar Arquivos)",
-            "Crie grupos numerados (Grupo 1, Grupo 2...) e arraste fotos entre eles. Grupos diferentes NUNCA se misturam na mesma lâmina.",
+            "Clique em ▼/▶ no título de cada grupo para fechar/abrir a aba do grupo. Use Ctrl + Scroll para aumentar/diminuir as fotos.",
             icone="🗂",
         )
 
-        # Estado de trabalho em memória (lista de dicts: {"nome": str, "fotos": [dict_foto, ...]})
+        # Estado de trabalho em memória (lista de dicts: {"nome": str, "fotos": [dict_foto, ...], "recolhido": bool})
         grupos_iniciais = proj.listar_grupos_ordem(self.projeto)
         estado_grupos = [
             {
                 "nome": str(g.get("nome") or ("Grupo %d" % (idx + 1))),
                 "fotos": [dict(f) for f in g.get("fotos", [])],
+                "recolhido": False,
             }
             for idx, g in enumerate(grupos_iniciais)
         ]
         if not estado_grupos:
-            estado_grupos = [{"nome": "Grupo 1", "fotos": [dict(f) for f in self.projeto.get("fotos", [])]}]
+            estado_grupos = [{
+                "nome": "Grupo 1",
+                "fotos": [dict(f) for f in self.projeto.get("fotos", [])],
+                "recolhido": False,
+            }]
 
         grupo_ativo_idx = [0]
         fotos_sel_chaves = set()
         ultima_clicada_chave = [None]
         arrasto_interno = {"ativo": False, "chaves": [], "x0": 0, "y0": 0}
+        escala_card = [112]  # largura do card (64 a 220 px), controlada via Ctrl + Scroll ou botões - / +
+        cache_mini_grupos = OrderedDict()
 
         # Rodapé fixo
         rodape = tk.Frame(
@@ -4343,13 +4414,13 @@ class Aplicativo:
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_acoes,
-            text="▲ Subir",
+            text="▲ Subir Grupo",
             style="Compacto.TButton",
             command=lambda: _mover_grupo(-1),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_acoes,
-            text="▼ Descer",
+            text="▼ Descer Grupo",
             style="Compacto.TButton",
             command=lambda: _mover_grupo(1),
         ).pack(side="left", padx=1)
@@ -4360,7 +4431,22 @@ class Aplicativo:
             command=lambda: _excluir_grupo_ativo(),
         ).pack(side="left", padx=1)
 
-        tk.Frame(barra_acoes, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=5)
+        tk.Frame(barra_acoes, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4)
+
+        ttk.Button(
+            barra_acoes,
+            text="▶ Fechar Abas",
+            style="Compacto.TButton",
+            command=lambda: _alternar_todos_grupos(True),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="▼ Abrir Abas",
+            style="Compacto.TButton",
+            command=lambda: _alternar_todos_grupos(False),
+        ).pack(side="left", padx=1)
+
+        tk.Frame(barra_acoes, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4)
 
         ttk.Button(
             barra_acoes,
@@ -4378,53 +4464,92 @@ class Aplicativo:
         lbl_status_topo = ttk.Label(barra_acoes, text="", style="Fraco.TLabel")
         lbl_status_topo.pack(side="right", padx=(4, 0))
 
-        # Barra secundária de movimentação de fotos selecionadas
+        # Barra secundária de movimentação de fotos selecionadas, classificação Individual/Grupo e Zoom
         barra_fotos_op = tk.Frame(janela, bg=tema.PAINEL, padx=8, pady=5)
         barra_fotos_op.pack(side="top", fill="x")
 
-        ttk.Label(barra_fotos_op, text="Seleção:", style="Fraco.TLabel").pack(side="left", padx=(0, 3))
+        ttk.Label(barra_fotos_op, text="Ordem:", style="Fraco.TLabel").pack(side="left", padx=(0, 2))
         ttk.Button(
             barra_fotos_op,
-            text="⏮ Início",
+            text="⏮",
             style="Compacto.TButton",
             command=lambda: _deslocar_fotos_no_grupo(-9999),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_fotos_op,
-            text="◀ Antes",
+            text="◀",
             style="Compacto.TButton",
             command=lambda: _deslocar_fotos_no_grupo(-1),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_fotos_op,
-            text="Depois ▶",
+            text="▶",
             style="Compacto.TButton",
             command=lambda: _deslocar_fotos_no_grupo(1),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_fotos_op,
-            text="Fim ⏭",
+            text="⏭",
             style="Compacto.TButton",
             command=lambda: _deslocar_fotos_no_grupo(9999),
         ).pack(side="left", padx=1)
 
-        tk.Frame(barra_fotos_op, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=5)
-        ttk.Label(barra_fotos_op, text="Mover p/:", style="Fraco.TLabel").pack(side="left", padx=(0, 3))
+        tk.Frame(barra_fotos_op, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4)
+        ttk.Label(barra_fotos_op, text="Mover p/:", style="Fraco.TLabel").pack(side="left", padx=(0, 2))
         destino_grupo_var = tk.StringVar(value="")
-        combo_destino = ttk.Combobox(barra_fotos_op, textvariable=destino_grupo_var, state="readonly", width=18)
-        combo_destino.pack(side="left", padx=(0, 3))
+        combo_destino = ttk.Combobox(barra_fotos_op, textvariable=destino_grupo_var, state="readonly", width=16)
+        combo_destino.pack(side="left", padx=(0, 2))
         ttk.Button(
             barra_fotos_op,
-            text="↪ Mover p/ Grupo",
+            text="↪ Mover",
             style="Compacto.TButton",
             command=lambda: _mover_selecao_para_combo(),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_fotos_op,
-            text="＋ Grupo c/ Seleção",
+            text="＋ Grupo c/ Sel.",
             style="Compacto.TButton",
             command=lambda: _criar_novo_grupo(com_selecao=True),
-        ).pack(side="left", padx=2)
+        ).pack(side="left", padx=1)
+
+        tk.Frame(barra_fotos_op, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4)
+        ttk.Label(barra_fotos_op, text="Tipo:", style="Fraco.TLabel").pack(side="left", padx=(0, 2))
+        ttk.Button(
+            barra_fotos_op,
+            text="👤 1p",
+            style="Compacto.TButton",
+            command=lambda: _definir_tipo_selecao("individual"),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="👥 Grupo",
+            style="Compacto.TButton",
+            command=lambda: _definir_tipo_selecao("grupo"),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_fotos_op,
+            text="Auto",
+            style="Compacto.TButton",
+            command=lambda: _definir_tipo_selecao("auto"),
+        ).pack(side="left", padx=1)
+
+        # Controles de Zoom à direita da barra secundária
+        quadro_zoom = tk.Frame(barra_fotos_op, bg=tema.PAINEL)
+        quadro_zoom.pack(side="right")
+        ttk.Button(
+            quadro_zoom,
+            text="－",
+            style="Compacto.TButton",
+            command=lambda: _ajustar_zoom_miniaturas(-16),
+        ).pack(side="left", padx=1)
+        lbl_zoom_pct = ttk.Label(quadro_zoom, text="100%", width=5, anchor="center", style="Fraco.TLabel")
+        lbl_zoom_pct.pack(side="left", padx=2)
+        ttk.Button(
+            quadro_zoom,
+            text="＋",
+            style="Compacto.TButton",
+            command=lambda: _ajustar_zoom_miniaturas(16),
+        ).pack(side="left", padx=1)
 
         # Canvas principal onde os grupos e suas fotos são desenhados e suportam drag-and-drop
         quadro_canvas = tk.Frame(janela, bg=tema.FUNDO, highlightthickness=1, highlightbackground=tema.BORDA)
@@ -4441,10 +4566,46 @@ class Aplicativo:
         canvas_g.pack(side="left", fill="both", expand=True)
         barra_rol_v.configure(command=canvas_g.yview)
 
-        regioes_grupos = []   # [{"idx_g": int, "y0": int, "y1": int}]
+        regioes_grupos = []   # [{"idx_g": int, "y0": int, "y1": int, "cab_y1": int}]
         regioes_fotos = []    # [{"idx_g": int, "idx_f": int, "chave": str, "x0": int, "y0": int, "x1": int, "y1": int}]
 
         CORES_GRUPOS = ("#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777", "#0891b2", "#4f46e5", "#ea580c")
+
+        def _miniatura_grupo_tk(caminho, lado_alvo):
+            norm = normalizar_caminho(caminho)
+            lado_limpo = max(44, min(200, int(lado_alvo)))
+            chave_z = (norm, self.versao_fotos, lado_limpo)
+            guardada = cache_mini_grupos.get(chave_z)
+            if guardada is not None:
+                cache_mini_grupos.move_to_end(chave_z)
+                return guardada
+            try:
+                img_pil = self._miniatura_pil(caminho, lado_limpo, usada=False)
+                foto_tk = ImageTk.PhotoImage(img_pil)
+                cache_mini_grupos[chave_z] = foto_tk
+                while len(cache_mini_grupos) > 600:
+                    cache_mini_grupos.popitem(last=False)
+                return foto_tk
+            except Exception:
+                return self._miniatura_tk(caminho, usada=False)
+
+        def _info_pessoas_foto(f):
+            ch_f = normalizar_caminho(f["caminho"])
+            dados = self.info.get(ch_f) or {}
+            rosto = f.get("rosto") or dados.get("rosto")
+            qtd_r = max(1, int(rosto.get("qtd") or 1)) if isinstance(rosto, dict) else 0
+            tp = str(f.get("tipo_pessoas") or "auto").strip().lower()
+            em_grupo = proj.eh_foto_em_grupo(f, self.info)
+            manual = tp in ("individual", "grupo")
+            if em_grupo:
+                etq = ("👥 %dp*" % max(2, qtd_r)) if (manual and qtd_r >= 2) else ("👥 2+p*" if manual else ("👥 %dp" % max(2, qtd_r)))
+                cor_bg = "#5b21b6" if manual else "#3b0764"
+                cor_fg = "#e9d5ff"
+            else:
+                etq = "👤 1p*" if manual else ("👤 %dp" % qtd_r if qtd_r == 1 else "👤 1p")
+                cor_bg = "#1e3a8a" if manual else "#0e2942"
+                cor_fg = "#93c5fd"
+            return em_grupo, etq, cor_bg, cor_fg
 
         def _atualizar_combo_destino():
             opcoes = ["%d. %s (%d fotos)" % (i + 1, g["nome"], len(g["fotos"])) for i, g in enumerate(estado_grupos)]
@@ -4462,27 +4623,44 @@ class Aplicativo:
             _atualizar_combo_destino()
 
             larg = max(560, canvas_g.winfo_width())
-            margem_x = 14
-            y_cursor = 12
-            card_w = 112
-            card_h = 118
-            esp_x = 10
-            esp_y = 10
-            colunas = max(3, (larg - margem_x * 2 - 20) // (card_w + esp_x))
+            margem_x = 12
+            y_cursor = 10
+            card_w = max(64, min(220, int(escala_card[0])))
+            card_h = int(round(card_w * 0.88)) + 34
+            lado_img = max(44, card_w - 14)
+            esp_x = max(6, min(12, card_w // 12))
+            esp_y = max(6, min(12, card_w // 12))
+            colunas = max(2, (larg - margem_x * 2 - 20) // (card_w + esp_x))
+
+            pct_z = int(round((card_w / 112.0) * 100))
+            lbl_zoom_pct.configure(text="%d%%" % pct_z)
 
             total_fotos_proj = sum(len(g["fotos"]) for g in estado_grupos)
+            recolhidos_qtd = sum(1 for g in estado_grupos if g.get("recolhido"))
+            txt_rec = (" · %d fechado(s)" % recolhidos_qtd) if recolhidos_qtd else ""
             lbl_status_topo.configure(
-                text="%d grupo(s) numerado(s) · %d foto(s) · %d selecionada(s)"
-                % (len(estado_grupos), total_fotos_proj, len(fotos_sel_chaves))
+                text="%d grupo(s)%s · %d foto(s) · %d sel."
+                % (len(estado_grupos), txt_rec, total_fotos_proj, len(fotos_sel_chaves))
             )
 
             seq_global = 0
             for idx_g, g in enumerate(estado_grupos):
                 cor_g = CORES_GRUPOS[idx_g % len(CORES_GRUPOS)]
                 ativo = (idx_g == grupo_ativo_idx[0])
+                recolhido = bool(g.get("recolhido", False))
                 fotos_g = g["fotos"]
-                linhas = max(1, int(math.ceil(max(1, len(fotos_g)) / float(colunas))))
-                altura_bloco = 46 + linhas * (card_h + esp_y) + 10
+                qtd_em_grupo = sum(1 for f in fotos_g if proj.eh_foto_em_grupo(f, self.info))
+                qtd_indiv = len(fotos_g) - qtd_em_grupo
+
+                alt_cab = 36
+                if recolhido:
+                    altura_bloco = alt_cab
+                elif not fotos_g:
+                    altura_bloco = alt_cab + 52
+                else:
+                    linhas = max(1, int(math.ceil(len(fotos_g) / float(colunas))))
+                    altura_bloco = alt_cab + 10 + linhas * (card_h + esp_y) + 6
+
                 y0 = y_cursor
                 y1 = y0 + altura_bloco
 
@@ -4495,49 +4673,100 @@ class Aplicativo:
                     outline=cor_g if ativo else tema.BORDA,
                     width=2 if ativo else 1,
                 )
-                # Cabeçalho do grupo
+                # Cabeçalho clicável do grupo (permite recolher/expandir ou soltar fotos)
                 canvas_g.create_rectangle(
                     margem_x,
                     y0,
                     larg - margem_x,
-                    y0 + 34,
-                    fill=tema.PAINEL_2,
-                    outline="",
+                    y0 + alt_cab,
+                    fill=tema.PAINEL_2 if not recolhido else "#252932",
+                    outline=cor_g if ativo else tema.BORDA,
+                    width=1,
                 )
+                # Botão de recolher/expandir [▼] / [▶]
+                bx0, by0, bx1, by1 = margem_x + 7, y0 + 6, margem_x + 33, y0 + 30
                 canvas_g.create_rectangle(
-                    margem_x + 8,
+                    bx0,
+                    by0,
+                    bx1,
+                    by1,
+                    fill=tema.PAINEL_3 if not ativo else cor_g,
+                    outline=tema.BORDA_CLARA,
+                    width=1,
+                )
+                canvas_g.create_text(
+                    (bx0 + bx1) // 2,
+                    (by0 + by1) // 2,
+                    text="▶" if recolhido else "▼",
+                    fill="#ffffff",
+                    font=tema.FONTE_FORTE,
+                )
+
+                # Etiqueta colorida GRUPO N
+                canvas_g.create_rectangle(
+                    margem_x + 38,
                     y0 + 6,
-                    margem_x + 92,
-                    y0 + 28,
+                    margem_x + 118,
+                    y0 + 30,
                     fill=cor_g,
                     outline="",
                 )
                 canvas_g.create_text(
-                    margem_x + 50,
-                    y0 + 17,
+                    margem_x + 78,
+                    y0 + 18,
                     text="GRUPO %d" % (idx_g + 1),
                     fill="#ffffff",
                     font=tema.FONTE_FORTE,
                 )
+
+                resumo_g = "%s  —  %d foto(s) (👤 %d ind. · 👥 %d grupo)" % (
+                    g["nome"],
+                    len(fotos_g),
+                    qtd_indiv,
+                    qtd_em_grupo,
+                )
+                if recolhido:
+                    resumo_g += "  ·  [Aba fechada — solte fotos aqui ou clique p/ abrir]"
+
                 canvas_g.create_text(
-                    margem_x + 104,
-                    y0 + 17,
+                    margem_x + 128,
+                    y0 + 18,
                     anchor="w",
-                    text="%s  —  %d foto(s) · Lâminas exclusivas (não mistura com outros grupos)"
-                    % (g["nome"], len(fotos_g)),
-                    fill=tema.TEXTO,
-                    font=tema.FONTE_FORTE if ativo else tema.FONTE_NORMAL,
+                    text=resumo_g,
+                    fill=tema.TEXTO if not recolhido else "#cbd5e1",
+                    font=tema.FONTE_FORTE if ativo else tema.FONTE,
                 )
 
-                regioes_grupos.append({"idx_g": idx_g, "y0": y0, "y1": y1})
+                # Indicador à direita no cabeçalho
+                txt_acao_cab = "▼ Abrir aba" if recolhido else "▲ Fechar aba"
+                canvas_g.create_text(
+                    larg - margem_x - 10,
+                    y0 + 18,
+                    anchor="e",
+                    text=txt_acao_cab,
+                    fill=tema.DESTAQUE if ativo else tema.TEXTO_FRACO,
+                    font=tema.FONTE_PEQUENA,
+                )
 
-                if not fotos_g:
+                regioes_grupos.append({
+                    "idx_g": idx_g,
+                    "y0": y0,
+                    "y1": y1,
+                    "cab_y0": y0,
+                    "cab_y1": y0 + alt_cab,
+                    "x0": margem_x,
+                    "x1": larg - margem_x,
+                })
+
+                if recolhido:
+                    seq_global += len(fotos_g)
+                elif not fotos_g:
                     canvas_g.create_text(
                         larg // 2,
-                        y0 + 82,
-                        text="Arraste fotos para cá ou use '↪ Mover para Grupo' para adicionar fotos ao Grupo %d" % (idx_g + 1),
+                        y0 + alt_cab + 26,
+                        text="Arraste fotos para cá ou use '↪ Mover' para colocar fotos no Grupo %d" % (idx_g + 1),
                         fill=tema.TEXTO_FRACO,
-                        font=tema.FONTE_NORMAL,
+                        font=tema.FONTE,
                     )
                 else:
                     for idx_f, f in enumerate(fotos_g):
@@ -4545,7 +4774,7 @@ class Aplicativo:
                         col = idx_f % colunas
                         lin = idx_f // colunas
                         fx0 = margem_x + 12 + col * (card_w + esp_x)
-                        fy0 = y0 + 44 + lin * (card_h + esp_y)
+                        fy0 = y0 + alt_cab + 8 + lin * (card_h + esp_y)
                         fx1 = fx0 + card_w
                         fy1 = fy0 + card_h
                         ch_f = normalizar_caminho(f["caminho"])
@@ -4560,36 +4789,63 @@ class Aplicativo:
                             outline=tema.DESTAQUE if sel else tema.BORDA,
                             width=2 if sel else 1,
                         )
-                        img_tk = self._miniatura_tk(f["caminho"], usada=False)
+                        img_tk = _miniatura_grupo_tk(f["caminho"], lado_img)
                         cx = (fx0 + fx1) // 2
-                        cy = fy0 + 50
+                        cy = fy0 + 18 + (card_h - 46) // 2
                         if img_tk is not None:
                             canvas_g.create_image(cx, cy, image=img_tk)
                         else:
-                            canvas_g.create_rectangle(fx0 + 10, fy0 + 16, fx1 - 10, fy0 + 80, fill=tema.PAINEL_3, outline="")
+                            canvas_g.create_rectangle(
+                                fx0 + 8,
+                                fy0 + 20,
+                                fx1 - 8,
+                                fy1 - 26,
+                                fill=tema.PAINEL_3,
+                                outline="",
+                            )
                             canvas_g.create_text(cx, cy, text="...", fill=tema.TEXTO_FRACO)
 
-                        # Badge da ordem dentro do grupo (#1, #2...) e global
-                        canvas_g.create_rectangle(fx0 + 4, fy0 + 4, fx0 + 44, fy0 + 20, fill=cor_g, outline="")
+                        # Badge da ordem dentro do grupo (#1, #2...)
+                        canvas_g.create_rectangle(fx0 + 3, fy0 + 3, fx0 + 44, fy0 + 18, fill=cor_g, outline="")
                         canvas_g.create_text(
-                            fx0 + 24,
-                            fy0 + 12,
+                            fx0 + 23,
+                            fy0 + 10,
                             text="%dº (G%d)" % (idx_f + 1, idx_g + 1),
                             fill="#ffffff",
                             font=("Segoe UI", 7, "bold"),
                         )
 
+                        # Badge de Individual vs. Grupo no canto superior direito do card
+                        _em_g, etq_p, cor_bg_p, cor_fg_p = _info_pessoas_foto(f)
+                        larg_etq = max(34, min(52, len(etq_p) * 6 + 6))
+                        canvas_g.create_rectangle(
+                            fx1 - larg_etq - 3,
+                            fy0 + 3,
+                            fx1 - 3,
+                            fy0 + 18,
+                            fill=cor_bg_p,
+                            outline="",
+                        )
+                        canvas_g.create_text(
+                            fx1 - 3 - larg_etq // 2,
+                            fy0 + 10,
+                            text=etq_p,
+                            fill=cor_fg_p,
+                            font=("Segoe UI", 7, "bold"),
+                        )
+
+                        max_chars = max(8, (card_w - 10) // 6)
                         nome_arq = Path(f["caminho"]).name
-                        curto = nome_arq if len(nome_arq) <= 14 else nome_arq[:12] + "…"
+                        curto = nome_arq if len(nome_arq) <= max_chars else nome_arq[: max_chars - 1] + "…"
                         canvas_g.create_text(
                             cx,
-                            fy1 - 18,
+                            fy1 - 17,
                             text=curto,
                             fill=tema.TEXTO if sel else tema.TEXTO_FRACO,
                             font=tema.FONTE_PEQUENA,
                         )
                         nome_p = proj.nome_pasta_da_foto(f)
-                        curto_p = nome_p if len(nome_p) <= 15 else nome_p[:13] + "…"
+                        curto_p = nome_p if len(nome_p) <= max_chars else nome_p[: max_chars - 1] + "…"
                         canvas_g.create_text(
                             cx,
                             fy1 - 6,
@@ -4608,9 +4864,10 @@ class Aplicativo:
                             "y1": fy1,
                         })
 
-                y_cursor = y1 + 12
+                y_cursor = y1 + 10
 
-            canvas_g.configure(scrollregion=(0, 0, larg, max(400, y_cursor + 10)))
+            alt_canvas = max(320, canvas_g.winfo_height())
+            canvas_g.configure(scrollregion=(0, 0, larg, max(alt_canvas, y_cursor + 16)))
 
         def _achar_foto_em(x_c, y_c):
             for r in regioes_fotos:
@@ -4618,10 +4875,16 @@ class Aplicativo:
                     return r
             return None
 
-        def _achar_grupo_em(y_c):
+        def _achar_regiao_grupo_em(y_c):
             for rg in regioes_grupos:
                 if rg["y0"] <= y_c <= rg["y1"]:
-                    return rg["idx_g"]
+                    return rg
+            return None
+
+        def _achar_grupo_em(y_c):
+            rg = _achar_regiao_grupo_em(y_c)
+            if rg is not None:
+                return rg["idx_g"]
             if regioes_grupos:
                 if y_c < regioes_grupos[0]["y0"]:
                     return 0
@@ -4635,12 +4898,52 @@ class Aplicativo:
                     saida.append(normalizar_caminho(f["caminho"]))
             return saida
 
+        def _alternar_todos_grupos(recolher):
+            for g in estado_grupos:
+                g["recolhido"] = bool(recolher)
+            _redesenhar_canvas()
+
+        def _ajustar_zoom_miniaturas(delta_px):
+            novo = max(64, min(220, int(escala_card[0]) + int(delta_px)))
+            if novo != escala_card[0]:
+                escala_card[0] = novo
+                _redesenhar_canvas()
+
+        def _definir_tipo_selecao(novo_tipo):
+            if not fotos_sel_chaves:
+                messagebox.showinfo(
+                    "Classificação de Pessoas",
+                    "Selecione uma ou mais fotos primeiro para definir como Individual (1p), Em Grupo (2+p) ou Automático.",
+                    parent=janela,
+                )
+                return
+            tp = str(novo_tipo or "auto").strip().lower()
+            for g in estado_grupos:
+                for f in g["fotos"]:
+                    if normalizar_caminho(f["caminho"]) in fotos_sel_chaves:
+                        if tp in ("individual", "grupo"):
+                            f["tipo_pessoas"] = tp
+                        else:
+                            f.pop("tipo_pessoas", None)
+            _redesenhar_canvas()
+
         def _ao_clicar_canvas(evento):
+            canvas_g.focus_set()
             x_c = canvas_g.canvasx(evento.x)
             y_c = canvas_g.canvasy(evento.y)
             rf = _achar_foto_em(x_c, y_c)
-            rg_idx = _achar_grupo_em(y_c)
+            rg = _achar_regiao_grupo_em(y_c)
+            rg_idx = rg["idx_g"] if rg is not None else _achar_grupo_em(y_c)
             grupo_ativo_idx[0] = rg_idx
+
+            # Verifica se clicou no cabeçalho do grupo para recolher/expandir a aba
+            if rf is None and rg is not None and rg["cab_y0"] <= y_c <= rg["cab_y1"]:
+                # Clicar no botão ▼/▶ (esquerda), no texto "Fechar/Abrir aba" (direita) ou em um grupo já recolhido alterna a aba
+                clicou_toggle = (x_c <= rg["x0"] + 40) or (x_c >= rg["x1"] - 115) or bool(estado_grupos[rg_idx].get("recolhido"))
+                if clicou_toggle:
+                    estado_grupos[rg_idx]["recolhido"] = not bool(estado_grupos[rg_idx].get("recolhido", False))
+                _redesenhar_canvas()
+                return
 
             if rf is None:
                 if not (evento.state & 0x0004) and not (evento.state & 0x0001):
@@ -4672,6 +4975,56 @@ class Aplicativo:
             arrasto_interno["x0"] = evento.x
             arrasto_interno["y0"] = evento.y
             _redesenhar_canvas()
+
+        def _ao_duplo_clique_canvas(evento):
+            x_c = canvas_g.canvasx(evento.x)
+            y_c = canvas_g.canvasy(evento.y)
+            rf = _achar_foto_em(x_c, y_c)
+            rg = _achar_regiao_grupo_em(y_c)
+            if rf is None and rg is not None and rg["cab_y0"] <= y_c <= rg["cab_y1"]:
+                idx_g = rg["idx_g"]
+                estado_grupos[idx_g]["recolhido"] = not bool(estado_grupos[idx_g].get("recolhido", False))
+                _redesenhar_canvas()
+
+        def _ao_menu_contexto_canvas(evento):
+            x_c = canvas_g.canvasx(evento.x)
+            y_c = canvas_g.canvasy(evento.y)
+            rf = _achar_foto_em(x_c, y_c)
+            if rf is not None:
+                ch = rf["chave"]
+                if ch not in fotos_sel_chaves:
+                    fotos_sel_chaves.clear()
+                    fotos_sel_chaves.add(ch)
+                    ultima_clicada_chave[0] = ch
+                    _redesenhar_canvas()
+            if not fotos_sel_chaves:
+                return
+            qtd_s = len(fotos_sel_chaves)
+            menu = tk.Menu(janela, tearoff=0)
+            menu.add_command(
+                label="👤 Marcar %d foto(s) como Individual (1 pessoa)" % qtd_s,
+                command=lambda: _definir_tipo_selecao("individual"),
+            )
+            menu.add_command(
+                label="👥 Marcar %d foto(s) como Em Grupo / Turma (2+ pessoas)" % qtd_s,
+                command=lambda: _definir_tipo_selecao("grupo"),
+            )
+            menu.add_command(
+                label="↺ Usar detecção automática de rostos (%d foto(s))" % qtd_s,
+                command=lambda: _definir_tipo_selecao("auto"),
+            )
+            menu.add_separator()
+            for i_g, g_it in enumerate(estado_grupos):
+                menu.add_command(
+                    label="↪ Mover seleção para Grupo %d — %s" % (i_g + 1, g_it["nome"]),
+                    command=lambda dest=i_g: _mover_selecao_para_indice(dest),
+                )
+            menu.add_separator()
+            menu.add_command(
+                label="＋ Criar Novo Grupo com a seleção",
+                command=lambda: _criar_novo_grupo(com_selecao=True),
+            )
+            menu.tk_popup(evento.x_root, evento.y_root)
 
         def _ao_arrastar_canvas(evento):
             if not arrasto_interno["chaves"]:
@@ -4726,9 +5079,12 @@ class Aplicativo:
             estado_grupos.append({
                 "nome": "Grupo %d" % novo_num,
                 "fotos": extraidas,
+                "recolhido": False,
             })
             grupo_ativo_idx[0] = len(estado_grupos) - 1
             _redesenhar_canvas()
+            canvas_g.update_idletasks()
+            canvas_g.yview_moveto(1.0)
 
         def _renomear_grupo_ativo():
             idx = grupo_ativo_idx[0]
@@ -4783,6 +5139,7 @@ class Aplicativo:
                 estado_grupos.append({
                     "nome": "Grupo %d — %s" % (idx_p + 1, nome_p),
                     "fotos": mapa_p[ch_p],
+                    "recolhido": False,
                 })
             grupo_ativo_idx[0] = 0
             _redesenhar_canvas()
@@ -4790,18 +5147,12 @@ class Aplicativo:
         def _juntar_tudo():
             todas = [f for g in estado_grupos for f in g["fotos"]]
             estado_grupos.clear()
-            estado_grupos.append({"nome": "Grupo 1", "fotos": todas})
+            estado_grupos.append({"nome": "Grupo 1", "fotos": todas, "recolhido": False})
             grupo_ativo_idx[0] = 0
             _redesenhar_canvas()
 
-        def _mover_selecao_para_combo():
-            if not fotos_sel_chaves:
-                messagebox.showinfo("Mover Fotos", "Selecione uma ou mais fotos clicando nelas primeiro.", parent=janela)
-                return
-            opcoes = list(combo_destino["values"])
-            escolha = destino_grupo_var.get()
-            idx_dest = opcoes.index(escolha) if escolha in opcoes else grupo_ativo_idx[0]
-            if not (0 <= idx_dest < len(estado_grupos)):
+        def _mover_selecao_para_indice(idx_dest):
+            if not fotos_sel_chaves or not (0 <= idx_dest < len(estado_grupos)):
                 return
             extraidas = []
             for g in estado_grupos:
@@ -4815,6 +5166,15 @@ class Aplicativo:
             estado_grupos[idx_dest]["fotos"].extend(extraidas)
             grupo_ativo_idx[0] = idx_dest
             _redesenhar_canvas()
+
+        def _mover_selecao_para_combo():
+            if not fotos_sel_chaves:
+                messagebox.showinfo("Mover Fotos", "Selecione uma ou mais fotos clicando nelas primeiro.", parent=janela)
+                return
+            opcoes = list(combo_destino["values"])
+            escolha = destino_grupo_var.get()
+            idx_dest = opcoes.index(escolha) if escolha in opcoes else grupo_ativo_idx[0]
+            _mover_selecao_para_indice(idx_dest)
 
         def _deslocar_fotos_no_grupo(passo):
             if not fotos_sel_chaves:
@@ -4845,11 +5205,38 @@ class Aplicativo:
                             lista[i + 1], lista[i] = lista[i], lista[i + 1]
             _redesenhar_canvas()
 
+        def _ao_roda_mouse_grupos(evento):
+            # Se Ctrl estiver pressionado (bit 0x0004), faz zoom das miniaturas
+            ctrl_ativo = bool(getattr(evento, "state", 0) & 0x0004)
+            delta = getattr(evento, "delta", 0)
+            num = getattr(evento, "num", None)
+            if ctrl_ativo:
+                if delta > 0 or num == 4:
+                    _ajustar_zoom_miniaturas(14)
+                elif delta < 0 or num == 5:
+                    _ajustar_zoom_miniaturas(-14)
+                return "break"
+            if num == 4:
+                canvas_g.yview_scroll(-3, "units")
+            elif num == 5:
+                canvas_g.yview_scroll(3, "units")
+            elif delta:
+                passos = -int(delta / 120) if abs(delta) >= 120 else (-1 if delta > 0 else 1)
+                canvas_g.yview_scroll(passos * 2, "units")
+            return "break"
+
         canvas_g.bind("<ButtonPress-1>", _ao_clicar_canvas)
+        canvas_g.bind("<Double-Button-1>", _ao_duplo_clique_canvas)
+        canvas_g.bind("<Button-3>", _ao_menu_contexto_canvas)
         canvas_g.bind("<B1-Motion>", _ao_arrastar_canvas)
         canvas_g.bind("<ButtonRelease-1>", _ao_soltar_canvas)
         canvas_g.bind("<Configure>", _redesenhar_canvas)
-        canvas_g.bind("<MouseWheel>", lambda e: canvas_g.yview_scroll(-int(e.delta / 120), "units"))
+        canvas_g.bind("<MouseWheel>", _ao_roda_mouse_grupos)
+        canvas_g.bind("<Control-MouseWheel>", lambda e: (_ajustar_zoom_miniaturas(14 if e.delta > 0 else -14), "break")[1])
+        canvas_g.bind("<Button-4>", _ao_roda_mouse_grupos)
+        canvas_g.bind("<Button-5>", _ao_roda_mouse_grupos)
+        canvas_g.bind("<Control-Button-4>", lambda _e: (_ajustar_zoom_miniaturas(14), "break")[1])
+        canvas_g.bind("<Control-Button-5>", lambda _e: (_ajustar_zoom_miniaturas(-14), "break")[1])
 
         def _salvar_grupos(diagramar_agora=False):
             grupos_validos = [g for g in estado_grupos if g["fotos"]]
@@ -4880,7 +5267,7 @@ class Aplicativo:
 
         ttk.Label(
             rodape,
-            text="Dica: Arraste fotos para mudar quem vem primeiro ou movê-las de grupo. Os arquivos no PC não são alterados.",
+            text="Dica: Clique em ▼/▶ para fechar/abrir grupos · Ctrl + Scroll muda o tamanho das miniaturas · Botão direito classifica 1p/Grupo.",
             style="Fraco.TLabel",
         ).pack(side="left")
 
@@ -4903,8 +5290,8 @@ class Aplicativo:
             janela,
             pai=self,
             chave="janela_ordem_grupos",
-            largura=820,
-            altura=600,
+            largura=860,
+            altura=620,
             min_largura=540,
             min_altura=380,
         )
@@ -8904,18 +9291,35 @@ class Aplicativo:
                 gy1 = 18
                 c.create_rectangle(gx0, gy0, gx1, gy1, fill="#1e3a8a", outline="#60a5fa", width=1)
                 c.create_text((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0, text="G%d" % num_g, fill="#ffffff", font=("Segoe UI", 7, "bold"))
-            # Selo com a quantidade de rostos identificados na foto (ex.: 👤 1 ou 👥 5)
+            # Selo com a quantidade de rostos / classificação Individual vs. Grupo (ex.: 👤 1 ou 👥 5)
             dados_f = self.info.get(normalizar_caminho(foto["caminho"]))
             rosto_f = dados_f.get("rosto") if isinstance(dados_f, dict) else None
-            if isinstance(rosto_f, dict):
-                qtd_r = max(1, int(rosto_f.get("qtd") or 1))
-                etq_r = ("%d" % qtd_r)
+            tp_f = str(foto.get("tipo_pessoas") or "auto").strip().lower()
+            if tp_f in ("individual", "grupo") or isinstance(rosto_f, dict):
+                qtd_r = max(1, int(rosto_f.get("qtd") or 1)) if isinstance(rosto_f, dict) else (2 if tp_f == "grupo" else 1)
+                em_g = proj.eh_foto_em_grupo(foto, self.info)
+                icone_r = "👥" if em_g else "👤"
+                etq_r = ("%d*" % qtd_r) if tp_f in ("individual", "grupo") else ("%d" % qtd_r)
                 bx0 = cx - lado // 2 + 2
                 by1 = ch - 18
                 by0 = by1 - 14
-                bx1 = bx0 + (22 if qtd_r < 10 else 28)
-                c.create_rectangle(bx0, by0, bx1, by1, fill="#0e2942", outline="#31a8ff", width=1)
-                c.create_text((bx0 + bx1) / 2.0, (by0 + by1) / 2.0, text="👤" + etq_r, fill="#7dd3fc", font=("Segoe UI", 7, "bold"))
+                bx1 = bx0 + (26 if len(etq_r) <= 2 else 32)
+                c.create_rectangle(
+                    bx0,
+                    by0,
+                    bx1,
+                    by1,
+                    fill="#3b0764" if em_g else "#0e2942",
+                    outline="#a855f7" if em_g else "#31a8ff",
+                    width=1,
+                )
+                c.create_text(
+                    (bx0 + bx1) / 2.0,
+                    (by0 + by1) / 2.0,
+                    text=icone_r + etq_r,
+                    fill="#e9d5ff" if em_g else "#7dd3fc",
+                    font=("Segoe UI", 7, "bold"),
+                )
             nome = Path(foto["caminho"]).name
             c.create_text(cx, ch - 9, text=nome if len(nome) <= letras else nome[:letras - 2] + "…",
                           fill=tema.TEXTO if selecionada else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
@@ -9056,6 +9460,20 @@ class Aplicativo:
             label="＋ Criar Novo Grupo com %s foto(s)" % quantidade,
             command=lambda: self.mover_fotos_para_grupo(fotos, None),
         )
+        menu_grupos.add_separator()
+        menu_grupos.add_command(
+            label="👤 Marcar como Foto Individual (1 pessoa)",
+            command=lambda: self.definir_tipo_pessoas_fotos(fotos, "individual"),
+        )
+        menu_grupos.add_command(
+            label="👥 Marcar como Foto em Grupo / Turma (2+ pessoas)",
+            command=lambda: self.definir_tipo_pessoas_fotos(fotos, "grupo"),
+        )
+        menu_grupos.add_command(
+            label="↺ Classificação Automática (pelo nº de rostos)",
+            command=lambda: self.definir_tipo_pessoas_fotos(fotos, "auto"),
+        )
+        menu_grupos.add_separator()
         menu_grupos.add_command(
             label="🗂 Abrir Janela de Ordem e Grupos...",
             command=self.abrir_ordem_grupos,

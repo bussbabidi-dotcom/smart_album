@@ -44,6 +44,7 @@ def configuracao(produto, projeto_cfg=None):
         "laminas_desejadas": produto["laminas_min"],
         "separar_pastas": True,
         "respeitar_grupos_manuais": True,
+        "ordem_pessoas_grupo": "manter",
         "reconhecer_rostos": True,
         "nao_cortar_pessoas": True,
         "permitir_transpasse": True,
@@ -1721,14 +1722,53 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_f
 # Divisão Estrita por Grupos Numerados (Ordem Manual) e Pastas
 # ------------------------------------------------------------
 
-def ordenar_e_agrupar_por_grupos(fotos):
+def eh_foto_em_grupo(foto):
+    """
+    Identifica se a foto é 'Em Grupo / Turma' (True, 2+ pessoas) ou 'Individual' (False, 0-1 pessoa).
+    Respeita primeiro `tipo_pessoas` ('individual' | 'grupo') ou `em_grupo_pessoas`, e usa `rosto.qtd >= 2` como padrão automático.
+    """
+    if not isinstance(foto, dict):
+        return False
+    tp = str(foto.get("tipo_pessoas") or "").strip().lower()
+    if tp == "grupo":
+        return True
+    if tp == "individual":
+        return False
+    if "em_grupo_pessoas" in foto and isinstance(foto["em_grupo_pessoas"], bool):
+        return foto["em_grupo_pessoas"]
+    rosto = foto.get("rosto")
+    if isinstance(rosto, dict):
+        try:
+            return int(rosto.get("qtd") or 0) >= 2
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _chave_prioridade_pessoas(foto, modo_ordem):
+    modo = str(modo_ordem or "manter").strip().lower()
+    if modo == "individuais_primeiro":
+        return 1 if eh_foto_em_grupo(foto) else 0
+    if modo in ("turma_primeiro", "grupo_primeiro", "grupos_primeiro"):
+        return 0 if eh_foto_em_grupo(foto) else 1
+    return 0
+
+
+def ordenar_e_agrupar_por_grupos(fotos, cfg=None):
     """
     Ordena e agrupa fotos conforme os grupos numerados definidos manualmente pelo usuário
     (`grupo_ordem` = 1, 2, 3... e `ordem_manual`), sem alterar os arquivos em disco.
-    Fotos de grupos diferentes nunca se misturam na mesma lâmina.
+    Quando `ordem_pessoas_grupo` está definido ('individuais_primeiro' ou 'turma_primeiro'),
+    ordena primeiro as fotos individuais ou em grupo DENTRO de cada grupo numerado, permitindo
+    que compartilhem a lâmina de transição dentro do mesmo grupo, mas nunca misturando grupos diferentes.
     """
     if not fotos:
         return []
+    modo_pessoas = (
+        cfg.get("ordem_pessoas_grupo", "manter")
+        if isinstance(cfg, dict)
+        else (str(cfg) if isinstance(cfg, str) else "manter")
+    )
     enriquecidas = []
     for pos, foto in enumerate(fotos):
         try:
@@ -1739,14 +1779,16 @@ def ordenar_e_agrupar_por_grupos(fotos):
             ord_m = int(foto.get("ordem_manual")) if foto.get("ordem_manual") is not None else pos
         except (TypeError, ValueError):
             ord_m = pos
+        prio_p = _chave_prioridade_pessoas(foto, modo_pessoas)
         copia = dict(foto)
         copia["grupo_ordem"] = gid
         copia["cenario_grupo"] = gid
         copia["ordem_manual"] = ord_m
-        enriquecidas.append((gid, ord_m, pos, copia))
+        copia["em_grupo_pessoas"] = eh_foto_em_grupo(foto)
+        enriquecidas.append((gid, prio_p, ord_m, pos, copia))
 
-    enriquecidas.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [item[3] for item in enriquecidas]
+    enriquecidas.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return [item[4] for item in enriquecidas]
 
 
 def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
@@ -1835,11 +1877,24 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
     return grupos
 
 
+def _ordenar_bloco_por_pessoas(bloco, modo_pessoas):
+    modo = str(modo_pessoas or "manter").strip().lower()
+    if modo not in ("individuais_primeiro", "turma_primeiro", "grupo_primeiro", "grupos_primeiro"):
+        return list(bloco)
+    return [
+        f for _p, _pos, f in sorted(
+            ((_chave_prioridade_pessoas(f, modo), idx, f) for idx, f in enumerate(bloco)),
+            key=lambda it: (it[0], it[1]),
+        )
+    ]
+
+
 def _blocos_pastas_e_cenarios(fotos, cfg):
     """
     Organiza a lista de fotos em blocos sequenciais respeitando:
     - Grupos numerados e ordem manual definida pelo usuário (`respeitar_grupos_manuais`, ativo por padrão):
       Fotos do Grupo 1 vêm primeiro, depois Grupo 2, Grupo 3, etc., sem nunca misturar grupos diferentes na mesma lâmina.
+    - Ordem de fotos individuais vs. em grupo (`ordem_pessoas_grupo`) dentro de cada grupo/bloco.
     - Divisão por pastas (`separar_pastas`), quando ativada.
     Devolve (blocos_finais, qtd_pastas, qtd_grupos).
     """
@@ -1854,11 +1909,12 @@ def _blocos_pastas_e_cenarios(fotos, cfg):
 
     respeitar_grupos = bool(cfg.get("respeitar_grupos_manuais", True))
     separar_pastas = bool(cfg.get("separar_pastas", True))
+    modo_pessoas = cfg.get("ordem_pessoas_grupo", "manter")
 
     tem_multiplos_grupos = len({int(f.get("grupo_ordem") or 1) for f in fotos}) > 1
 
     if respeitar_grupos:
-        ordenadas = ordenar_e_agrupar_por_grupos(fotos)
+        ordenadas = ordenar_e_agrupar_por_grupos(fotos, cfg)
         grupos_map = {}
         ordem_gids = []
         for f in ordenadas:
@@ -1871,9 +1927,6 @@ def _blocos_pastas_e_cenarios(fotos, cfg):
         blocos_finais = []
         for gid in ordem_gids:
             fotos_g = grupos_map[gid]
-            # Se todos estão num único grupo padrão (Grupo 1) e separar_pastas está ativo, separa por pasta.
-            # Se o usuário criou múltiplos grupos numerados mas também ativou separar_pastas, sub-separa por pasta
-            # apenas se desejar, mantendo a prioridade estrita da ordem dos grupos numerados (Grupo 1 -> Grupo 2 -> ...).
             if separar_pastas and not tem_multiplos_grupos:
                 sub_pastas = {}
                 ordem_p = []
@@ -1884,9 +1937,9 @@ def _blocos_pastas_e_cenarios(fotos, cfg):
                         ordem_p.append(ch_p)
                     sub_pastas[ch_p].append(f)
                 for ch_p in ordem_p:
-                    blocos_finais.append(sub_pastas[ch_p])
+                    blocos_finais.append(_ordenar_bloco_por_pessoas(sub_pastas[ch_p], modo_pessoas))
             else:
-                blocos_finais.append(fotos_g)
+                blocos_finais.append(_ordenar_bloco_por_pessoas(fotos_g, modo_pessoas))
     else:
         if separar_pastas:
             mapa_pastas = {}
@@ -1897,9 +1950,9 @@ def _blocos_pastas_e_cenarios(fotos, cfg):
                     mapa_pastas[ch_pasta] = []
                     ordem_p.append(ch_pasta)
                 mapa_pastas[ch_pasta].append(f)
-            blocos_finais = [mapa_pastas[ch] for ch in ordem_p]
+            blocos_finais = [_ordenar_bloco_por_pessoas(mapa_pastas[ch], modo_pessoas) for ch in ordem_p]
         else:
-            blocos_finais = [list(fotos)]
+            blocos_finais = [_ordenar_bloco_por_pessoas(list(fotos), modo_pessoas)]
 
     qtd_grupos = max(1, len({int(f.get("grupo_ordem") or 1) for f in fotos})) if respeitar_grupos else max(1, len(blocos_finais))
     return blocos_finais, max(1, len(pastas_unicas)), max(qtd_grupos, len(blocos_finais))
@@ -1910,12 +1963,18 @@ def dividir(fotos, produto, cfg):
     Grupos de fotos (um por lâmina) e as fotos que não couberam.
     - Quando `respeitar_grupos_manuais` está ativo, respeita a sequência de grupos numerados (Grupo 1, Grupo 2...)
       e a ordem manual das fotos dentro de cada grupo, sem nunca misturar grupos diferentes na mesma lâmina.
+    - Respeita `ordem_pessoas_grupo` ('manter', 'individuais_primeiro', 'turma_primeiro') dentro de cada grupo,
+      permitindo que fotos individuais e em grupo do mesmo grupo numerado compartilhem lâminas na transição.
     - Quando `separar_pastas` está ativo, evita misturar pastas diferentes.
     - Distribui proporcionalmente `laminas_desejadas` entre os blocos respeitando os limites do produto.
     """
     maximo = max(1, int(cfg["max_fotos_lamina"]))
     capacidade = produto["laminas_max"] * maximo
-    fotos_ordenadas = ordenar_e_agrupar_por_grupos(fotos) if cfg.get("respeitar_grupos_manuais", True) else list(fotos)
+    fotos_ordenadas = (
+        ordenar_e_agrupar_por_grupos(fotos, cfg)
+        if cfg.get("respeitar_grupos_manuais", True)
+        else _ordenar_bloco_por_pessoas(list(fotos), cfg.get("ordem_pessoas_grupo", "manter"))
+    )
     sobras = list(fotos_ordenadas[capacidade:])
     fotos_validas = list(fotos_ordenadas[:capacidade])
     if not fotos_validas:
@@ -1991,6 +2050,8 @@ def previa_diagramacao(fotos, produto, cfg):
             "cenarios": 0,
             "total_rostos": 0,
             "fotos_com_rostos": 0,
+            "fotos_individuais": 0,
+            "fotos_em_grupo": 0,
             "laminas_com_fotos": 0,
             "laminas_extras_vazias": 0,
             "laminas_estimadas": 0,
@@ -2008,7 +2069,13 @@ def previa_diagramacao(fotos, produto, cfg):
     media = usadas / float(max(1, laminas_com_fotos)) if laminas_com_fotos else 0.0
     total_rostos = 0
     fotos_com_rostos = 0
+    fotos_individuais = 0
+    fotos_em_grupo = 0
     for f in fotos_lista:
+        if eh_foto_em_grupo(f):
+            fotos_em_grupo += 1
+        else:
+            fotos_individuais += 1
         rosto = f.get("rosto") if isinstance(f, dict) else None
         if isinstance(rosto, dict):
             q = max(1, int(rosto.get("qtd") or 1))
@@ -2021,6 +2088,8 @@ def previa_diagramacao(fotos, produto, cfg):
         "cenarios": qtd_grupos,
         "total_rostos": total_rostos,
         "fotos_com_rostos": fotos_com_rostos,
+        "fotos_individuais": fotos_individuais,
+        "fotos_em_grupo": fotos_em_grupo,
         "laminas_com_fotos": laminas_com_fotos,
         "laminas_extras_vazias": extras_vazias,
         "laminas_estimadas": laminas_totais,

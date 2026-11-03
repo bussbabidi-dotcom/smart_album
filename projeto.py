@@ -126,17 +126,48 @@ def listar_grupos_ordem(projeto):
             nome_atual = "Grupo %d" % novo_num
         saida.append({
             "id": novo_num,
+            "grupo_ordem": novo_num,
             "nome": nome_atual,
             "fotos": fotos_ordenadas,
         })
     return saida
 
 
+def eh_foto_em_grupo(foto, info=None):
+    """
+    Identifica se uma foto é 'Em Grupo / Turma' (True, 2+ pessoas) ou 'Individual' (False, 0-1 pessoa).
+    Respeita primeiro a marcação manual (`tipo_pessoas` = 'individual' | 'grupo') e,
+    quando em modo 'auto', utiliza a quantidade de rostos detectados na análise.
+    """
+    if not isinstance(foto, dict):
+        return False
+    tipo_manual = str(foto.get("tipo_pessoas") or "auto").strip().lower()
+    if tipo_manual == "grupo":
+        return True
+    if tipo_manual == "individual":
+        return False
+    rosto = foto.get("rosto")
+    if rosto is None and isinstance(info, dict) and foto.get("caminho"):
+        dados = info.get(normalizar_caminho(foto["caminho"])) or {}
+        rosto = dados.get("rosto")
+    if isinstance(rosto, dict):
+        try:
+            return int(rosto.get("qtd") or 0) >= 2
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def aplicar_grupos_ordem(projeto, grupos_lista):
     """
-    Atualiza `grupo_ordem`, `nome_grupo`, `ordem_manual` e a ordem da lista `projeto["fotos"]`
+    Atualiza `grupo_ordem`, `nome_grupo`, `ordem_manual`, `tipo_pessoas` e a ordem da lista `projeto["fotos"]`
     conforme os grupos numerados definidos na janela de Ordem e Grupos, sem alterar arquivos no PC.
     """
+    mapa_orig = {
+        normalizar_caminho(f["caminho"]): f
+        for f in projeto.get("fotos", [])
+        if isinstance(f, dict) and f.get("caminho")
+    }
     nova_lista = []
     seq = 1
     vistos = set()
@@ -147,12 +178,19 @@ def aplicar_grupos_ordem(projeto, grupos_lista):
             if ch in vistos:
                 continue
             vistos.add(ch)
-            f["grupo_ordem"] = num_g
-            f["cenario_grupo"] = num_g
-            f["nome_grupo"] = nome_g
-            f["ordem_manual"] = seq
+            alvo = mapa_orig.get(ch, f)
+            alvo["grupo_ordem"] = num_g
+            alvo["cenario_grupo"] = num_g
+            alvo["nome_grupo"] = nome_g
+            alvo["ordem_manual"] = seq
+            if "tipo_pessoas" in f:
+                tp = str(f.get("tipo_pessoas") or "auto").strip().lower()
+                if tp in ("individual", "grupo"):
+                    alvo["tipo_pessoas"] = tp
+                else:
+                    alvo.pop("tipo_pessoas", None)
             seq += 1
-            nova_lista.append(f)
+            nova_lista.append(alvo)
 
     # Preserva eventuais fotos que não estavam na lista
     for f in projeto.get("fotos", []):
@@ -318,7 +356,7 @@ def ordenar_fotos(projeto, info, por="nome"):
 
 
 def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=None):
-    """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, pasta e rosto para o diagramar."""
+    """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, tipo individual/grupo, pasta e rosto para o diagramar."""
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
     chave_pasta_alvo = normalizar_caminho(pasta_alvo) if pasta_alvo else None
     saida = []
@@ -332,6 +370,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
             continue
         gid = max(1, int(foto.get("grupo_ordem") or 1))
         ord_m = int(foto.get("ordem_manual") or idx)
+        tp = str(foto.get("tipo_pessoas") or "auto").strip().lower()
         saida.append({
             "caminho": foto["caminho"],
             "proporcao": dados_proporcao(dados),
@@ -340,6 +379,8 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
             "grupo_ordem": gid,
             "nome_grupo": foto.get("nome_grupo") or ("Grupo %d" % gid),
             "ordem_manual": ord_m,
+            "tipo_pessoas": tp if tp in ("individual", "grupo") else "auto",
+            "em_grupo_pessoas": eh_foto_em_grupo(foto, info),
             "rosto": dados.get("rosto"),
             "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),
