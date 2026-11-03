@@ -170,6 +170,50 @@ class EditorFoto(tk.Toplevel):
         self.angulo = tk.DoubleVar(value=0)
         self._linha_escala(giro, "Endireitar", self.angulo, -15, 15, "angulo", "Gira suavemente em graus (duplo clique zera)")
 
+        # Melhoria Inteligente em 1 Clique (Leve, Médio, Pesado) + Lote Rápido
+        auto_box = ttk.LabelFrame(lado, text="✨ Melhoria em 1 Clique & Lote (Luz, Cor e Saturação)", padding=6)
+        auto_box.pack(fill="x", pady=3)
+        self.rotulo_diagnostico = ttk.Label(auto_box, text="Análise: pronta para ajuste inteligente", style="Fraco.TLabel")
+        self.rotulo_diagnostico.pack(anchor="w", pady=(0, 4))
+        linha_auto = ttk.Frame(auto_box)
+        linha_auto.pack(fill="x")
+        btn_leve = ttk.Button(linha_auto, text="✨ Leve", style="Compacto.TButton",
+                              command=lambda: self.aplicar_auto_nivel("leve"))
+        btn_leve.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        tema.dica(btn_leve, "Correção inteligente suave de luz, cor e saturação para esta foto")
+
+        btn_medio = ttk.Button(linha_auto, text="✨ Médio", style="PrimarioCompacto.TButton",
+                               command=lambda: self.aplicar_auto_nivel("medio"))
+        btn_medio.pack(side="left", fill="x", expand=True, padx=2)
+        tema.dica(btn_medio, "Correção inteligente equilibrada em 1 clique (recomendado para fotos escuras/lavadas)")
+
+        btn_pesado = ttk.Button(linha_auto, text="✨ Pesado", style="Compacto.TButton",
+                                command=lambda: self.aplicar_auto_nivel("pesado"))
+        btn_pesado.pack(side="left", fill="x", expand=True, padx=2)
+        tema.dica(btn_pesado, "Recuperação intensa para fotos muito escuras, sem cor ou sem contraste")
+
+        btn_orig = ttk.Button(linha_auto, text="↺ Original", style="Compacto.TButton",
+                              command=self.zerar_ajustes)
+        btn_orig.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        tema.dica(btn_orig, "Restaura a luz e a cor originais da foto")
+
+        linha_lote_ed = ttk.Frame(auto_box)
+        linha_lote_ed.pack(fill="x", pady=(4, 0))
+        btn_copiar_lam = ttk.Button(linha_lote_ed, text="📋 Aplicar na Lâmina", style="Compacto.TButton",
+                                    command=lambda: self.copiar_ajustes_para_lote("lamina"))
+        btn_copiar_lam.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        tema.dica(btn_copiar_lam, "Copia os ajustes atuais de Luz, Cor e Saturação desta foto para todas as fotos da lâmina aberta")
+
+        btn_copiar_alb = ttk.Button(linha_lote_ed, text="📋 Aplicar no Álbum", style="Compacto.TButton",
+                                    command=lambda: self.copiar_ajustes_para_lote("album"))
+        btn_copiar_alb.pack(side="left", fill="x", expand=True, padx=2)
+        tema.dica(btn_copiar_alb, "Copia os ajustes atuais de Luz, Cor e Saturação para todas as fotos do álbum")
+
+        btn_janela_lote = ttk.Button(linha_lote_ed, text="⚡ Lote Inteligente...", style="Compacto.TButton",
+                                     command=self._abrir_janela_lote)
+        btn_janela_lote.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        tema.dica(btn_janela_lote, "Abre o painel de edição em lote inteligente (Leve, Médio, Pesado + gravação nas originais)")
+
         # Grupos estilo Lightroom / Camera Raw: Luz, Cor e Efeitos
         quadros_lr = {}
         for nome_grupo, titulo_grupo in (
@@ -194,7 +238,9 @@ class EditorFoto(tk.Toplevel):
         linha_zerar = ttk.Frame(lado)
         linha_zerar.pack(fill="x", pady=(4, 3))
         ttk.Button(linha_zerar, text="↺ Zerar todos os ajustes de luz e cor", style="Compacto.TButton",
-                   command=self.zerar_ajustes).pack(fill="x")
+                   command=self.zerar_ajustes).pack(fill="x", pady=(0, 2))
+        ttk.Button(linha_zerar, text="💾 Gravar ajustes na foto original do PC...", style="Compacto.TButton",
+                   command=self.gravar_na_original).pack(fill="x")
 
         tratar = ttk.LabelFrame(lado, text="Tratar Arquivo Original Externo", padding=6)
         tratar.pack(fill="x", pady=3)
@@ -202,6 +248,7 @@ class EditorFoto(tk.Toplevel):
         linha.pack(fill="x")
         ttk.Button(linha, text="Ps  Photoshop", style="Compacto.TButton", command=self._photoshop).pack(side="left", fill="x", expand=True, padx=(0, 2))
         ttk.Button(linha, text="Lr  Lightroom", style="Compacto.TButton", command=self._lightroom).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
 
     def _linha_escala(self, pai, texto, variavel, de, ate, chave, dica_txt=None):
         linha = ttk.Frame(pai)

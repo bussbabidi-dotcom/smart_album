@@ -31,10 +31,19 @@ CHAVES_AJUSTES = (
     "nitidez", "vinheta",
 )
 
+NIVEIS_AUTO_MELHORIA = ("leve", "medio", "pesado")
+FATORES_NIVEL_AUTO = {
+    "leve": 0.52,
+    "medio": 0.88,
+    "pesado": 1.28,
+}
+
 _CACHE_VINHETA_BASE = None
 _CACHE_ESPACO_RAPIDO = OrderedDict()
+_CACHE_FOTOMETRIA = OrderedDict()
 _TRAVA_CACHE_ESPACO = threading.Lock()
 _LIMITE_CACHE_ESPACO = 240
+_LIMITE_CACHE_FOTOMETRIA = 800
 
 
 def edicao_padrao():
@@ -550,3 +559,346 @@ def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapid
                 _CACHE_ESPACO_RAPIDO.popitem(last=False)
         return pronta.copy()
     return pronta
+
+
+# ------------------------------------------------------------
+# Edição em Lote Inteligente (1 Clique: Leve, Médio e Pesado)
+# ------------------------------------------------------------
+
+def tem_ajuste_luz_cor(edicao):
+    """Retorna True se o dicionário de edição possuir algum ajuste de luz, cor, nitidez, vinheta ou P&B."""
+    if not isinstance(edicao, dict):
+        return False
+    if bool(edicao.get("pb")):
+        return True
+    for ch in CHAVES_AJUSTES:
+        try:
+            if abs(float(edicao.get(ch) or 0)) >= 0.5:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def limpar_cache_espaco_rapido(caminho=None):
+    """Invalida o cache de renderização rápida e fotometria (de uma foto específica ou de todas)."""
+    chave_alvo = normalizar_caminho(caminho) if caminho else None
+    with _TRAVA_CACHE_ESPACO:
+        if not chave_alvo:
+            _CACHE_ESPACO_RAPIDO.clear()
+            _CACHE_FOTOMETRIA.clear()
+        else:
+            for k in [k for k in _CACHE_ESPACO_RAPIDO if k[0] == chave_alvo]:
+                _CACHE_ESPACO_RAPIDO.pop(k, None)
+            for k in [k for k in _CACHE_FOTOMETRIA if k[0] == chave_alvo]:
+                _CACHE_FOTOMETRIA.pop(k, None)
+
+
+def analisar_fotometria_rapida(img_ou_caminho):
+    """
+    Analisa rapidamente exposição, sombras, altas luzes, contraste, balanço de branco
+    e saturação de uma imagem para calcular a correção inteligente por foto.
+    """
+    from pathlib import Path
+    chave_cache = None
+    img = None
+    if isinstance(img_ou_caminho, Image.Image):
+        img = img_ou_caminho
+    elif img_ou_caminho:
+        caminho_str = str(img_ou_caminho)
+        ch_norm = normalizar_caminho(caminho_str)
+        try:
+            mtime = Path(caminho_str).stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        chave_cache = (ch_norm, mtime)
+        with _TRAVA_CACHE_ESPACO:
+            guardado = _CACHE_FOTOMETRIA.get(chave_cache)
+            if guardado is not None:
+                _CACHE_FOTOMETRIA.move_to_end(chave_cache)
+                return dict(guardado)
+        try:
+            img = analise.miniatura(caminho_str, 160)
+        except Exception:
+            img = None
+
+    if img is None:
+        return {
+            "lum_media": 124.0,
+            "lum_mediana": 124.0,
+            "lum_p10": 42.0,
+            "lum_p90": 205.0,
+            "alcance": 163.0,
+            "dp_lum": 52.0,
+            "frac_escuras": 0.14,
+            "frac_estouradas": 0.03,
+            "desvio_quente": 0.0,
+            "desvio_matiz": 0.0,
+            "sat_media": 0.30,
+            "frac_lavadas": 0.28,
+            "diagnostico": "Equilibrada",
+        }
+
+    amostra = img.convert("RGB").resize((72, 72), Image.BILINEAR)
+    dados_px = list(amostra.getdata())
+    total = max(1, len(dados_px))
+
+    lums = []
+    sats = []
+    soma_r_meio = 0.0
+    soma_g_meio = 0.0
+    soma_b_meio = 0.0
+    qtd_meio = 0
+    escuras = 0
+    estouradas = 0
+    lavadas = 0
+
+    for r, g, b in dados_px:
+        y = 0.299 * r + 0.587 * g + 0.114 * b
+        lums.append(y)
+        if y < 55.0:
+            escuras += 1
+        elif y > 224.0:
+            estouradas += 1
+
+        cmax = max(r, g, b)
+        cmin = min(r, g, b)
+        s = (cmax - cmin) / float(cmax) if cmax > 8 else 0.0
+        sats.append(s)
+        if s < 0.20 and 30.0 < y < 225.0:
+            lavadas += 1
+
+        if 35.0 <= y <= 220.0:
+            soma_r_meio += r
+            soma_g_meio += g
+            soma_b_meio += b
+            qtd_meio += 1
+
+    lums.sort()
+    lum_media = sum(lums) / float(total)
+    lum_mediana = lums[total // 2]
+    lum_p10 = lums[int(total * 0.10)]
+    lum_p90 = lums[int(total * 0.90)]
+    alcance = max(1.0, lum_p90 - lum_p10)
+    variancia = sum((v - lum_media) ** 2 for v in lums) / float(total)
+    dp_lum = math.sqrt(variancia)
+
+    if qtd_meio > 20:
+        rm = soma_r_meio / float(qtd_meio)
+        gm = soma_g_meio / float(qtd_meio)
+        bm = soma_b_meio / float(qtd_meio)
+        # Positivo = foto já quente (mais R que B); Negativo = foto fria/azulada (mais B que R)
+        desvio_quente = (rm - bm)
+        # Positivo = puxando para magenta; Negativo = esverdeado
+        desvio_matiz = ((rm + bm) * 0.5) - gm
+    else:
+        desvio_quente = 0.0
+        desvio_matiz = 0.0
+
+    sat_media = sum(sats) / float(total)
+    frac_escuras = escuras / float(total)
+    frac_estouradas = estouradas / float(total)
+    frac_lavadas = lavadas / float(total)
+
+    etiquetas = []
+    if lum_mediana < 102 or lum_media < 104:
+        etiquetas.append("Escura")
+    elif lum_mediana > 164 or frac_estouradas > 0.12:
+        etiquetas.append("Clara/Estourada")
+    if alcance < 128 or dp_lum < 42:
+        etiquetas.append("Lavada")
+    if desvio_quente < -5.0:
+        etiquetas.append("Fria")
+    elif desvio_quente > 24.0:
+        etiquetas.append("Muito Quente")
+    if sat_media < 0.24:
+        etiquetas.append("Pouca Cor")
+
+    resultado = {
+        "lum_media": round(lum_media, 2),
+        "lum_mediana": round(lum_mediana, 2),
+        "lum_p10": round(lum_p10, 2),
+        "lum_p90": round(lum_p90, 2),
+        "alcance": round(alcance, 2),
+        "dp_lum": round(dp_lum, 2),
+        "frac_escuras": round(frac_escuras, 3),
+        "frac_estouradas": round(frac_estouradas, 3),
+        "desvio_quente": round(desvio_quente, 2),
+        "desvio_matiz": round(desvio_matiz, 2),
+        "sat_media": round(sat_media, 3),
+        "frac_lavadas": round(frac_lavadas, 3),
+        "diagnostico": " + ".join(etiquetas) if etiquetas else "Boa / Equilibrada",
+    }
+
+    if chave_cache is not None:
+        with _TRAVA_CACHE_ESPACO:
+            _CACHE_FOTOMETRIA[chave_cache] = dict(resultado)
+            _CACHE_FOTOMETRIA.move_to_end(chave_cache)
+            while len(_CACHE_FOTOMETRIA) > _LIMITE_CACHE_FOTOMETRIA:
+                _CACHE_FOTOMETRIA.popitem(last=False)
+    return resultado
+
+
+def calcular_ajuste_inteligente(img_ou_caminho, nivel="medio", extras=None, base_edicao=None):
+    """
+    Calcula os ajustes ideais de Luz, Cor, Saturação e Nitidez para deixar uma foto
+    ruim/apagada bonita em 1 clique, escalado pelo nível ('leve', 'medio', 'pesado')
+    e somado aos ajustes manuais extras do lote.
+    """
+    ed_saida = dict(base_edicao) if isinstance(base_edicao, dict) else {}
+    nivel_norm = str(nivel or "medio").strip().lower()
+
+    if nivel_norm in ("original", "zerar", "nenhum", "reset"):
+        for ch in CHAVES_AJUSTES:
+            ed_saida[ch] = 0
+        ed_saida["pb"] = False
+        if isinstance(extras, dict):
+            for ch in CHAVES_AJUSTES:
+                if ch in extras and extras[ch] is not None:
+                    lim_min = 0 if ch == "nitidez" else -100
+                    ed_saida[ch] = int(round(max(lim_min, min(100, float(extras[ch])))))
+            if "pb" in extras:
+                ed_saida["pb"] = bool(extras["pb"])
+        return ed_saida
+
+    fator = FATORES_NIVEL_AUTO.get(nivel_norm, FATORES_NIVEL_AUTO["medio"])
+    foto_stats = analisar_fotometria_rapida(img_ou_caminho)
+
+    lum_med = foto_stats["lum_mediana"]
+    lum_avg = foto_stats["lum_media"]
+    lum_p10 = foto_stats["lum_p10"]
+    lum_p90 = foto_stats["lum_p90"]
+    alcance = foto_stats["alcance"]
+    dp_lum = foto_stats["dp_lum"]
+    frac_escuras = foto_stats["frac_escuras"]
+    frac_estouradas = foto_stats["frac_estouradas"]
+    desvio_quente = foto_stats["desvio_quente"]
+    desvio_matiz = foto_stats["desvio_matiz"]
+    sat_media = foto_stats["sat_media"]
+
+    # 1. Exposição e Brilho (alvo de mediana ~128, média ~126)
+    alvo_lum = 128.0
+    erro_lum = alvo_lum - (lum_med * 0.65 + lum_avg * 0.35)
+    if erro_lum > 3.0:
+        # Foto escura / subexposta
+        exposicao_base = min(46.0, erro_lum * 0.68)
+        brilho_base = min(24.0, erro_lum * 0.28)
+    elif erro_lum < -10.0:
+        # Foto superexposta / muito clara
+        exposicao_base = max(-32.0, erro_lum * 0.45)
+        brilho_base = max(-16.0, erro_lum * 0.20)
+    else:
+        exposicao_base = max(0.0, erro_lum * 0.30) + 4.0
+        brilho_base = 3.0
+
+    # 2. Sombras (abre áreas escuras sem lavar o preto) e Realces (protege altas luzes)
+    sombras_base = 16.0 + max(0.0, (55.0 - lum_p10) * 0.48) + (frac_escuras * 38.0)
+    sombras_base = min(62.0, max(12.0, sombras_base))
+
+    realces_base = -10.0 - max(0.0, (lum_p90 - 192.0) * 0.55) - (frac_estouradas * 65.0)
+    if exposicao_base > 12.0:
+        realces_base -= exposicao_base * 0.35
+    realces_base = max(-58.0, min(-6.0, realces_base))
+
+    # 3. Contraste (recupera fotos lavadas e compensa abertura de sombras)
+    falta_alcance = max(0.0, 168.0 - alcance)
+    falta_dp = max(0.0, 54.0 - dp_lum)
+    contraste_base = 12.0 + (falta_alcance * 0.22) + (falta_dp * 0.32)
+    contraste_base = min(42.0, max(10.0, contraste_base))
+
+    # 4. Temperatura e Matiz (corrige fotos frias/azuladas ou esverdeadas para tom agradável de pele)
+    # Alvo levemente quente (+7 de R-B nos meios-tons)
+    alvo_quente = 7.5
+    erro_temp = alvo_quente - desvio_quente
+    temperatura_base = max(-26.0, min(32.0, erro_temp * 0.85))
+    if -3.0 <= temperatura_base <= 5.0:
+        temperatura_base = 4.0  # Toque sutil dourado em fotos neutras
+
+    # Matiz: corrige esverdeado (desvio_matiz < 0 -> puxa magenta +) ou excesso de magenta
+    matiz_base = max(-18.0, min(18.0, -desvio_matiz * 0.65))
+
+    # 5. Vibração (protege pele) e Saturação
+    falta_cor = max(0.0, 0.34 - sat_media)
+    vibracao_base = 20.0 + (falta_cor * 95.0)
+    vibracao_base = min(48.0, max(14.0, vibracao_base))
+
+    saturacao_base = 6.0 + (falta_cor * 38.0) - max(0.0, (sat_media - 0.42) * 45.0)
+    saturacao_base = min(22.0, max(-8.0, saturacao_base))
+
+    # 6. Nitidez (definição limpa para impressão)
+    nitidez_base = 22.0
+
+    calculados = {
+        "exposicao": exposicao_base * fator,
+        "brilho": brilho_base * fator,
+        "contraste": contraste_base * fator,
+        "realces": realces_base * fator,
+        "sombras": sombras_base * fator,
+        "temperatura": temperatura_base * fator,
+        "matiz": matiz_base * fator,
+        "vibracao": vibracao_base * fator,
+        "saturacao": saturacao_base * fator,
+        "nitidez": nitidez_base * fator,
+        "vinheta": 0.0,
+    }
+
+    extras_dict = extras if isinstance(extras, dict) else {}
+    for ch in CHAVES_AJUSTES:
+        soma = calculados.get(ch, 0.0) + float(extras_dict.get(ch) or 0.0)
+        lim_min = 0 if ch == "nitidez" else -100
+        ed_saida[ch] = int(round(max(lim_min, min(100, soma))))
+
+    if "pb" in extras_dict:
+        ed_saida["pb"] = bool(extras_dict["pb"])
+    else:
+        ed_saida.setdefault("pb", False)
+
+    return ed_saida
+
+
+def gravar_ajustes_no_arquivo_original(caminho, edicao):
+    """
+    Aplica definitivamente os ajustes de Luz, Cor, Saturação e Nitidez no arquivo
+    de imagem original em disco, preservando perfil ICC, EXIF e DPI, e limpa os caches.
+    """
+    from pathlib import Path
+    arq = Path(str(caminho))
+    if not arq.is_file():
+        raise FileNotFoundError("Arquivo não encontrado: %s" % caminho)
+
+    img, icc, dpi = analise.abrir_imagem(str(arq))
+    exif_bytes = img.info.get("exif")
+    tratada = aplicar_ajustes(img, edicao)
+
+    ext = arq.suffix.lower()
+    kwargs = {}
+    if icc:
+        kwargs["icc_profile"] = icc
+    if dpi:
+        kwargs["dpi"] = (int(round(dpi[0])), int(round(dpi[1])))
+    if exif_bytes:
+        kwargs["exif"] = exif_bytes
+
+    temp_arq = arq.with_name(arq.stem + "_ smart_tmp" + arq.suffix)
+    try:
+        if ext in (".jpg", ".jpeg"):
+            tratada.save(str(temp_arq), format="JPEG", quality=96, subsampling=0, **kwargs)
+        elif ext == ".png":
+            tratada.save(str(temp_arq), format="PNG", optimize=True, **kwargs)
+        elif ext == ".webp":
+            tratada.save(str(temp_arq), format="WEBP", quality=96, **kwargs)
+        elif ext in (".tif", ".tiff"):
+            tratada.save(str(temp_arq), format="TIFF", **kwargs)
+        else:
+            tratada.save(str(temp_arq), **kwargs)
+        temp_arq.replace(arq)
+    finally:
+        if temp_arq.exists():
+            try:
+                temp_arq.unlink()
+            except OSError:
+                pass
+
+    analise.esquecer(str(arq))
+    limpar_cache_espaco_rapido(str(arq))
+    return True

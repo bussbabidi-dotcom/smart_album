@@ -387,6 +387,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
             "assinatura_cenario": ass_cen if isinstance(ass_cen, (list, tuple)) else None,
             "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),
+            "edicao": dict(foto.get("edicao_padrao") or {}),
         })
     return saida
 
