@@ -18,7 +18,7 @@ from PIL import ImageTk
 
 import analise
 import tema
-from comum import cor_hex, gravar_json, ler_json, normalizar_caminho
+from comum import cor_hex, cor_rgb, gravar_json, ler_json, normalizar_caminho
 from composicao import AJUSTES_FUNDO_PADRAO
 
 LIMITE_RECENTES = 8

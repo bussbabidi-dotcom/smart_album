@@ -2,6 +2,8 @@
 """Tema escuro inspirado no Adobe Photoshop CC (grafite #181818 / #252526 com seletor de cores HSB/RGB/Hex e conta-gotas de tela)."""
 
 import colorsys
+import ctypes
+import sys
 import tkinter as tk
 from tkinter import colorchooser, ttk
 
