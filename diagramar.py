@@ -2392,9 +2392,19 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
     alvo = max(min_prod, min(int(produto["laminas_max"]), desejadas))
     while len(laminas) < alvo:
         laminas.append(lamina_vazia(cfg))
+    edicoes_fotos = {
+        str(f.get("caminho")): dict(f.get("edicao") or {})
+        for f in fotos
+        if isinstance(f, dict) and f.get("caminho") and f.get("edicao")
+    }
     for lamina in laminas:
         for espaco in lamina["espacos"]:
             edicao = espaco.setdefault("edicao", {})
+            cam_esp = str(espaco.get("foto") or "")
+            if cam_esp and cam_esp in edicoes_fotos:
+                for ch_ed, val_ed in edicoes_fotos[cam_esp].items():
+                    if ch_ed != "corte" and ch_ed not in edicao:
+                        edicao[ch_ed] = val_ed
             if not cfg.get("reconhecer_rostos", True):
                 edicao["ignorar_rosto"] = True
     return laminas, [f["caminho"] for f in sobras]

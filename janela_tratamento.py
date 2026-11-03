@@ -534,7 +534,7 @@ class JanelaTratamento(tk.Toplevel):
             unicas = list(dict.fromkeys(fotos))
             total = len(unicas)
             for idx, caminho in enumerate(unicas, 1):
-                if t.parar.is_set():
+                if t.parar():
                     break
                 nome_arq = Path(caminho).name
                 t.aviso("Gravando melhoria (%d/%d): %s" % (idx, total, nome_arq))
