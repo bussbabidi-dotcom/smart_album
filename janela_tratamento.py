@@ -16,24 +16,52 @@ from PIL import ImageTk
 import analise
 import lightroom
 import photoshop
+import recorte
 import tema
 
 ALTURA_MINIATURA = 46
 MINIATURAS_MAXIMO = 40
+
+SLIDERS_LOTE = (
+    ("exposicao", "Exposição (Luz)", -100, 100, "Clareia ou escurece a exposição geral em lote"),
+    ("brilho", "Brilho", -100, 100, "Ajusta os meios-tons de todas as fotos do lote"),
+    ("contraste", "Contraste", -100, 100, "Aumenta ou suaviza o contraste geral"),
+    ("sombras", "Sombras", -100, 100, "Recupera detalhes nas partes escuras das fotos"),
+    ("realces", "Realces", -100, 100, "Protege ou recupera brilhos intensos e roupas claras"),
+    ("temperatura", "Temperatura (Cor)", -100, 100, "Corrige fotos frias/azuladas (-) ou quentes/amareladas (+)"),
+    ("matiz", "Matiz (Verde/Magenta)", -100, 100, "Ajuste fino de tinta de pele e iluminação ambiente"),
+    ("vibracao", "Vibração", -100, 100, "Realça cores apagadas protegendo tons de pele"),
+    ("saturacao", "Saturação", -100, 100, "Intensidade global de todas as cores"),
+    ("nitidez", "Nitidez", 0, 100, "Realça detalhes e foco para impressão"),
+)
 
 
 class JanelaTratamento(tk.Toplevel):
     def __init__(self, app, fotos=None):
         super().__init__(app.root)
         self.app = app
-        self.title("Tratamento de Fotos · Photoshop & Lightroom Classic")
+        self.title("Edição em Lote Inteligente (Luz, Cor e Saturação) · Photoshop & Lightroom")
         self.configure(bg=tema.PAINEL)
         self.transient(app.root)
-        self.minsize(500, 350)
+        self.minsize(560, 420)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.bind("<Escape>", lambda e: self.fechar())
         self.fotos_escolhidas = [f for f in (fotos or []) if f]
-        self.escopo = tk.StringVar(value="escolhidas" if self.fotos_escolhidas else "selecionadas")
+        if self.fotos_escolhidas:
+            escopo_ini = "escolhidas"
+        elif app._fotos_escolhidas():
+            escopo_ini = "selecionadas"
+        elif app._fotos_do_album():
+            escopo_ini = "album"
+        else:
+            escopo_ini = "projeto"
+        self.escopo = tk.StringVar(value=escopo_ini)
+        self.nivel_auto_lote = tk.StringVar(value="medio")
+        self.pb_lote = tk.BooleanVar(value=False)
+        self.vars_lote = {}
+        self.rotulos_lote = {}
+        for chave, *_ in SLIDERS_LOTE:
+            self.vars_lote[chave] = tk.DoubleVar(value=0.0)
         ps = app.projeto.get("photoshop") or {}
         lr = app.projeto.get("lightroom") or {}
         self.conjunto = tk.StringVar(value=ps.get("conjunto", ""))
@@ -54,10 +82,10 @@ class JanelaTratamento(tk.Toplevel):
             self,
             pai=app.root,
             chave="janela_tratamento",
-            largura=710,
-            altura=530,
-            min_largura=500,
-            min_altura=350,
+            largura=780,
+            altura=680,
+            min_largura=560,
+            min_altura=420,
         )
 
     # ---------------- montagem ----------------
@@ -65,9 +93,9 @@ class JanelaTratamento(tk.Toplevel):
     def _montar(self):
         tema.criar_cabecalho_janela(
             self,
-            "Automação de Tratamento Externo (Photoshop Actions & Lightroom)",
-            "Edite arquivos diretamente no Adobe Photoshop ou aplique Ações/Presets em lote",
-            icone="⚡",
+            "Edição em Lote Inteligente (1 Clique) + Photoshop & Lightroom",
+            "Melhore fotos escuras, lavadas ou sem cor em 1 clique (Leve, Médio e Pesado) com filtros de Luz, Cor e Saturação",
+            icone="✨",
         )
 
         rodape_fixo = tk.Frame(self, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
@@ -78,7 +106,7 @@ class JanelaTratamento(tk.Toplevel):
         quadro.columnconfigure(0, weight=1, uniform="col_trat")
         quadro.columnconfigure(1, weight=1, uniform="col_trat")
 
-        quais = ttk.LabelFrame(quadro, text="Escopo de Fotos Selecionadas", padding=8)
+        quais = ttk.LabelFrame(quadro, text="1. Escopo das Fotos para Edição em Lote", padding=8)
         quais.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
         linha = ttk.Frame(quais)
         linha.pack(fill="x")
@@ -98,8 +126,158 @@ class JanelaTratamento(tk.Toplevel):
         )
         self.faixa.pack(fill="x")
 
-        ps = ttk.LabelFrame(quadro, text="Adobe Photoshop CC (Edição & Actions)", padding=10)
-        ps.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
+        # ---------------- SEÇÃO NOVA: EDIÇÃO EM LOTE INTELIGENTE (LUZ, COR E SATURAÇÃO) ----------------
+        lote_box = ttk.LabelFrame(
+            quadro,
+            text="2. Melhoria Rápida em 1 Clique (Leve, Médio e Pesado) + Filtros de Luz, Cor e Saturação",
+            padding=10,
+        )
+        lote_box.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+
+        lbl_explica = ttk.Label(
+            lote_box,
+            text="O modo Inteligente analisa cada foto individualmente (recupera fotos escuras, estouradas, lavadas ou com cor fria/amarelada) na intensidade escolhida:",
+            style="Fraco.TLabel",
+            wraplength=700,
+            justify="left",
+        )
+        lbl_explica.pack(anchor="w", pady=(0, 6))
+        self._lbl_explica_lote = lbl_explica
+
+        # Botões de ação imediata em 1 clique
+        barra_1clique = ttk.Frame(lote_box)
+        barra_1clique.pack(fill="x", pady=(0, 8))
+        for col_idx in range(4):
+            barra_1clique.columnconfigure(col_idx, weight=1, uniform="btn1c")
+
+        btn_1c_leve = ttk.Button(
+            barra_1clique,
+            text="✨ 1-Clique Leve",
+            style="Compacto.TButton",
+            command=lambda: self.aplicar_1clique_rapido("leve"),
+        )
+        btn_1c_leve.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        tema.dica(btn_1c_leve, "Correção sutil (~45%): melhora luz, cor e nitidez mantendo o aspecto natural da foto.")
+
+        btn_1c_medio = ttk.Button(
+            barra_1clique,
+            text="✨ 1-Clique Médio (Ideal)",
+            style="PrimarioCompacto.TButton",
+            command=lambda: self.aplicar_1clique_rapido("medio"),
+        )
+        btn_1c_medio.grid(row=0, column=1, sticky="ew", padx=2)
+        tema.dica(btn_1c_medio, "Equilíbrio ideal (~80%): corrige fotos escuras, sem contraste ou desbotadas em 1 clique.")
+
+        btn_1c_pesado = ttk.Button(
+            barra_1clique,
+            text="🔥 1-Clique Pesado",
+            style="Compacto.TButton",
+            command=lambda: self.aplicar_1clique_rapido("pesado"),
+        )
+        btn_1c_pesado.grid(row=0, column=2, sticky="ew", padx=2)
+        tema.dica(btn_1c_pesado, "Recuperação intensa (100%+): resgata fotos ruins, muito escuras, contraluz forte ou cores apagadas.")
+
+        btn_1c_zerar = ttk.Button(
+            barra_1clique,
+            text="↺ Restaurar Original",
+            style="Compacto.TButton",
+            command=self.restaurar_original_lote,
+        )
+        btn_1c_zerar.grid(row=0, column=3, sticky="ew", padx=(4, 0))
+        tema.dica(btn_1c_zerar, "Remove todos os filtros de luz, cor e saturação das fotos do escopo selecionado (suporta Ctrl+Z).")
+
+        # Seletor do modo base + Sliders de ajuste fino em lote
+        modo_linha = ttk.Frame(lote_box)
+        modo_linha.pack(fill="x", pady=(2, 6))
+        ttk.Label(modo_linha, text="Modo base ao aplicar:", style="Fraco.TLabel").pack(side="left", padx=(0, 6))
+        for val_n, txt_n in (
+            ("leve", "Automático Leve"),
+            ("medio", "Automático Médio"),
+            ("pesado", "Automático Pesado"),
+            ("manual", "Somente Filtros Manuais abaixo"),
+        ):
+            ttk.Radiobutton(
+                modo_linha,
+                text=txt_n,
+                value=val_n,
+                variable=self.nivel_auto_lote,
+            ).pack(side="left", padx=(0, 10))
+
+        grade_sliders = ttk.Frame(lote_box)
+        grade_sliders.pack(fill="x", pady=(2, 6))
+        grade_sliders.columnconfigure(0, weight=1, uniform="col_sl")
+        grade_sliders.columnconfigure(1, weight=1, uniform="col_sl")
+
+        for idx_s, (chave, nome_s, vmin, vmax, dica_s) in enumerate(SLIDERS_LOTE):
+            col_s = idx_s % 2
+            row_s = idx_s // 2
+            celula = ttk.Frame(grade_sliders)
+            celula.grid(row=row_s, column=col_s, sticky="ew", padx=(0, 8) if col_s == 0 else (8, 0), pady=2)
+            topo_s = ttk.Frame(celula)
+            topo_s.pack(fill="x")
+            lbl_n = ttk.Label(topo_s, text=nome_s, style="Fraco.TLabel")
+            lbl_n.pack(side="left")
+            tema.dica(lbl_n, dica_s + " (Duplo-clique na barra para zerar)")
+            lbl_v = ttk.Label(topo_s, text="0", style="Fraco.TLabel", width=5, anchor="e")
+            lbl_v.pack(side="right")
+            self.rotulos_lote[chave] = lbl_v
+            var_s = self.vars_lote[chave]
+            escala_s = ttk.Scale(
+                celula,
+                from_=vmin,
+                to=vmax,
+                variable=var_s,
+                command=lambda v, c=chave, r=lbl_v: self._ao_mover_slider_lote(c, v, r),
+            )
+            escala_s.pack(fill="x")
+            escala_s.bind("<Double-Button-1>", lambda e, c=chave: self._zerar_slider_lote(c))
+
+        linha_opcoes_lote = ttk.Frame(lote_box)
+        linha_opcoes_lote.pack(fill="x", pady=(4, 6))
+        ttk.Checkbutton(
+            linha_opcoes_lote,
+            text="Converter lote para Preto e Branco (P&B)",
+            variable=self.pb_lote,
+        ).pack(side="left")
+        ttk.Button(
+            linha_opcoes_lote,
+            text="↺ Zerar Barras Manuais",
+            style="Compacto.TButton",
+            command=self.zerar_barras_lote,
+        ).pack(side="right")
+
+        linha_acoes_lote = ttk.Frame(lote_box)
+        linha_acoes_lote.pack(fill="x", pady=(4, 0))
+        linha_acoes_lote.columnconfigure(0, weight=3)
+        linha_acoes_lote.columnconfigure(1, weight=2)
+
+        self.botao_lote_projeto = ttk.Button(
+            linha_acoes_lote,
+            text="✨ Aplicar no Projeto / Álbum (Com Ctrl+Z, sem alterar originais)",
+            style="PrimarioCompacto.TButton",
+            command=self.aplicar_lote_no_projeto,
+        )
+        self.botao_lote_projeto.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        tema.dica(
+            self.botao_lote_projeto,
+            "Aplica o nível inteligente + filtros manuais em todas as fotos do escopo dentro do projeto. Pode desfazer com Ctrl+Z.",
+        )
+
+        self.botao_lote_disco = ttk.Button(
+            linha_acoes_lote,
+            text="💾 Gravar nas Fotos Originais do Disco",
+            style="Compacto.TButton",
+            command=self.gravar_lote_nas_originais,
+        )
+        self.botao_lote_disco.grid(row=0, column=1, sticky="ew")
+        tema.dica(
+            self.botao_lote_disco,
+            "Salva os ajustes de Luz, Cor e Saturação diretamente nos arquivos originais no computador (requer marcar a confirmação abaixo).",
+        )
+
+        # ---------------- SEÇÃO EXTERNA: PHOTOSHOP & LIGHTROOM ----------------
+        ps = ttk.LabelFrame(quadro, text="3. Adobe Photoshop CC (Edição & Actions)", padding=10)
+        ps.grid(row=2, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
         botao = ttk.Button(ps, text="Ps  Abrir no Photoshop para editar", style="Compacto.TButton", command=self.editar_no_photoshop)
         botao.pack(fill="x")
         tema.dica(botao, "Abre as próprias fotos. Edite e salve com Ctrl+S: o álbum atualiza sozinho.")
@@ -117,8 +295,8 @@ class JanelaTratamento(tk.Toplevel):
         self.botao_acao = ttk.Button(ps, text="▶ Rodar Ação nas Fotos", style="PrimarioCompacto.TButton", command=self.rodar_acao)
         self.botao_acao.pack(fill="x", pady=(8, 0))
 
-        lr = ttk.LabelFrame(quadro, text="Adobe Lightroom Classic (Plugin Ponte)", padding=10)
-        lr.grid(row=1, column=1, sticky="nsew", pady=(0, 8))
+        lr = ttk.LabelFrame(quadro, text="4. Adobe Lightroom Classic (Plugin Ponte)", padding=10)
+        lr.grid(row=2, column=1, sticky="nsew", pady=(0, 8))
         self.rotulo_lr = ttk.Label(lr, text="", style="Fraco.TLabel", wraplength=280, justify="left")
         self.rotulo_lr.pack(anchor="w")
         ttk.Label(lr, text="Preset de Revelação", style="Fraco.TLabel").pack(anchor="w", pady=(8, 2))
@@ -141,11 +319,11 @@ class JanelaTratamento(tk.Toplevel):
         self.botao_lr = ttk.Button(lr, text="▶ Tratar no Lightroom", style="PrimarioCompacto.TButton", command=self.tratar_lightroom)
         self.botao_lr.pack(fill="x", pady=(8, 0))
 
-        aviso = ttk.LabelFrame(quadro, text="Confirmação de Substituição de Originais", padding=8)
-        aviso.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+        aviso = ttk.LabelFrame(quadro, text="Confirmação para Substituir Arquivos Originais no Disco", padding=8)
+        aviso.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
         lbl_aviso_sub = ttk.Label(
             aviso,
-            text="Rodar a Ação ou o Lightroom SUBSTITUI as fotos originais pelas tratadas, no mesmo lugar e com o mesmo nome, sem cópia. Não dá para desfazer pelo programa.",
+            text="Atenção: 'Aplicar no Projeto / Álbum' NÃO altera os arquivos do PC e aceita Ctrl+Z. Já 'Gravar nas Fotos Originais', 'Rodar Ação' ou 'Lightroom' substituem os arquivos originais no disco.",
             foreground=tema.ALERTA,
             wraplength=600,
             justify="left",
@@ -154,8 +332,8 @@ class JanelaTratamento(tk.Toplevel):
         ttk.Checkbutton(aviso, text="Entendi: autorizo substituir os arquivos originais no disco", variable=self.entendi).pack(anchor="w", pady=(4, 0))
 
         andamento = ttk.Frame(quadro)
-        andamento.grid(row=3, column=0, columnspan=2, sticky="nsew")
-        quadro.rowconfigure(3, weight=1)
+        andamento.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        quadro.rowconfigure(4, weight=1)
         self.barra = ttk.Progressbar(andamento, mode="determinate")
         self.barra.pack(fill="x")
         self.registro = tk.Text(andamento, height=5, bg=tema.FUNDO, fg=tema.TEXTO, relief="solid", bd=1,
@@ -177,6 +355,7 @@ class JanelaTratamento(tk.Toplevel):
             self.rotulo_lr.configure(wraplength=larg_col)
             lbl_instalar_lr.configure(wraplength=larg_col)
             lbl_aviso_sub.configure(wraplength=larg_total)
+            self._lbl_explica_lote.configure(wraplength=larg_total)
             self.rotulo_resumo.configure(wraplength=larg_total)
 
         quadro.bind("<Configure>", _ajustar_wraps_tratamento, add="+")
@@ -225,6 +404,162 @@ class JanelaTratamento(tk.Toplevel):
         if len(fotos) > MINIATURAS_MAXIMO:
             c.create_text(x + 4, ALTURA_MINIATURA // 2 + 3, anchor="w", fill=tema.TEXTO_FRACO,
                           text="+ %s" % (len(fotos) - MINIATURAS_MAXIMO))
+
+    # ---------------- Edição em Lote Inteligente (1 Clique + Luz, Cor e Saturação) ----------------
+
+    def _ao_mover_slider_lote(self, chave, valor, rotulo):
+        num = int(round(float(valor)))
+        rotulo.configure(text="%d" % num)
+
+    def _zerar_slider_lote(self, chave):
+        if chave in self.vars_lote:
+            self.vars_lote[chave].set(0.0)
+        if chave in self.rotulos_lote:
+            self.rotulos_lote[chave].configure(text="0")
+
+    def zerar_barras_lote(self):
+        for chave, var_s in self.vars_lote.items():
+            var_s.set(0.0)
+            if chave in self.rotulos_lote:
+                self.rotulos_lote[chave].configure(text="0")
+        self.pb_lote.set(False)
+        self.aviso("Barras manuais de Luz, Cor e Saturação zeradas.")
+
+    def _obter_extras_lote(self):
+        extras = {}
+        for chave, var_s in self.vars_lote.items():
+            val = int(round(float(var_s.get() or 0)))
+            if val != 0:
+                extras[chave] = val
+        if self.pb_lote.get():
+            extras["pb"] = True
+        return extras
+
+    def aplicar_1clique_rapido(self, nivel):
+        """Aplica imediatamente o 1-Clique (Leve, Médio ou Pesado) nas fotos do escopo escolhido no projeto."""
+        self.nivel_auto_lote.set(nivel)
+        self._executar_lote_no_projeto(nivel=nivel)
+
+    def restaurar_original_lote(self):
+        """Remove todos os ajustes de Luz, Cor e Saturação das fotos do escopo escolhido (com Ctrl+Z)."""
+        fotos = self.fotos()
+        if not fotos:
+            messagebox.showinfo("Edição em Lote", "Nenhuma foto escolhida neste escopo.", parent=self)
+            return
+        qtd = self.app.aplicar_lote_inteligente(
+            fotos_alvo=fotos,
+            escopo=self.escopo.get(),
+            nivel="original",
+            extras={},
+            janela_pai=self,
+            silencioso=True,
+        )
+        msg = "Ajustes restaurados ao original em %d foto(s) (use Ctrl+Z se quiser desfazer)." % qtd
+        self.aviso(msg)
+        self.rotulo_resumo.configure(text=msg, foreground=tema.VERDE)
+
+    def aplicar_lote_no_projeto(self):
+        """Aplica o modo selecionado (Leve, Médio, Pesado ou Manual) + barras manuais no projeto com Ctrl+Z."""
+        nivel = self.nivel_auto_lote.get()
+        self._executar_lote_no_projeto(nivel=nivel)
+
+    def _executar_lote_no_projeto(self, nivel):
+        fotos = self.fotos()
+        if not fotos:
+            messagebox.showinfo("Edição em Lote", "Nenhuma foto escolhida neste escopo.", parent=self)
+            return
+        extras = self._obter_extras_lote()
+        if nivel == "manual" and not extras:
+            messagebox.showinfo(
+                "Edição em Lote",
+                "Você escolheu 'Somente Filtros Manuais', mas todas as barras estão em zero.\n"
+                "Mova alguma barra de Luz, Cor ou Saturação, ou escolha 1-Clique Leve, Médio ou Pesado.",
+                parent=self,
+            )
+            return
+        qtd = self.app.aplicar_lote_inteligente(
+            fotos_alvo=fotos,
+            escopo=self.escopo.get(),
+            nivel=nivel,
+            extras=extras,
+            janela_pai=self,
+            silencioso=True,
+        )
+        nomes_n = {
+            "leve": "1-Clique Leve",
+            "medio": "1-Clique Médio",
+            "pesado": "1-Clique Pesado",
+            "manual": "Filtros Manuais",
+        }
+        resumo = "%s aplicado em %d foto(s) no projeto! (Suporta Ctrl+Z)" % (
+            nomes_n.get(nivel, nivel),
+            qtd,
+        )
+        self.aviso(resumo)
+        self.rotulo_resumo.configure(text=resumo, foreground=tema.VERDE)
+        self.atualizar_fotos()
+
+    def gravar_lote_nas_originais(self):
+        """Grava o ajuste inteligente + filtros manuais diretamente nos arquivos originais no disco."""
+        fotos = self._pode_trocar("Arquivos Originais do Disco")
+        if not fotos:
+            return
+        nivel = self.nivel_auto_lote.get()
+        extras = self._obter_extras_lote()
+        if nivel == "manual" and not extras:
+            messagebox.showinfo(
+                "Gravar nas Fotos Originais",
+                "Escolha um nível 1-Clique (Leve, Médio ou Pesado) ou ajuste as barras de Luz, Cor e Saturação antes de gravar.",
+                parent=self,
+            )
+            return
+        nomes_n = {
+            "leve": "1-Clique Leve",
+            "medio": "1-Clique Médio",
+            "pesado": "1-Clique Pesado",
+            "manual": "Filtros Manuais",
+        }
+        if not messagebox.askyesno(
+            "Gravar Edição em Lote nas Fotos Originais",
+            "Confirma gravar %s diretamente em %d arquivo(s) original(is) no disco?\n\n"
+            "Os arquivos serão atualizados permanentemente e os ajustes do projeto nessas fotos serão zerados para não duplicar o efeito."
+            % (nomes_n.get(nivel, nivel), len(fotos)),
+            parent=self,
+        ):
+            return
+        app = self.app
+
+        def trabalho(t):
+            trocadas, erros = [], []
+            unicas = list(dict.fromkeys(fotos))
+            total = len(unicas)
+            for idx, caminho in enumerate(unicas, 1):
+                if t.parar.is_set():
+                    break
+                nome_arq = Path(caminho).name
+                t.aviso("Gravando melhoria (%d/%d): %s" % (idx, total, nome_arq))
+                try:
+                    ed_atual = app.obter_edicao_foto(caminho)
+                    ed_final = recorte.calcular_ajuste_inteligente(
+                        caminho,
+                        nivel=nivel,
+                        extras=extras,
+                        base_edicao=ed_atual,
+                    )
+                    if extras.get("pb"):
+                        ed_final["pb"] = True
+                    recorte.gravar_ajustes_no_arquivo_original(caminho, ed_final)
+                    app.fila.put(("chamar", lambda c=caminho: app.zerar_ajustes_luz_cor_foto(c)))
+                    app.fila.put(("foto_trocada", caminho, caminho))
+                    trocadas.append(caminho)
+                except Exception as e:
+                    erros.append((caminho, str(e)))
+                t.progresso(idx, total)
+            return trocadas, erros
+
+        self._comecar("Gravando %s nas originais (%d foto(s))" % (nomes_n.get(nivel, nivel), len(fotos)))
+        if not app.executar("Gravando lote nas originais", trabalho, self._terminou, janela=self):
+            self._parou_antes()
 
     # ---------------- Photoshop ----------------
 
@@ -279,7 +614,7 @@ class JanelaTratamento(tk.Toplevel):
             messagebox.showinfo("Tratamento", "Nenhuma foto escolhida.", parent=self)
             return None
         if not self.entendi.get():
-            messagebox.showwarning("Tratamento", "Marque 'Entendi: pode substituir as originais' para tratar no %s."
+            messagebox.showwarning("Tratamento", "Marque 'Entendi: autorizo substituir os arquivos originais no disco' para continuar em: %s."
                                    % onde, parent=self)
             return None
         return fotos
@@ -362,7 +697,7 @@ class JanelaTratamento(tk.Toplevel):
         self.rodando = True
         self.barra.configure(value=0, maximum=1)
         self.botao_parar.configure(state="normal")
-        for botao in (self.botao_acao, self.botao_lr):
+        for botao in (self.botao_acao, self.botao_lr, self.botao_lote_disco):
             botao.configure(state="disabled")
         self.rotulo_resumo.configure(text="")
         self.aviso(texto + "...")
@@ -370,7 +705,7 @@ class JanelaTratamento(tk.Toplevel):
     def _parou_antes(self):
         self.rodando = False
         self.botao_parar.configure(state="disabled")
-        for botao in (self.botao_acao, self.botao_lr):
+        for botao in (self.botao_acao, self.botao_lr, self.botao_lote_disco):
             botao.configure(state="normal")
 
     def aviso(self, texto):

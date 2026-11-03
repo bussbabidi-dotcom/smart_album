@@ -10,10 +10,11 @@ Os ajustes ficam no projeto e só são aplicados no álbum; a foto original não
 """
 
 import math
+import os
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
 
@@ -302,6 +303,12 @@ class EditorFoto(tk.Toplevel):
             self.rotulo_lugar.configure(text="Erro ao abrir: %s" % e)
             return
         self._chave_transformada = None
+        if hasattr(self, "rotulo_diagnostico"):
+            try:
+                diag = recorte.analisar_fotometria_rapida(self._fonte).get("diagnostico", "Equilibrada")
+                self.rotulo_diagnostico.configure(text="Diagnóstico da foto: %s" % diag)
+            except Exception:
+                self.rotulo_diagnostico.configure(text="Diagnóstico da foto: Pronta para ajuste")
         self._sincronizar_controles()
         self._desenhar()
 
@@ -566,9 +573,93 @@ class EditorFoto(tk.Toplevel):
         for chave in recorte.CHAVES_AJUSTES:
             self.ed[chave] = 0
         self.ed["pb"] = False
+        if self.espaco and self.espaco.get("foto"):
+            self.app.salvar_edicao_padrao_foto(self.espaco["foto"], self.ed)
         self._sincronizar_controles()
         self._desenhar()
         self._avisar()
+
+    def aplicar_auto_nivel(self, nivel):
+        """Aplica melhoria automática inteligente em 1 clique (Leve, Médio ou Pesado) nesta foto."""
+        if self._fonte is None or not self.espaco:
+            return
+        self._marcar(True)
+        novos = recorte.calcular_ajuste_inteligente(
+            self._fonte,
+            nivel=nivel,
+            base_edicao=self.ed,
+        )
+        for chave in recorte.CHAVES_AJUSTES:
+            self.ed[chave] = novos.get(chave, 0)
+        self.ed["nivel_auto"] = nivel
+        if self.espaco.get("foto"):
+            self.app.salvar_edicao_padrao_foto(self.espaco["foto"], self.ed)
+        if hasattr(self, "rotulo_diagnostico"):
+            diag = novos.get("diagnostico") or "Ajustado"
+            nome_nivel = {"leve": "Leve", "medio": "Médio", "pesado": "Pesado"}.get(nivel, nivel)
+            self.rotulo_diagnostico.configure(
+                text="1-Clique %s aplicado · Diagnóstico: %s" % (nome_nivel, diag)
+            )
+        self._sincronizar_controles()
+        self._desenhar()
+        self._avisar()
+
+    def copiar_ajustes_para_lote(self, escopo):
+        """Replicar os ajustes atuais de Luz, Cor e Saturação para a lâmina atual ou álbum inteiro."""
+        if not self.espaco:
+            return
+        if hasattr(self.app, "aplicar_ajustes_manuais_em_lote"):
+            self.app.aplicar_ajustes_manuais_em_lote(self.ed, escopo=escopo, janela_pai=self)
+
+    def _abrir_janela_lote(self):
+        fotos = [self.espaco["foto"]] if self.espaco and self.espaco.get("foto") else None
+        self.app.abrir_tratamento(fotos)
+
+    def gravar_na_original(self):
+        """Grava os ajustes atuais de luz, cor e saturação diretamente no arquivo original do PC."""
+        if not self.espaco or not self.espaco.get("foto"):
+            return
+        caminho = self.espaco["foto"]
+        if not recorte.tem_ajuste_luz_cor(self.ed):
+            messagebox.showinfo(
+                "Gravar na Foto Original",
+                "Nenhum ajuste de luz, cor ou saturação foi alterado ainda nesta foto.",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Gravar Ajustes na Foto Original",
+            "Deseja gravar os ajustes atuais de Luz, Cor e Saturação diretamente no arquivo original?\n\n"
+            "Arquivo: %s\n\n"
+            "A foto original será substituída no disco e os controles voltarão a zero para não duplicar o efeito."
+            % os.path.basename(caminho),
+            parent=self,
+        ):
+            return
+        try:
+            recorte.gravar_ajustes_no_arquivo_original(caminho, self.ed)
+        except Exception as e:
+            messagebox.showerror(
+                "Erro ao Gravar Foto Original",
+                "Não foi possível salvar no arquivo original:\n%s" % e,
+                parent=self,
+            )
+            return
+        self._marcar(True)
+        for chave in recorte.CHAVES_AJUSTES:
+            self.ed[chave] = 0
+        self.ed["pb"] = False
+        self.ed.pop("nivel_auto", None)
+        self.app.salvar_edicao_padrao_foto(caminho, self.ed)
+        analise.esquecer(caminho)
+        recorte.limpar_cache_espaco_rapido(caminho)
+        self.app.fila.put(("foto_trocada", caminho, caminho))
+        self.recarregar()
+        messagebox.showinfo(
+            "Gravar na Foto Original",
+            "Ajustes gravados com sucesso no arquivo original!",
+            parent=self,
+        )
 
     def navegar(self, passo):
         novo = self.app.alvo_vizinho(self.alvo, passo)
