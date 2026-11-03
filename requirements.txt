@@ -1,0 +1,5 @@
+Pillow>=10
+numpy>=1.26
+opencv-python>=4.8
+tkinterdnd2>=0.4
+pywin32>=306

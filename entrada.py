@@ -277,18 +277,49 @@ def caminhos_da_area_de_transferencia(root):
         return []
 
 
+def _eh_arquivo_projeto_valido(caminho):
+    """Verifica se um arquivo no disco é um projeto de álbum (.album.json, .saproj ou .json de projeto)."""
+    p = Path(caminho)
+    if not p.is_file():
+        return False
+    nome_l = p.name.lower()
+    if nome_l.endswith(proj.EXTENSAO) or p.suffix.lower() == ".saproj":
+        return True
+    if p.suffix.lower() == ".json":
+        dados = ler_json(p, None)
+        if isinstance(dados, dict) and ("laminas" in dados or ("fotos" in dados and "produto" in dados)):
+            return True
+    return False
+
+
 def expandir(caminhos):
     """
     (fotos, projetos): pastas viram as fotos de dentro (com subpastas),
+    arquivos de projeto (.album.json / .json / .saproj) entram em projetos,
     arquivos que não são imagem ficam de fora, repetidos são ignorados.
     """
-    fotos, projetos, vistos = [], [], set()
-    for caminho in caminhos:
-        caminho = Path(caminho)
+    fotos, projetos, vistos, vistos_proj = [], [], set(), set()
+    for bruto in (caminhos or []):
+        limpo = _limpar_caminho_individual(bruto) or str(bruto or "").strip().strip('"').strip("'")
+        if not limpo:
+            continue
+        caminho = Path(limpo)
         if caminho.is_dir():
             achadas = analise.listar_imagens(caminho)
-        elif caminho.is_file() and caminho.name.endswith(proj.EXTENSAO):
-            projetos.append(caminho)
+            if not achadas:
+                # Se a pasta não tiver imagens soltas mas tiver um arquivo .album.json salvo dentro dela, abre o projeto
+                for arq_p in sorted(caminho.glob("*" + proj.EXTENSAO)):
+                    if arq_p.is_file():
+                        ch_p = normalizar_caminho(arq_p)
+                        if ch_p not in vistos_proj:
+                            vistos_proj.add(ch_p)
+                            projetos.append(arq_p)
+                        break
+        elif _eh_arquivo_projeto_valido(caminho):
+            ch_p = normalizar_caminho(caminho)
+            if ch_p not in vistos_proj:
+                vistos_proj.add(ch_p)
+                projetos.append(caminho)
             continue
         elif caminho.is_file() and caminho.suffix.lower() in EXTENSOES:
             achadas = [caminho]
@@ -401,13 +432,32 @@ def consertar_caminhos(projeto, nova_pasta, forcar_todas=False):
 
 
 # ------------------------------------------------------------
-# Atalho em "Enviar para"
+# Atalho em "Enviar para" e Associação de Arquivos no Windows
 # ------------------------------------------------------------
+
+def achar_exe_programa():
+    """Localiza o executável (.exe) do Smart Album se existir na pasta ou em dist/Album."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    base = pasta_programa()
+    candidatos = [
+        base / "SmartAlbum.exe",
+        base / "dist" / "Album" / "Album.exe",
+        base / "Album.exe",
+        base.parent / "SmartAlbum.exe",
+        base.parent / "dist" / "Album" / "Album.exe",
+    ]
+    for c in candidatos:
+        if c.is_file():
+            return c.resolve()
+    return None
+
 
 def comando_programa():
     """(executável, argumentos) para abrir o programa."""
-    if getattr(sys, "frozen", False):
-        return sys.executable, ""
+    exe_achado = achar_exe_programa()
+    if exe_achado:
+        return str(exe_achado), ""
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     exe = str(pythonw if pythonw.is_file() else sys.executable)
     return exe, '"%s"' % (pasta_programa() / "app.pyw")
@@ -424,9 +474,77 @@ def instalar_enviar_para(nome="Álbum - diagramar"):
     lnk.TargetPath = exe
     lnk.Arguments = argumentos
     lnk.WorkingDirectory = str(pasta_programa())
-    lnk.Description = "Abre a pasta no programa de álbum"
+    lnk.Description = "Abre a pasta ou arquivos no Smart Album"
     lnk.Save()
     return atalho
+
+
+def registrar_associacao_arquivos_windows():
+    """
+    Registra o executável do Smart Album no Windows (HKCU\\Software\\Classes, sem precisar de Admin)
+    para abrir projetos (.album.json, .saproj), pastas ("Abrir pasta no Smart Album") e fotos ("Abrir com...").
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        exe, args = comando_programa()
+        cmd_base = ('"%s" %s' % (exe, args)).strip()
+        cmd_abrir = '%s "%%1"' % cmd_base
+        cmd_fundo_pasta = '%s "%%V"' % cmd_base
+        nome_exe = Path(exe).name
+
+        def _gravar_chave(caminho_reg, valor_padrao, extras=None):
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, caminho_reg) as k:
+                if valor_padrao is not None:
+                    winreg.SetValueEx(k, "", 0, winreg.REG_SZ, str(valor_padrao))
+                for nome_v, val_v in (extras or {}).items():
+                    winreg.SetValueEx(k, nome_v, 0, winreg.REG_SZ, str(val_v))
+
+        # 1. Classe de projeto SmartAlbum.Project (.album.json e .saproj)
+        _gravar_chave(r"Software\Classes\SmartAlbum.Project", "Projeto do Smart Album", {"FriendlyTypeName": "Projeto do Smart Album"})
+        _gravar_chave(r"Software\Classes\SmartAlbum.Project\DefaultIcon", '"%s",0' % exe)
+        _gravar_chave(r"Software\Classes\SmartAlbum.Project\shell\open", "Abrir no Smart Album")
+        _gravar_chave(r"Software\Classes\SmartAlbum.Project\shell\open\command", cmd_abrir)
+
+        for ext in (".saproj", ".album.json"):
+            _gravar_chave(r"Software\Classes\%s" % ext, "SmartAlbum.Project")
+
+        # 2. Aplicativo registrado para o menu "Abrir com..." do Windows
+        _gravar_chave(
+            r"Software\Classes\Applications\%s" % nome_exe,
+            None,
+            {"FriendlyAppName": "Smart Album Studio"},
+        )
+        _gravar_chave(r"Software\Classes\Applications\%s\shell\open\command" % nome_exe, cmd_abrir)
+        for ext_img in (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp", ".json", ".saproj"):
+            _gravar_chave(r"Software\Classes\Applications\%s\SupportedTypes" % nome_exe, None, {ext_img: ""})
+
+        # 3. Menu de contexto ao clicar com botão direito em qualquer Pasta no Windows Explorer
+        _gravar_chave(
+            r"Software\Classes\Directory\shell\SmartAlbum",
+            "Abrir pasta no Smart Album",
+            {"Icon": '"%s",0' % exe},
+        )
+        _gravar_chave(r"Software\Classes\Directory\shell\SmartAlbum\command", cmd_abrir)
+
+        _gravar_chave(
+            r"Software\Classes\Directory\Background\shell\SmartAlbum",
+            "Abrir esta pasta no Smart Album",
+            {"Icon": '"%s",0' % exe},
+        )
+        _gravar_chave(r"Software\Classes\Directory\Background\shell\SmartAlbum\command", cmd_fundo_pasta)
+
+        # 4. Menu de contexto para imagens ("Abrir no Smart Album")
+        _gravar_chave(
+            r"Software\Classes\SystemFileAssociations\image\shell\SmartAlbum",
+            "Abrir foto(s) no Smart Album",
+            {"Icon": '"%s",0' % exe},
+        )
+        _gravar_chave(r"Software\Classes\SystemFileAssociations\image\shell\SmartAlbum\command", cmd_abrir)
+        return True
+    except Exception:
+        return False
 
 
 def ordenar(fotos):

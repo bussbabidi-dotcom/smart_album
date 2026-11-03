@@ -379,8 +379,9 @@ class Aplicativo:
         self._carregar_ui_do_projeto()
         self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
         self.atualizar_tudo()
+        threading.Thread(target=entrada.registrar_associacao_arquivos_windows, daemon=True).start()
         if argumentos:
-            self.root.after(300, lambda: self.adicionar_caminhos(list(argumentos)))
+            self.root.after(300, lambda: self.adicionar_caminhos(list(argumentos), vindo_linha_comando=True))
 
     # ==================================================================
     # Montagem da janela
@@ -490,6 +491,10 @@ class Aplicativo:
         menu.add_command(label="Relocalizar fotos movidas...", command=self.consertar_caminhos)
         menu.add_command(label="Escolher programa de capas...", command=self.escolher_programa_capa)
         menu.add_command(label='Criar atalho em "Enviar para"', command=self.criar_enviar_para)
+        menu.add_command(
+            label='Associar arquivos e pastas ao EXE no Windows ("Abrir com...")',
+            command=self.associar_arquivos_windows,
+        )
         menu.add_separator()
         menu.add_command(label="Sair", command=self.sair)
         arquivo["menu"] = menu
@@ -2733,12 +2738,34 @@ class Aplicativo:
         self.registrar("Álbum novo. Arraste fotos ou uma pasta para a janela.")
 
     def abrir_projeto(self, caminho=None, em_nova_aba=False):
-        if not em_nova_aba and not self._confirmar_descartar():
+        if not caminho:
+            escolhidos = filedialog.askopenfilenames(
+                parent=self.root,
+                title="Abrir projeto de álbum ou fotos",
+                filetypes=[
+                    (
+                        "Projetos e Fotos (*.album.json; *.json; *.jpg; *.png; *.webp; *.tif)",
+                        "*.album.json *.json *.saproj *.jpg *.jpeg *.jfif *.png *.webp *.tif *.tiff *.bmp",
+                    ),
+                    ("Projeto de Álbum (*.album.json; *.json)", "*.album.json *.json *.saproj"),
+                    ("Imagens (*.jpg; *.png; *.webp; *.tif)", "*.jpg *.jpeg *.jfif *.png *.webp *.tif *.tiff *.bmp"),
+                    ("Todos os arquivos", "*.*"),
+                ],
+            )
+            if not escolhidos:
+                return
+            fotos_sel, projetos_sel = entrada.expandir(list(escolhidos))
+            if fotos_sel and not projetos_sel:
+                self.adicionar_caminhos([str(f) for f in fotos_sel])
+                return
+            caminho = str(projetos_sel[0]) if projetos_sel else str(escolhidos[0])
+
+        p_cam = Path(str(caminho))
+        if p_cam.is_dir() or (p_cam.is_file() and p_cam.suffix.lower() in EXTENSOES and not entrada._eh_arquivo_projeto_valido(p_cam)):
+            self.adicionar_caminhos([str(p_cam)])
             return
-        if not caminho:
-            caminho = filedialog.askopenfilename(parent=self.root, title="Abrir álbum",
-                                                 filetypes=[("Álbum", "*" + proj.EXTENSAO), ("Todos", "*.*")])
-        if not caminho:
+
+        if not em_nova_aba and not self._confirmar_descartar():
             return
         if not em_nova_aba:
             self._limpar_pastas_temp_drive(limpar_autosave=True)
@@ -2925,12 +2952,17 @@ class Aplicativo:
     # Fotos: entrada
     # ==================================================================
 
-    def adicionar_caminhos(self, caminhos, destino=None, perguntar_diagramar=False):
+    def adicionar_caminhos(self, caminhos, destino=None, perguntar_diagramar=False, vindo_linha_comando=False):
         """
         Fotos, pastas ou projetos vindos do Explorer, do Ctrl+V, do Link do Drive ou da linha de comando.
         destino: ("espaco", lamina, espaco) ou ("lamina", lamina) para já colocar as fotos.
         """
-        caminhos = [c for c in (caminhos or []) if c]
+        caminhos_limpos = []
+        for c in (caminhos or []):
+            limpo = entrada._limpar_caminho_individual(c) or str(c or "").strip().strip('"').strip("'")
+            if limpo:
+                caminhos_limpos.append(limpo)
+        caminhos = caminhos_limpos
         tem_pasta_arrastada = any(Path(c).is_dir() for c in caminhos)
         if tem_pasta_arrastada:
             # Quando uma pasta inteira é arrastada do PC, nunca espreme todas as fotos dentro de um único quadro
@@ -2939,6 +2971,23 @@ class Aplicativo:
         if projetos and not fotos:
             self.abrir_projeto(str(projetos[0]))
             return
+        if vindo_linha_comando and len(fotos) == 1 and not tem_pasta_arrastada:
+            pasta_pai = Path(fotos[0]).parent
+            try:
+                todas_da_pasta = analise.listar_imagens(pasta_pai)
+                if len(todas_da_pasta) > 1:
+                    if messagebox.askyesno(
+                        "Abrir Fotos da Pasta",
+                        "Você abriu a foto '%s'.\nA pasta '%s' possui %d fotos no total.\n\n"
+                        "Deseja carregar TODAS as %d fotos desta pasta para montar o álbum?\n"
+                        "(Clique em 'Não' para carregar apenas a foto selecionada.)"
+                        % (Path(fotos[0]).name, pasta_pai.name, len(todas_da_pasta), len(todas_da_pasta)),
+                        parent=self.root,
+                    ):
+                        fotos = todas_da_pasta
+                        tem_pasta_arrastada = True
+            except Exception:
+                pass
         if not fotos:
             self.registrar("Nenhuma foto (JPG, PNG, TIF ou WEBP) encontrada na pasta selecionada.")
             return
@@ -3034,8 +3083,14 @@ class Aplicativo:
         self.executar_quando_livre("Lendo as fotos do álbum", trabalho, fim)
 
     def escolher_fotos(self):
-        caminhos = filedialog.askopenfilenames(parent=self.root, title="Adicionar fotos",
-                                               filetypes=[("Imagens", "*.jpg *.jpeg *.png *.tif *.tiff"), ("Todos", "*.*")])
+        caminhos = filedialog.askopenfilenames(
+            parent=self.root,
+            title="Adicionar fotos",
+            filetypes=[
+                ("Imagens", "*.jpg *.jpeg *.jfif *.png *.webp *.tif *.tiff *.bmp"),
+                ("Todos os arquivos", "*.*"),
+            ],
+        )
         if caminhos:
             self.adicionar_caminhos(list(caminhos))
 
@@ -3841,6 +3896,26 @@ class Aplicativo:
                                 "Enviar para > %s." % atalho.stem, parent=self.root)
         except Exception as e:
             messagebox.showerror("Enviar para", str(e), parent=self.root)
+
+    def associar_arquivos_windows(self):
+        ok = entrada.registrar_associacao_arquivos_windows()
+        if ok:
+            exe, _ = entrada.comando_programa()
+            messagebox.showinfo(
+                "Associação de Arquivos no Windows",
+                "Pronto! O executável (%s) foi associado no Windows:\n\n"
+                "• Projetos (.album.json e .saproj) abrem direto com duplo clique\n"
+                "• Pastas no Explorer possuem a opção 'Abrir pasta no Smart Album' no botão direito\n"
+                "• Fotos possuem a opção 'Abrir foto(s) no Smart Album' e suporte no menu 'Abrir com...'"
+                % Path(exe).name,
+                parent=self.root,
+            )
+        else:
+            messagebox.showwarning(
+                "Associação de Arquivos",
+                "A associação automática de arquivos está disponível apenas no Windows.",
+                parent=self.root,
+            )
 
     # ==================================================================
     # Diagramação

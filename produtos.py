@@ -50,6 +50,102 @@ def _completar(dados, nome):
     return produto
 
 
+PRODUTOS_PADRAO_EMBUTIDOS = (
+    {
+        "nome": "20X20",
+        "descricao": "Álbum 20x20 cm (lâmina aberta 40x20)",
+        "pagina_mm": [200, 200],
+        "paginas_por_lamina": 2,
+        "dpi": 300,
+        "sangria_mm": 3,
+        "seguranca_mm": 6,
+        "dobra_mm": 8,
+        "margem_mm": 6,
+        "espacamento_mm": 3,
+        "fotos_por_lamina": 4,
+        "max_fotos_lamina": 10,
+        "laminas_min": 10,
+        "laminas_max": 30,
+        "icc": "",
+        "capa": {
+            "frente_mm": [205, 205],
+            "sangria_mm": 15,
+            "lombada_base_mm": 4,
+            "lombada_por_lamina_mm": 0.6,
+        },
+    },
+    {
+        "nome": "24X34",
+        "descricao": "Álbum 24x34 cm, vertical (lâmina aberta 48x34)",
+        "pagina_mm": [240, 340],
+        "paginas_por_lamina": 2,
+        "dpi": 300,
+        "sangria_mm": 3,
+        "seguranca_mm": 8,
+        "dobra_mm": 10,
+        "margem_mm": 8,
+        "espacamento_mm": 4,
+        "fotos_por_lamina": 4,
+        "max_fotos_lamina": 12,
+        "laminas_min": 10,
+        "laminas_max": 40,
+        "icc": "",
+        "capa": {
+            "frente_mm": [245, 345],
+            "sangria_mm": 15,
+            "lombada_base_mm": 4,
+            "lombada_por_lamina_mm": 0.6,
+        },
+    },
+    {
+        "nome": "30X20",
+        "descricao": "Álbum 30x20 cm (lâmina aberta 60x20)",
+        "pagina_mm": [300, 200],
+        "paginas_por_lamina": 2,
+        "dpi": 300,
+        "sangria_mm": 3,
+        "seguranca_mm": 8,
+        "dobra_mm": 10,
+        "margem_mm": 8,
+        "espacamento_mm": 4,
+        "fotos_por_lamina": 4,
+        "max_fotos_lamina": 12,
+        "laminas_min": 10,
+        "laminas_max": 40,
+        "icc": "",
+        "capa": {
+            "frente_mm": [305, 205],
+            "sangria_mm": 15,
+            "lombada_base_mm": 4,
+            "lombada_por_lamina_mm": 0.6,
+        },
+    },
+    {
+        "nome": "30X22",
+        "descricao": "Álbum 30x22 cm (lâmina aberta 60x22)",
+        "pagina_mm": [300, 220],
+        "paginas_por_lamina": 2,
+        "dpi": 300,
+        "sangria_mm": 3,
+        "seguranca_mm": 8,
+        "dobra_mm": 10,
+        "margem_mm": 8,
+        "espacamento_mm": 4,
+        "fotos_por_lamina": 4,
+        "max_fotos_lamina": 12,
+        "laminas_min": 10,
+        "laminas_max": 40,
+        "icc": "",
+        "capa": {
+            "frente_mm": [305, 225],
+            "sangria_mm": 15,
+            "lombada_base_mm": 4,
+            "lombada_por_lamina_mm": 0.6,
+        },
+    },
+)
+
+
 def listar_produtos():
     pasta = pasta_produtos()
     produtos = []
@@ -58,6 +154,14 @@ def listar_produtos():
             dados = ler_json(arquivo, None)
             if isinstance(dados, dict):
                 produtos.append(_completar(dados, arquivo.stem))
+    if not produtos:
+        for padrao_item in PRODUTOS_PADRAO_EMBUTIDOS:
+            comp = _completar(padrao_item, padrao_item["nome"])
+            produtos.append(comp)
+            try:
+                gravar_json(pasta / (comp["nome"] + ".json"), comp)
+            except OSError:
+                pass
     return produtos
 
 

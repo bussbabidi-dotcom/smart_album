@@ -28,18 +28,30 @@ def pasta_programa():
 def pasta_recurso(nome):
     """
     Pasta de recursos (produtos, modelos, plugin) ao lado do programa. No exe,
-    a primeira vez copia a que veio dentro dele, para os modelos novos ficarem salvos ali.
+    procura ao lado do exe, na raiz do projeto (quando o exe está em dist/Album)
+    e em _internal/_MEIPASS, copiando na primeira execução para que novos itens fiquem salvos.
     """
-    ao_lado = pasta_programa() / nome
+    base_prog = pasta_programa()
+    ao_lado = base_prog / nome
     if ao_lado.is_dir():
         return ao_lado
     interno = getattr(sys, "_MEIPASS", None)
-    if interno and (Path(interno) / nome).is_dir():
-        try:
-            shutil.copytree(Path(interno) / nome, ao_lado)
-            return ao_lado
-        except OSError:
-            return Path(interno) / nome
+    candidatos = []
+    if interno:
+        candidatos.append(Path(interno) / nome)
+    candidatos.extend([
+        base_prog / "_internal" / nome,
+        base_prog / "dist" / "Album" / "_internal" / nome,
+        base_prog.parent / nome,
+        base_prog.parent.parent / nome,
+    ])
+    for cand in candidatos:
+        if cand.is_dir():
+            try:
+                shutil.copytree(cand, ao_lado)
+                return ao_lado
+            except OSError:
+                return cand
     return ao_lado
 
 
@@ -52,11 +64,16 @@ def pasta_dados():
 
 
 def modelo_rosto():
-    """Modelo YuNet: no programa, ou o que já está no album_molde."""
+    """Modelo YuNet: no programa, em _internal, na raiz do projeto ou no album_molde."""
     nome = "face_detection_yunet_2023mar.onnx"
+    base_prog = pasta_programa()
     candidatos = [
-        pasta_programa() / "recursos" / nome,
-        pasta_programa().parent / "album_molde" / "modelos" / nome,
+        base_prog / "recursos" / nome,
+        base_prog / "_internal" / "recursos" / nome,
+        base_prog / "dist" / "Album" / "_internal" / "recursos" / nome,
+        base_prog.parent / "recursos" / nome,
+        base_prog.parent.parent / "recursos" / nome,
+        base_prog.parent / "album_molde" / "modelos" / nome,
     ]
     interno = getattr(sys, "_MEIPASS", None)
     if interno:

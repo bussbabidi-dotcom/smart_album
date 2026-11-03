@@ -1,0 +1,23 @@
+{
+  "nome": "30X20",
+  "descricao": "Álbum 30x20 cm (lâmina aberta 60x20)",
+  "pagina_mm": [300, 200],
+  "paginas_por_lamina": 2,
+  "dpi": 300,
+  "sangria_mm": 3,
+  "seguranca_mm": 8,
+  "dobra_mm": 10,
+  "margem_mm": 8,
+  "espacamento_mm": 4,
+  "fotos_por_lamina": 4,
+  "max_fotos_lamina": 12,
+  "laminas_min": 10,
+  "laminas_max": 40,
+  "icc": "",
+  "capa": {
+    "frente_mm": [305, 205],
+    "sangria_mm": 15,
+    "lombada_base_mm": 4,
+    "lombada_por_lamina_mm": 0.6
+  }
+}
