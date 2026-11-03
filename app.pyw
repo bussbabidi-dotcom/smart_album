@@ -530,58 +530,9 @@ class Aplicativo:
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
                                           "Exportar álbum", "Compacto.TButton")
         self.botao_exportar.pack(side="right", padx=(2, 0))
-        self.botao_tratar = self._botao(topo, "✦ Lote / Ps / Lr", self.abrir_tratamento,
-                                        "Edição em Lote Inteligente (Luz, Cor e Saturação) + Photoshop & Lightroom", "Compacto.TButton")
+        self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
+                                        "Photoshop / Lightroom", "Compacto.TButton")
         self.botao_tratar.pack(side="right", padx=1)
-
-        mb_1clique = ttk.Menubutton(topo, text="✨ 1-Clique Luz/Cor", style="Compacto.TMenubutton")
-        tema.dica(
-            mb_1clique,
-            "Melhoria inteligente em 1 clique (Leve, Médio e Pesado) para corrigir luz, cor e saturação de fotos ruins ou escuras (suporta Ctrl+Z)",
-        )
-        menu_1c = tk.Menu(mb_1clique, tearoff=0)
-        menu_1c.add_command(
-            label="✨ 1-Clique Leve (Fotos Selecionadas / Lâmina)",
-            command=lambda: self.acao_rapida_1clique("leve", escopo="auto"),
-        )
-        menu_1c.add_command(
-            label="✨ 1-Clique Médio — Ideal (Fotos Selecionadas / Lâmina)",
-            command=lambda: self.acao_rapida_1clique("medio", escopo="auto"),
-        )
-        menu_1c.add_command(
-            label="🔥 1-Clique Pesado — Recuperar Foto Ruim (Selecionadas / Lâmina)",
-            command=lambda: self.acao_rapida_1clique("pesado", escopo="auto"),
-        )
-        menu_1c.add_separator()
-        menu_1c.add_command(
-            label="✨ Aplicar 1-Clique Leve no Álbum Inteiro",
-            command=lambda: self.acao_rapida_1clique("leve", escopo="album"),
-        )
-        menu_1c.add_command(
-            label="✨ Aplicar 1-Clique Médio no Álbum Inteiro",
-            command=lambda: self.acao_rapida_1clique("medio", escopo="album"),
-        )
-        menu_1c.add_command(
-            label="🔥 Aplicar 1-Clique Pesado no Álbum Inteiro",
-            command=lambda: self.acao_rapida_1clique("pesado", escopo="album"),
-        )
-        menu_1c.add_separator()
-        menu_1c.add_command(
-            label="↺ Restaurar Original (Zerar Luz/Cor nas Selecionadas / Lâmina)",
-            command=lambda: self.acao_rapida_1clique("original", escopo="auto"),
-        )
-        menu_1c.add_separator()
-        menu_1c.add_command(
-            label="🎛️ Abrir Aba Lateral de Luz, Cor e Saturação",
-            command=self.abrir_aba_luz_cor,
-        )
-        menu_1c.add_command(
-            label="⚡ Abrir Janela Completa de Edição em Lote...",
-            command=self.abrir_tratamento,
-        )
-        mb_1clique["menu"] = menu_1c
-        mb_1clique.pack(side="right", padx=1)
-
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
                                       "Abrir programa de capas", "Compacto.TButton")
         self.botao_capa.pack(side="right", padx=1)
@@ -969,10 +920,10 @@ class Aplicativo:
         abas.pack(fill="both", expand=True, padx=4, pady=4)
         self.abas = abas
         self.quadros_abas = {}
-        abas_rolaveis = {"✨ Luz/Cor", "Fundo", "Degradê", "Moldura"}
-        for titulo, montar in (("Layouts", self._aba_layouts), ("✨ Luz/Cor", self._aba_luz_cor),
-                               ("Fundo", self._aba_fundo), ("Degradê", self._aba_degrade),
-                               ("Moldura", self._aba_moldura), ("⌨ Atalhos", self._aba_atalhos)):
+        abas_rolaveis = {"Fundo", "Degradê", "Moldura"}
+        for titulo, montar in (("Layouts", self._aba_layouts), ("Fundo", self._aba_fundo),
+                               ("Degradê", self._aba_degrade), ("Moldura", self._aba_moldura),
+                               ("⌨ Atalhos", self._aba_atalhos)):
             if titulo in abas_rolaveis:
                 quadro = ttk.Frame(abas, padding=0)
                 abas.add(quadro, text=titulo)
@@ -986,11 +937,6 @@ class Aplicativo:
                 montar(quadro)
         abas.bind("<<NotebookTabChanged>>", self._aba_mudou)
 
-    def abrir_aba_luz_cor(self):
-        if "✨ Luz/Cor" in self.quadros_abas:
-            self.abas.select(self.quadros_abas["✨ Luz/Cor"])
-            self._atualizar_luz_cor_ui()
-
     def abrir_aba_degrade(self):
         if "Degradê" in self.quadros_abas:
             self.abas.select(self.quadros_abas["Degradê"])
@@ -1002,9 +948,7 @@ class Aplicativo:
 
     def _aba_mudou(self, _evento=None):
         selecionada = self.abas.select()
-        if selecionada == str(self.quadros_abas.get("✨ Luz/Cor")):
-            self._atualizar_luz_cor_ui()
-        elif selecionada == str(self.quadros_abas["Fundo"]):
+        if selecionada == str(self.quadros_abas["Fundo"]):
             self.atualizar_fundos()
         elif selecionada == str(self.quadros_abas.get("Degradê")):
             self._atualizar_degrade_ui()
@@ -1870,347 +1814,6 @@ class Aplicativo:
         self.degrade_opacidade_geral.set(100)
         self._atualizar_rotulos_degrade()
         self._alterar_degrade(marcar=True, final=True)
-
-    # ---------------- Aba Lateral: Edição Rápida em Lote & 1-Clique (Luz, Cor e Saturação) ----------------
-
-    def _aba_luz_cor(self, quadro):
-        ttk.Label(quadro, text="Melhoria em 1 Clique & Lote", style="Titulo.TLabel").pack(anchor="w")
-        self.rotulo_alvo_luz_cor = ttk.Label(
-            quadro,
-            text="Transforme fotos escuras, lavadas ou sem cor em fotos prontas em 1 clique (Leve, Médio ou Pesado).",
-            style="Fraco.TLabel",
-            wraplength=290,
-        )
-        self.rotulo_alvo_luz_cor.pack(anchor="w", pady=(2, 6))
-
-        self.escopo_luz_cor = tk.StringVar(value="selecionadas")
-        self.vars_luz_cor = {}
-        self.rotulos_luz_cor = {}
-        self.pb_luz_cor = tk.BooleanVar(value=False)
-        self._carregando_luz_cor = False
-
-        escopo_box = ttk.LabelFrame(quadro, text="1. Onde Aplicar (Escopo do Lote)", padding=6)
-        escopo_box.pack(fill="x", pady=(0, 6))
-        for val_e, txt_e in (
-            ("selecionadas", "Foto(s) selecionada(s) / Espaço atual"),
-            ("lamina", "Todas as fotos da Lâmina aberta"),
-            ("album", "Todas as fotos do Álbum inteiro"),
-            ("projeto", "Todas as fotos carregadas no Projeto"),
-        ):
-            ttk.Radiobutton(
-                escopo_box,
-                text=txt_e,
-                value=val_e,
-                variable=self.escopo_luz_cor,
-                command=self._atualizar_luz_cor_ui,
-            ).pack(anchor="w", pady=1)
-
-        auto_box = ttk.LabelFrame(quadro, text="2. Ajuste Inteligente em 1 Clique", padding=6)
-        auto_box.pack(fill="x", pady=(0, 6))
-        self.rotulo_diag_lateral = ttk.Label(
-            auto_box,
-            text="Analisa cada foto automaticamente (luz, sombras, cor e saturação):",
-            style="Fraco.TLabel",
-            wraplength=275,
-        )
-        self.rotulo_diag_lateral.pack(anchor="w", pady=(0, 4))
-
-        grade_1c = ttk.Frame(auto_box)
-        grade_1c.pack(fill="x")
-        grade_1c.columnconfigure(0, weight=1, uniform="g1c")
-        grade_1c.columnconfigure(1, weight=1, uniform="g1c")
-
-        bt_l = self._botao(
-            grade_1c,
-            "✨ Leve",
-            lambda: self._aplicar_1clique_painel("leve"),
-            "Correção suave (~45%): melhora luz, cor e nitidez mantendo o aspecto natural.",
-            "Compacto.TButton",
-        )
-        bt_l.grid(row=0, column=0, sticky="ew", padx=(0, 2), pady=(0, 3))
-
-        bt_m = self._botao(
-            grade_1c,
-            "✨ Médio (Ideal)",
-            lambda: self._aplicar_1clique_painel("medio"),
-            "Equilíbrio ideal (~80%): corrige fotos escuras, lavadas ou com cor fria/quente em 1 clique.",
-            "PrimarioCompacto.TButton",
-        )
-        bt_m.grid(row=0, column=1, sticky="ew", padx=(2, 0), pady=(0, 3))
-
-        bt_p = self._botao(
-            grade_1c,
-            "🔥 Pesado",
-            lambda: self._aplicar_1clique_painel("pesado"),
-            "Recuperação intensa (100%+): resgata fotos ruins, muito escuras, contraluz forte ou cores apagadas.",
-            "Compacto.TButton",
-        )
-        bt_p.grid(row=1, column=0, sticky="ew", padx=(0, 2))
-
-        bt_o = self._botao(
-            grade_1c,
-            "↺ Original",
-            lambda: self._aplicar_1clique_painel("original"),
-            "Remove todos os filtros de Luz, Cor e Saturação do escopo selecionado (suporta Ctrl+Z).",
-            "Compacto.TButton",
-        )
-        bt_o.grid(row=1, column=1, sticky="ew", padx=(2, 0))
-
-        sliders_box = ttk.LabelFrame(quadro, text="3. Filtros de Luz, Cor e Saturação", padding=6)
-        sliders_box.pack(fill="x", pady=(0, 6))
-
-        controles_lat = (
-            ("exposicao", "Exposição (Luz)", -100, 100),
-            ("brilho", "Brilho", -100, 100),
-            ("contraste", "Contraste", -100, 100),
-            ("sombras", "Sombras", -100, 100),
-            ("realces", "Realces", -100, 100),
-            ("temperatura", "Temperatura (Cor)", -100, 100),
-            ("matiz", "Matiz", -100, 100),
-            ("vibracao", "Vibração", -100, 100),
-            ("saturacao", "Saturação", -100, 100),
-            ("nitidez", "Nitidez", 0, 100),
-        )
-        for chave, titulo_s, vmin, vmax in controles_lat:
-            var_s = tk.DoubleVar(value=0.0)
-            self.vars_luz_cor[chave] = var_s
-            linha_s = ttk.Frame(sliders_box)
-            linha_s.pack(fill="x", pady=1)
-            ttk.Label(linha_s, text=titulo_s, width=15).pack(side="left")
-            rot_v = ttk.Label(linha_s, text="0", style="Fraco.TLabel", width=4, anchor="e")
-            rot_v.pack(side="right")
-            self.rotulos_luz_cor[chave] = rot_v
-
-            def _ao_mover(_val, ch=chave, rv=rot_v):
-                v_int = int(round(float(self.vars_luz_cor[ch].get())))
-                rv.configure(text="%d" % v_int)
-                if not self._carregando_luz_cor:
-                    self._aplicar_sliders_painel_tempo_real(final=False)
-
-            esc_s = ttk.Scale(linha_s, from_=vmin, to=vmax, variable=var_s, command=_ao_mover)
-            esc_s.pack(side="right", fill="x", expand=True, padx=4)
-            esc_s.bind("<ButtonPress-1>", lambda _e: self.marcar_historico())
-            esc_s.bind("<ButtonRelease-1>", lambda _e: self._aplicar_sliders_painel_tempo_real(final=True))
-            esc_s.bind(
-                "<Double-Button-1>",
-                lambda _e, ch=chave: (
-                    self.marcar_historico(),
-                    self.vars_luz_cor[ch].set(0.0),
-                    self.rotulos_luz_cor[ch].configure(text="0"),
-                    self._aplicar_sliders_painel_tempo_real(final=True),
-                ),
-            )
-
-        linha_pb = ttk.Frame(sliders_box)
-        linha_pb.pack(fill="x", pady=(4, 2))
-        ttk.Checkbutton(
-            linha_pb,
-            text="Preto e Branco (P&B)",
-            variable=self.pb_luz_cor,
-            command=lambda: (self.marcar_historico(), self._aplicar_sliders_painel_tempo_real(final=True)),
-        ).pack(side="left")
-        self._botao(
-            linha_pb,
-            "↺ Zerar",
-            lambda: self._aplicar_1clique_painel("original"),
-            "Zerar todas as barras de luz, cor e saturação",
-            "Compacto.TButton",
-        ).pack(side="right")
-
-        acoes_box = ttk.LabelFrame(quadro, text="4. Replicar Lote ou Gravar no Disco", padding=6)
-        acoes_box.pack(fill="x", pady=(0, 4))
-        linha_rep = ttk.Frame(acoes_box)
-        linha_rep.pack(fill="x", pady=(0, 4))
-        self._botao(
-            linha_rep,
-            "📋 Copiar p/ Lâmina",
-            lambda: self.aplicar_ajustes_manuais_em_lote(self._edicao_dos_sliders_painel(), escopo="lamina"),
-            "Aplica exatamente estes valores de Luz, Cor e Saturação em todas as fotos da lâmina aberta",
-            "Compacto.TButton",
-        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-        self._botao(
-            linha_rep,
-            "📋 Copiar p/ Álbum",
-            lambda: self.aplicar_ajustes_manuais_em_lote(self._edicao_dos_sliders_painel(), escopo="album"),
-            "Aplica exatamente estes valores de Luz, Cor e Saturação em todas as fotos do álbum inteiro",
-            "Compacto.TButton",
-        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
-
-        self._botao(
-            acoes_box,
-            "💾 Gravar Ajustes nas Fotos Originais do PC...",
-            self._gravar_lote_painel_nas_originais,
-            "Grava os ajustes atuais de Luz, Cor e Saturação diretamente nos arquivos originais no computador",
-            "Compacto.TButton",
-        ).pack(fill="x", pady=(0, 3))
-
-        self._botao(
-            acoes_box,
-            "⚡ Abrir Janela Completa de Lote & Ps/Lr...",
-            lambda: self.abrir_tratamento(self._fotos_do_escopo_luz_cor()),
-            "Abre a janela dedicada com prévia das miniaturas, barra de progresso, Photoshop e Lightroom",
-            "PrimarioCompacto.TButton",
-        ).pack(fill="x")
-
-    def _fotos_do_escopo_luz_cor(self):
-        esc = self.escopo_luz_cor.get() if hasattr(self, "escopo_luz_cor") else "selecionadas"
-        if esc == "lamina":
-            return self._fotos_da_lamina()
-        if esc == "album":
-            return self._fotos_do_album()
-        if esc == "projeto":
-            return [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-        escolhidas = self._fotos_escolhidas()
-        if escolhidas:
-            return escolhidas
-        return self._fotos_da_lamina()
-
-    def _edicao_dos_sliders_painel(self):
-        ed = {}
-        for ch, var_s in getattr(self, "vars_luz_cor", {}).items():
-            ed[ch] = int(round(float(var_s.get() or 0)))
-        ed["pb"] = bool(self.pb_luz_cor.get()) if hasattr(self, "pb_luz_cor") else False
-        return ed
-
-    def _atualizar_luz_cor_ui(self):
-        if not hasattr(self, "vars_luz_cor"):
-            return
-        fotos = self._fotos_do_escopo_luz_cor()
-        esc = self.escopo_luz_cor.get()
-        nomes_esc = {
-            "selecionadas": "Selecionadas / Espaço",
-            "lamina": "Lâmina aberta",
-            "album": "Álbum inteiro",
-            "projeto": "Projeto inteiro",
-        }
-        self.rotulo_alvo_luz_cor.configure(
-            text="Escopo ativo: %s (%d foto%s)"
-            % (nomes_esc.get(esc, esc), len(fotos), "s" if len(fotos) != 1 else "")
-        )
-        ed_ref = {}
-        if fotos:
-            ed_ref = self.obter_edicao_foto(fotos[0])
-            if hasattr(self, "rotulo_diag_lateral"):
-                try:
-                    img_m = analise.miniatura(fotos[0])
-                    diag = recorte.analisar_fotometria_rapida(img_m).get("diagnostico", "Equilibrada")
-                    if len(fotos) == 1:
-                        self.rotulo_diag_lateral.configure(text="Diagnóstico da foto: %s" % diag)
-                    else:
-                        self.rotulo_diag_lateral.configure(
-                            text="%d fotos no lote · 1ª foto: %s" % (len(fotos), diag)
-                        )
-                except Exception:
-                    pass
-        self._carregando_luz_cor = True
-        try:
-            for ch, var_s in self.vars_luz_cor.items():
-                v_int = int(round(float(ed_ref.get(ch) or 0)))
-                var_s.set(float(v_int))
-                if ch in self.rotulos_luz_cor:
-                    self.rotulos_luz_cor[ch].configure(text="%d" % v_int)
-            self.pb_luz_cor.set(bool(ed_ref.get("pb")))
-        finally:
-            self._carregando_luz_cor = False
-
-    def _aplicar_1clique_painel(self, nivel):
-        fotos = self._fotos_do_escopo_luz_cor()
-        if not fotos:
-            self.registrar("Selecione pelo menos uma foto ou escolha outro escopo (Lâmina / Álbum).")
-            return
-        self.aplicar_lote_inteligente(
-            fotos_alvo=fotos,
-            escopo=self.escopo_luz_cor.get(),
-            nivel=nivel,
-            extras={},
-            silencioso=True,
-        )
-        self._atualizar_luz_cor_ui()
-
-    def _aplicar_sliders_painel_tempo_real(self, final=False):
-        if getattr(self, "_carregando_luz_cor", False):
-            return
-        fotos = self._fotos_do_escopo_luz_cor()
-        if not fotos:
-            return
-        ed_sl = self._edicao_dos_sliders_painel()
-        alvos_norm = {normalizar_caminho(c) for c in fotos if c}
-        for espaco in proj.todos_espacos(self.projeto):
-            if espaco.get("foto") and normalizar_caminho(espaco["foto"]) in alvos_norm:
-                ed = espaco.setdefault("edicao", {})
-                for ch, val in ed_sl.items():
-                    ed[ch] = val
-        for foto_d in self.projeto.get("fotos", []):
-            if normalizar_caminho(foto_d.get("caminho", "")) in alvos_norm:
-                ed_p = dict(foto_d.get("edicao_padrao") or {})
-                for ch, val in ed_sl.items():
-                    ed_p[ch] = val
-                foto_d["edicao_padrao"] = ed_p
-        self._marcar_modificado()
-        if self._geo:
-            dw, dh = self._geo[:2]
-            self.agendar("luz_cor_render", 16 if not final else 4, lambda: self._pedir_render(dw, dh))
-        if final:
-            self.agendar("luz_cor_tl", 180, self.desenhar_timeline)
-            self.agendar("luz_cor_ft", 120, self._desenhar_fotos_visiveis)
-            if self.editor and self.editor.espaco:
-                self.editor._sincronizar_controles()
-                self.editor._desenhar()
-
-    def _gravar_lote_painel_nas_originais(self):
-        fotos = list(dict.fromkeys(self._fotos_do_escopo_luz_cor()))
-        if not fotos:
-            messagebox.showinfo("Gravar nas Originais", "Nenhuma foto selecionada neste escopo.", parent=self.root)
-            return
-        com_ajuste = [c for c in fotos if recorte.tem_ajuste_luz_cor(self.obter_edicao_foto(c))]
-        if not com_ajuste:
-            messagebox.showinfo(
-                "Gravar nas Originais",
-                "Nenhuma das %d foto(s) deste escopo possui ajustes ativos de Luz, Cor ou Saturação.\n"
-                "Clique primeiro em ✨ Leve, ✨ Médio ou 🔥 Pesado (ou mova as barras) e depois grave." % len(fotos),
-                parent=self.root,
-            )
-            return
-        if not messagebox.askyesno(
-            "Gravar Ajustes nas Fotos Originais",
-            "Deseja gravar permanentemente os ajustes de Luz, Cor e Saturação em %d arquivo(s) original(is) no disco?\n\n"
-            "As fotos originais serão atualizadas e os controles voltarão a zero para não duplicar o efeito."
-            % len(com_ajuste),
-            parent=self.root,
-        ):
-            return
-
-        def trabalho(t):
-            trocadas, erros = [], []
-            total = len(com_ajuste)
-            for idx, caminho in enumerate(com_ajuste, 1):
-                if t.parar():
-                    break
-                t.aviso("Gravando (%d/%d): %s" % (idx, total, Path(caminho).name))
-                try:
-                    ed_atual = self.obter_edicao_foto(caminho)
-                    recorte.gravar_ajustes_no_arquivo_original(caminho, ed_atual)
-                    self.fila.put(("chamar", lambda c=caminho: self.zerar_ajustes_luz_cor_foto(c)))
-                    self.fila.put(("foto_trocada", caminho, caminho))
-                    trocadas.append(caminho)
-                except Exception as e:
-                    erros.append((caminho, str(e)))
-                t.progresso(idx, total)
-            return trocadas, erros
-
-        def fim(res, erro):
-            if erro:
-                messagebox.showerror("Erro ao Gravar Originais", str(erro), parent=self.root)
-                return
-            trocadas, erros = res or ([], [])
-            self._atualizar_luz_cor_ui()
-            msg = "%d foto(s) original(is) atualizada(s) com sucesso no disco!" % len(trocadas)
-            if erros:
-                msg += "\n%d arquivo(s) com erro." % len(erros)
-            self.registrar(msg)
-            messagebox.showinfo("Gravar nas Fotos Originais", msg, parent=self.root)
-
-        self.executar("Gravando ajustes nas originais", trabalho, fim)
 
     # ---------------- Aba de Atalhos Personalizáveis ----------------
 
@@ -7781,45 +7384,8 @@ class Aplicativo:
                 menu.add_command(label="Igualar tamanho das %d fotos selecionadas" % len(self._indices_espacos_selecionados()),
                                  command=lambda: self.alinhar_espaco("igualar"))
             if foto:
-                fotos_sel_lam = [
-                    self._lamina()["espacos"][i_s]["foto"]
-                    for i_s in sorted(self._indices_espacos_selecionados())
-                    if self._lamina()["espacos"][i_s].get("foto")
-                ] or [foto]
-                menu_1c_lam = tk.Menu(menu, tearoff=0)
-                menu_1c_lam.add_command(
-                    label="✨ 1-Clique Leve (%d foto(s))" % len(fotos_sel_lam),
-                    command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos_sel_lam, escopo="selecionadas", nivel="leve"),
-                )
-                menu_1c_lam.add_command(
-                    label="✨ 1-Clique Médio — Ideal (%d foto(s))" % len(fotos_sel_lam),
-                    command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos_sel_lam, escopo="selecionadas", nivel="medio"),
-                )
-                menu_1c_lam.add_command(
-                    label="🔥 1-Clique Pesado (%d foto(s))" % len(fotos_sel_lam),
-                    command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos_sel_lam, escopo="selecionadas", nivel="pesado"),
-                )
-                menu_1c_lam.add_separator()
-                menu_1c_lam.add_command(
-                    label="✨ 1-Clique Médio na Lâmina Inteira",
-                    command=lambda: self.acao_rapida_1clique("medio", escopo="lamina"),
-                )
-                menu_1c_lam.add_command(
-                    label="✨ 1-Clique Médio no Álbum Inteiro",
-                    command=lambda: self.acao_rapida_1clique("medio", escopo="album"),
-                )
-                menu_1c_lam.add_separator()
-                menu_1c_lam.add_command(
-                    label="↺ Restaurar Original (%d foto(s))" % len(fotos_sel_lam),
-                    command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos_sel_lam, escopo="selecionadas", nivel="original"),
-                )
-                menu_1c_lam.add_command(
-                    label="🎛️ Abrir Aba Lateral de Luz, Cor e Saturação",
-                    command=self.abrir_aba_luz_cor,
-                )
-                menu.add_cascade(label="✨ Melhoria em 1 Clique (Luz, Cor e Saturação)", menu=menu_1c_lam)
                 menu.add_command(label="Editar no Photoshop", command=lambda: self.editar_no_photoshop([foto]))
-                menu.add_command(label="Edição em Lote / Ação / Lightroom...", command=lambda: self.abrir_tratamento(fotos_sel_lam))
+                menu.add_command(label="Tratar a foto (Ação / Lightroom)...", command=lambda: self.abrir_tratamento([foto]))
                 menu.add_separator()
                 menu.add_command(label="Tirar a foto do espaço", command=lambda: self.tirar_foto(self.atual, indice))
             menu.add_command(label="Apagar o espaço", command=lambda: self.apagar_espaco(self.atual, indice))
@@ -7865,8 +7431,6 @@ class Aplicativo:
             validos.clear()
         self.espacos_sel = validos
         self.espaco_sel = principal if principal in validos else (min(validos) if validos else None)
-        if hasattr(self, "_atualizar_luz_cor_ui"):
-            self._atualizar_luz_cor_ui()
 
     def _caixa_selecao_espacos(self, indices=None):
         lamina = self._lamina()
@@ -9891,13 +9455,6 @@ class Aplicativo:
                     fill="#e9d5ff" if em_g else "#7dd3fc",
                     font=("Segoe UI", 7, "bold"),
                 )
-            if recorte.tem_ajuste_luz_cor(foto.get("edicao_padrao")):
-                ex1 = direita + 2
-                ex0 = ex1 - 18
-                ey1 = ch - 18
-                ey0 = ey1 - 14
-                c.create_rectangle(ex0, ey0, ex1, ey1, fill="#064e3b", outline="#10b981", width=1)
-                c.create_text((ex0 + ex1) / 2.0, (ey0 + ey1) / 2.0, text="✨", fill="#a7f3d0", font=("Segoe UI", 7, "bold"))
             nome = Path(foto["caminho"]).name
             c.create_text(cx, ch - 9, text=nome if len(nome) <= letras else nome[:letras - 2] + "…",
                           fill=tema.TEXTO if selecionada else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
@@ -9942,8 +9499,6 @@ class Aplicativo:
             self.ultima_foto_clicada = None
             self.atualizar_fotos()
             self._atualizar_degrade_ui()
-            if hasattr(self, "_atualizar_luz_cor_ui"):
-                self._atualizar_luz_cor_ui()
             return
         caminho = self._lista_fotos[indice][0]["caminho"]
         chave = normalizar_caminho(caminho)
@@ -9958,8 +9513,6 @@ class Aplicativo:
         self.ultima_foto_clicada = indice
         self.atualizar_fotos()
         self._atualizar_degrade_ui()
-        if hasattr(self, "_atualizar_luz_cor_ui"):
-            self._atualizar_luz_cor_ui()
         fotos = [f["caminho"] for f, _u in self._lista_fotos if normalizar_caminho(f["caminho"]) in self.fotos_sel]
         if fotos:
             self._arrasto = {"tipo": "foto", "fotos": fotos, "x": evento.x_root, "y": evento.y_root, "ativo": False}
@@ -9975,8 +9528,6 @@ class Aplicativo:
                 self.fotos_sel.add(normalizar_caminho(f["caminho"]))
         self.atualizar_fotos()
         self._atualizar_degrade_ui()
-        if hasattr(self, "_atualizar_luz_cor_ui"):
-            self._atualizar_luz_cor_ui()
 
     def _fotos_menu(self, evento):
         item = self._item_painel_fotos_em(evento)
@@ -10031,35 +9582,6 @@ class Aplicativo:
         menu.add_command(label="Alternar destaque (%s foto(s))" % quantidade,
                          command=lambda: self.alternar_destaque(fotos))
         menu.add_separator()
-        menu_lote_cor = tk.Menu(menu, tearoff=0)
-        menu_lote_cor.add_command(
-            label="✨ 1-Clique Leve nas %s foto(s)" % quantidade,
-            command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos, escopo="selecionadas", nivel="leve"),
-        )
-        menu_lote_cor.add_command(
-            label="✨ 1-Clique Médio — Ideal nas %s foto(s)" % quantidade,
-            command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos, escopo="selecionadas", nivel="medio"),
-        )
-        menu_lote_cor.add_command(
-            label="🔥 1-Clique Pesado nas %s foto(s)" % quantidade,
-            command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos, escopo="selecionadas", nivel="pesado"),
-        )
-        menu_lote_cor.add_separator()
-        menu_lote_cor.add_command(
-            label="↺ Restaurar Original nas %s foto(s)" % quantidade,
-            command=lambda: self.aplicar_lote_inteligente(fotos_alvo=fotos, escopo="selecionadas", nivel="original"),
-        )
-        menu_lote_cor.add_separator()
-        menu_lote_cor.add_command(
-            label="🎛️ Ajustar Luz, Cor e Saturação no Painel Lateral",
-            command=self.abrir_aba_luz_cor,
-        )
-        menu_lote_cor.add_command(
-            label="⚡ Abrir Janela Completa de Edição em Lote...",
-            command=lambda: self.abrir_tratamento(fotos),
-        )
-        menu.add_cascade(label="✨ Melhoria em 1 Clique & Lote (%s foto(s))" % quantidade, menu=menu_lote_cor)
-        menu.add_separator()
         menu_grupos = tk.Menu(menu, tearoff=0)
         for g_info in proj.listar_grupos_ordem(self.projeto):
             num_g = int(g_info.get("grupo_ordem", 1))
@@ -10097,7 +9619,7 @@ class Aplicativo:
                          command=lambda: self._selecionar_pasta_inteira(pasta_atual))
         menu.add_command(label="Editar %s foto(s) no Photoshop" % quantidade,
                          command=lambda: self.editar_no_photoshop(fotos))
-        menu.add_command(label="Edição em Lote / Ação / Lightroom (%s foto(s))..." % quantidade,
+        menu.add_command(label="Tratar %s foto(s) (Ação / Lightroom)..." % quantidade,
                          command=lambda: self.abrir_tratamento(fotos))
         menu.add_separator()
         selecao = tk.Menu(menu, tearoff=0)
@@ -11437,246 +10959,6 @@ class Aplicativo:
             self.janela_tratamento.fechar()
         self.janela_tratamento = janela_tratamento.JanelaTratamento(self, fotos)
         return self.janela_tratamento
-
-    # ---------------- Edição em Lote Inteligente (1 Clique Leve/Médio/Pesado + Luz, Cor e Saturação) ----------------
-
-    def obter_edicao_foto(self, caminho):
-        """Retorna os ajustes atuais (edicao) de uma foto (procurando primeiro nos espaços do álbum e depois em edicao_padrao)."""
-        if not caminho:
-            return {}
-        norm = normalizar_caminho(caminho)
-        lamina = self._lamina()
-        if lamina is not None:
-            for esp in lamina.get("espacos", []):
-                if esp.get("foto") and normalizar_caminho(esp["foto"]) == norm:
-                    return dict(esp.get("edicao") or {})
-        for esp in proj.todos_espacos(self.projeto):
-            if esp.get("foto") and normalizar_caminho(esp["foto"]) == norm:
-                return dict(esp.get("edicao") or {})
-        for foto_d in self.projeto.get("fotos", []):
-            if normalizar_caminho(foto_d.get("caminho", "")) == norm:
-                return dict(foto_d.get("edicao_padrao") or {})
-        return {}
-
-    def salvar_edicao_padrao_foto(self, caminho, edicao):
-        """Guarda os ajustes de Luz, Cor e Saturação na foto do projeto para preservar ao criar novas lâminas."""
-        if not caminho or not isinstance(edicao, dict):
-            return
-        norm = normalizar_caminho(caminho)
-        ed_limpa = {}
-        for ch in recorte.CHAVES_AJUSTES:
-            v = edicao.get(ch, 0)
-            if v:
-                ed_limpa[ch] = v
-        if edicao.get("pb"):
-            ed_limpa["pb"] = True
-        if edicao.get("nivel_auto"):
-            ed_limpa["nivel_auto"] = edicao["nivel_auto"]
-        for foto_d in self.projeto.get("fotos", []):
-            if normalizar_caminho(foto_d.get("caminho", "")) == norm:
-                if ed_limpa:
-                    foto_d["edicao_padrao"] = ed_limpa
-                else:
-                    foto_d.pop("edicao_padrao", None)
-                break
-
-    def zerar_ajustes_luz_cor_foto(self, caminho):
-        """Zera os controles não-destrutivos de luz/cor de uma foto (usado após gravar os ajustes no arquivo original do disco)."""
-        if not caminho:
-            return
-        norm = normalizar_caminho(caminho)
-        for esp in proj.todos_espacos(self.projeto):
-            if esp.get("foto") and normalizar_caminho(esp["foto"]) == norm:
-                ed = esp.setdefault("edicao", {})
-                for ch in recorte.CHAVES_AJUSTES:
-                    ed[ch] = 0
-                ed["pb"] = False
-                ed.pop("nivel_auto", None)
-        for foto_d in self.projeto.get("fotos", []):
-            if normalizar_caminho(foto_d.get("caminho", "")) == norm:
-                foto_d.pop("edicao_padrao", None)
-        self._marcar_modificado()
-
-    def acao_rapida_1clique(self, nivel="medio", escopo="auto"):
-        """Atalho da barra superior/menu para aplicar 1-Clique (Leve, Médio, Pesado ou Original)."""
-        if escopo == "auto":
-            escolhidas = self._fotos_escolhidas()
-            if escolhidas:
-                fotos = escolhidas
-                escopo_real = "selecionadas"
-            elif self._fotos_da_lamina():
-                fotos = self._fotos_da_lamina()
-                escopo_real = "lamina"
-            elif self._fotos_do_album():
-                fotos = self._fotos_do_album()
-                escopo_real = "album"
-            else:
-                fotos = [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-                escopo_real = "projeto"
-        elif escopo == "lamina":
-            fotos = self._fotos_da_lamina()
-            escopo_real = "lamina"
-        elif escopo == "album":
-            fotos = self._fotos_do_album() or [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-            escopo_real = "album"
-        else:
-            fotos = [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-            escopo_real = "projeto"
-        if not fotos:
-            self.registrar("Carregue ou selecione fotos para aplicar a melhoria em 1 clique.")
-            return 0
-        return self.aplicar_lote_inteligente(
-            fotos_alvo=fotos,
-            escopo=escopo_real,
-            nivel=nivel,
-            extras={},
-        )
-
-    def aplicar_lote_inteligente(self, fotos_alvo=None, escopo="selecionadas", nivel="medio", extras=None, janela_pai=None, silencioso=False):
-        """
-        Analisa cada foto individualmente e aplica o ajuste inteligente de Luz, Cor e Saturação
-        no nível escolhido ('leve', 'medio', 'pesado', 'manual' ou 'original') com suporte a Ctrl+Z.
-        """
-        if fotos_alvo is None:
-            if escopo == "lamina":
-                fotos_alvo = self._fotos_da_lamina()
-            elif escopo == "album":
-                fotos_alvo = self._fotos_do_album()
-            elif escopo == "projeto":
-                fotos_alvo = [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-            else:
-                fotos_alvo = self._fotos_escolhidas() or self._fotos_da_lamina()
-        unicas = []
-        vistos = set()
-        for c in (fotos_alvo or []):
-            if not c:
-                continue
-            nc = normalizar_caminho(c)
-            if nc not in vistos:
-                vistos.add(nc)
-                unicas.append(c)
-        if not unicas:
-            if not silencioso:
-                messagebox.showinfo(
-                    "Edição em Lote Inteligente",
-                    "Nenhuma foto encontrada no escopo selecionado.",
-                    parent=janela_pai or self.root,
-                )
-            return 0
-
-        self.marcar_historico()
-        extras = dict(extras or {})
-        calculados_por_norm = {}
-        for caminho in unicas:
-            nc = normalizar_caminho(caminho)
-            ed_base = self.obter_edicao_foto(caminho)
-            try:
-                fonte_rapida = analise.miniatura(caminho)
-            except Exception:
-                fonte_rapida = caminho
-            ed_calc = recorte.calcular_ajuste_inteligente(
-                fonte_rapida,
-                nivel=nivel,
-                extras=extras,
-                base_edicao=ed_base,
-            )
-            if nivel == "original":
-                ed_calc["pb"] = False
-                ed_calc.pop("nivel_auto", None)
-            elif "pb" in extras:
-                ed_calc["pb"] = bool(extras["pb"])
-            calculados_por_norm[nc] = ed_calc
-
-        # Atualiza todos os espaços do álbum que usam essas fotos (preservando corte, rotação, moldura e degradê)
-        for espaco in proj.todos_espacos(self.projeto):
-            foto_esp = espaco.get("foto")
-            if not foto_esp:
-                continue
-            nc = normalizar_caminho(foto_esp)
-            if nc in calculados_por_norm:
-                ed_novo = calculados_por_norm[nc]
-                ed_esp = espaco.setdefault("edicao", {})
-                for ch in recorte.CHAVES_AJUSTES:
-                    ed_esp[ch] = ed_novo.get(ch, 0)
-                if nivel == "original":
-                    ed_esp["pb"] = False
-                    ed_esp.pop("nivel_auto", None)
-                else:
-                    if "pb" in extras:
-                        ed_esp["pb"] = bool(extras["pb"])
-                    ed_esp["nivel_auto"] = nivel
-
-        # Atualiza também edicao_padrao em projeto["fotos"] para fotos ainda não diagramadas
-        for caminho in unicas:
-            nc = normalizar_caminho(caminho)
-            self.salvar_edicao_padrao_foto(caminho, calculados_por_norm[nc])
-
-        self._marcar_modificado()
-        self.desenhar_lamina()
-        self.agendar("lote_tl", 120, self.desenhar_timeline)
-        self.agendar("lote_ft", 60, self._desenhar_fotos_visiveis)
-        if hasattr(self, "_atualizar_luz_cor_ui"):
-            self._atualizar_luz_cor_ui()
-        if self.editor and self.editor.espaco and self.editor.espaco.get("foto"):
-            self.editor._sincronizar_controles()
-            self.editor._desenhar()
-
-        nomes_nivel = {
-            "leve": "✨ 1-Clique Leve",
-            "medio": "✨ 1-Clique Médio",
-            "pesado": "🔥 1-Clique Pesado",
-            "manual": "🎚️ Filtros em Lote",
-            "original": "↺ Original Restaurado",
-        }
-        msg = "%s aplicado em %d foto(s) (use Ctrl+Z para desfazer)." % (
-            nomes_nivel.get(nivel, nivel),
-            len(unicas),
-        )
-        self.registrar(msg)
-        return len(unicas)
-
-    def aplicar_ajustes_manuais_em_lote(self, edicao_origem, escopo="lamina", janela_pai=None):
-        """Copia os valores exatos de Luz, Cor, Saturação e P&B de edicao_origem para a lâmina atual ou álbum inteiro."""
-        if not isinstance(edicao_origem, dict):
-            return 0
-        if escopo == "lamina":
-            fotos = self._fotos_da_lamina()
-            nome_escopo = "lâmina aberta"
-        else:
-            fotos = self._fotos_do_album() or [f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
-            nome_escopo = "álbum inteiro"
-        if not fotos:
-            messagebox.showinfo(
-                "Aplicar em Lote",
-                "Não há fotos na %s para receber os ajustes." % nome_escopo,
-                parent=janela_pai or self.root,
-            )
-            return 0
-        self.marcar_historico()
-        alvos_norm = {normalizar_caminho(c) for c in fotos if c}
-        for espaco in proj.todos_espacos(self.projeto):
-            if espaco.get("foto") and normalizar_caminho(espaco["foto"]) in alvos_norm:
-                ed = espaco.setdefault("edicao", {})
-                for ch in recorte.CHAVES_AJUSTES:
-                    ed[ch] = edicao_origem.get(ch, 0)
-                ed["pb"] = bool(edicao_origem.get("pb", False))
-        for c in set(fotos):
-            self.salvar_edicao_padrao_foto(c, edicao_origem)
-        self._marcar_modificado()
-        self.desenhar_lamina()
-        self.agendar("lote_tl", 120, self.desenhar_timeline)
-        self.agendar("lote_ft", 60, self._desenhar_fotos_visiveis)
-        if hasattr(self, "_atualizar_luz_cor_ui"):
-            self._atualizar_luz_cor_ui()
-        if self.editor and self.editor.espaco:
-            self.editor._sincronizar_controles()
-            self.editor._desenhar()
-        msg = "Ajustes de Luz, Cor e Saturação aplicados em %d foto(s) da %s (Ctrl+Z desfaz)." % (
-            len(alvos_norm),
-            nome_escopo,
-        )
-        self.registrar(msg)
-        return len(alvos_norm)
 
     def abrir_programa_capa(self, programa=None):
         """A capa é feita no programa de capas: abre ele e o trabalho continua lá."""
