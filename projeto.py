@@ -356,7 +356,7 @@ def ordenar_fotos(projeto, info, por="nome"):
 
 
 def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=None):
-    """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, tipo individual/grupo, pasta e rosto para o diagramar."""
+    """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, cenário visual, tipo individual/grupo, pasta e rosto para o diagramar."""
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
     chave_pasta_alvo = normalizar_caminho(pasta_alvo) if pasta_alvo else None
     saida = []
@@ -371,6 +371,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
         gid = max(1, int(foto.get("grupo_ordem") or 1))
         ord_m = int(foto.get("ordem_manual") or idx)
         tp = str(foto.get("tipo_pessoas") or "auto").strip().lower()
+        ass_cen = dados.get("cenario") or foto.get("cenario")
         saida.append({
             "caminho": foto["caminho"],
             "proporcao": dados_proporcao(dados),
@@ -382,6 +383,8 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
             "tipo_pessoas": tp if tp in ("individual", "grupo") else "auto",
             "em_grupo_pessoas": eh_foto_em_grupo(foto, info),
             "rosto": dados.get("rosto"),
+            "cenario": ass_cen,
+            "assinatura_cenario": ass_cen if isinstance(ass_cen, (list, tuple)) else None,
             "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),
         })

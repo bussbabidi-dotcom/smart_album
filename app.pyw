@@ -3837,12 +3837,18 @@ class Aplicativo:
         if not fotos_livres:
             rb_livres.configure(state="disabled")
 
-        # --- 2. Pastas e Ordem por Grupos Numerados ---
-        quadro_grupos = ttk.LabelFrame(quadro, text="2. Ordem das Fotos, Grupos Numerados e Prioridade (Individual vs. Grupo)", padding=10)
+        # --- 2. Pastas, Grupos Numerados, Cenário dentro do Grupo e Prioridade ---
+        quadro_grupos = ttk.LabelFrame(
+            quadro,
+            text="2. Ordem das Fotos, Grupos Numerados, Cenário no Grupo e Prioridade (Individual vs. Grupo)",
+            padding=10,
+        )
         quadro_grupos.pack(fill="x", pady=(0, 8))
 
         separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
         respeitar_grupos_var = tk.BooleanVar(value=bool(cfg.get("respeitar_grupos_manuais", True)))
+        reconhecer_cenarios_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
+        limiar_cenario_var = tk.DoubleVar(value=max(0.15, min(0.45, float(cfg.get("limiar_cenario", 0.28)))))
         ordem_pessoas_var = tk.StringVar(value=str(cfg.get("ordem_pessoas_grupo", "manter") or "manter"))
 
         ttk.Checkbutton(
@@ -3855,6 +3861,29 @@ class Aplicativo:
             text="Respeitar ordem e grupos numerados definidos (nunca misturar grupos diferentes na mesma lâmina)",
             variable=respeitar_grupos_var,
         ).pack(anchor="w", pady=2)
+
+        linha_cenario_cfg = ttk.Frame(quadro_grupos)
+        linha_cenario_cfg.pack(fill="x", pady=2)
+        ttk.Checkbutton(
+            linha_cenario_cfg,
+            text="🎨 Identificar e agrupar por cenário visual (fundo/iluminação) dentro de cada grupo",
+            variable=reconhecer_cenarios_var,
+        ).pack(side="left")
+        spin_limiar_cen = ttk.Spinbox(
+            linha_cenario_cfg,
+            from_=0.15,
+            to=0.45,
+            increment=0.02,
+            format="%.2f",
+            textvariable=limiar_cenario_var,
+            width=6,
+        )
+        spin_limiar_cen.pack(side="right")
+        ttk.Label(
+            linha_cenario_cfg,
+            text="Sensibilidade (0.15=alta · 0.28=padrão):",
+            style="Fraco.TLabel",
+        ).pack(side="right", padx=(6, 4))
 
         ttk.Separator(quadro_grupos, orient="horizontal").pack(fill="x", pady=6)
 
@@ -4094,6 +4123,11 @@ class Aplicativo:
             except (tk.TclError, ValueError):
                 auto_min = int(cfg.get("auto_salvar_minutos", 5))
 
+            try:
+                lim_cen = max(0.15, min(0.45, float(limiar_cenario_var.get())))
+            except (tk.TclError, ValueError):
+                lim_cen = float(cfg.get("limiar_cenario", 0.28))
+
             cfg_temp = dict(cfg)
             cfg_temp.update({
                 "laminas_desejadas": lam_des,
@@ -4105,6 +4139,8 @@ class Aplicativo:
                 "auto_salvar_minutos": auto_min,
                 "separar_pastas": bool(separar_pastas_var.get()),
                 "respeitar_grupos_manuais": bool(respeitar_grupos_var.get()),
+                "reconhecer_cenarios": bool(reconhecer_cenarios_var.get()),
+                "limiar_cenario": lim_cen,
                 "ordem_pessoas_grupo": str(ordem_pessoas_var.get() or "manter"),
                 "modo_corte": modo_corte_var.get(),
                 "corte_maximo": 1.0 + (pct_c / 100.0),
@@ -4128,12 +4164,13 @@ class Aplicativo:
                 cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
-                text="Fotos: %d (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d  |  Pastas: %d  →  %d lâmina(s)"
+                text="Fotos: %d (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d (🎨 %d cen.)  |  Pastas: %d  →  %d lâmina(s)"
                 % (
                     prev["total_fotos"],
                     prev.get("fotos_individuais", 0),
                     prev.get("fotos_em_grupo", 0),
-                    prev.get("grupos", prev.get("cenarios", 1)),
+                    prev.get("grupos", 1),
+                    prev.get("cenarios", prev.get("grupos", 1)),
                     prev["pastas"],
                     prev["laminas_estimadas"],
                 )
@@ -4146,7 +4183,9 @@ class Aplicativo:
                 detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
             detalhes += ")."
             if respeitar_grupos_var.get():
-                detalhes += " Grupos numerados isolados (sem misturar grupos)."
+                detalhes += " Grupos numerados isolados."
+            if reconhecer_cenarios_var.get():
+                detalhes += " 🎨 Cenários identificados dentro de cada grupo."
             modo_p = ordem_pessoas_var.get()
             if modo_p == "individuais_primeiro":
                 detalhes += " Ordem: Individuais primeiro em cada grupo."
@@ -4163,6 +4202,8 @@ class Aplicativo:
             pasta_escolhida_var,
             separar_pastas_var,
             respeitar_grupos_var,
+            reconhecer_cenarios_var,
+            limiar_cenario_var,
             ordem_pessoas_var,
             modo_corte_var,
             corte_max_pct_var,
@@ -4450,6 +4491,18 @@ class Aplicativo:
 
         ttk.Button(
             barra_acoes,
+            text="🎨 Ordenar p/ Cenário no Grupo",
+            style="Compacto.TButton",
+            command=lambda: _ordenar_por_cenario_nos_grupos(),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
+            text="🎨 Subdividir p/ Cenário",
+            style="Compacto.TButton",
+            command=lambda: _subdividir_grupo_por_cenario(),
+        ).pack(side="left", padx=1)
+        ttk.Button(
+            barra_acoes,
             text="📁 1 Grupo/Pasta",
             style="Compacto.TButton",
             command=lambda: _dividir_por_pastas(),
@@ -4644,6 +4697,7 @@ class Aplicativo:
             )
 
             seq_global = 0
+            lim_cen_atual = float((self.projeto.get("config") or {}).get("limiar_cenario", 0.28))
             for idx_g, g in enumerate(estado_grupos):
                 cor_g = CORES_GRUPOS[idx_g % len(CORES_GRUPOS)]
                 ativo = (idx_g == grupo_ativo_idx[0])
@@ -4651,6 +4705,21 @@ class Aplicativo:
                 fotos_g = g["fotos"]
                 qtd_em_grupo = sum(1 for f in fotos_g if proj.eh_foto_em_grupo(f, self.info))
                 qtd_indiv = len(fotos_g) - qtd_em_grupo
+                # Calcula a qual cenário visual dentro do grupo cada foto pertence
+                fotos_com_ass = []
+                for f_it in fotos_g:
+                    ch_it = normalizar_caminho(f_it["caminho"])
+                    dados_it = self.info.get(ch_it) or {}
+                    copia_it = dict(f_it)
+                    if dados_it.get("cenario"):
+                        copia_it["cenario"] = dados_it["cenario"]
+                    fotos_com_ass.append(copia_it)
+                _ord_cen, sub_cen = diagramar.agrupar_por_cenario_no_bloco(fotos_com_ass, limiar=lim_cen_atual)
+                mapa_cen_foto = {}
+                for idx_c, bloco_c in enumerate(sub_cen, start=1):
+                    for fc in bloco_c:
+                        mapa_cen_foto[normalizar_caminho(fc["caminho"])] = idx_c
+                qtd_cen_grupo = max(1, len(sub_cen)) if fotos_g else 0
 
                 alt_cab = 36
                 if recolhido:
@@ -4719,11 +4788,12 @@ class Aplicativo:
                     font=tema.FONTE_FORTE,
                 )
 
-                resumo_g = "%s  —  %d foto(s) (👤 %d ind. · 👥 %d grupo)" % (
+                resumo_g = "%s  —  %d foto(s) (👤 %d ind. · 👥 %d grupo · 🎨 %d cenário(s))" % (
                     g["nome"],
                     len(fotos_g),
                     qtd_indiv,
                     qtd_em_grupo,
+                    qtd_cen_grupo,
                 )
                 if recolhido:
                     resumo_g += "  ·  [Aba fechada — solte fotos aqui ou clique p/ abrir]"
@@ -4831,6 +4901,25 @@ class Aplicativo:
                             fy0 + 10,
                             text=etq_p,
                             fill=cor_fg_p,
+                            font=("Segoe UI", 7, "bold"),
+                        )
+
+                        # Badge do Cenário Visual identificado dentro deste grupo (🎨 C1, C2...)
+                        num_cen_f = mapa_cen_foto.get(ch_f, 1)
+                        etq_cen = "🎨 C%d" % num_cen_f
+                        canvas_g.create_rectangle(
+                            fx0 + 3,
+                            fy1 - 40,
+                            fx0 + 40,
+                            fy1 - 26,
+                            fill="#065f46" if (num_cen_f % 2 == 1) else "#92400e",
+                            outline="",
+                        )
+                        canvas_g.create_text(
+                            fx0 + 21,
+                            fy1 - 33,
+                            text=etq_cen,
+                            fill="#ecfdf5" if (num_cen_f % 2 == 1) else "#fef3c7",
                             font=("Segoe UI", 7, "bold"),
                         )
 
@@ -5120,6 +5209,61 @@ class Aplicativo:
             if g_rem["fotos"]:
                 estado_grupos[destino]["fotos"].extend(g_rem["fotos"])
             grupo_ativo_idx[0] = destino
+            _redesenhar_canvas()
+
+        def _ordenar_por_cenario_nos_grupos():
+            lim_c = float((self.projeto.get("config") or {}).get("limiar_cenario", 0.28))
+            total_cen = 0
+            for g in estado_grupos:
+                fotos_enriq = []
+                for f_it in g["fotos"]:
+                    ch_it = normalizar_caminho(f_it["caminho"])
+                    dados_it = self.info.get(ch_it) or {}
+                    copia_it = dict(f_it)
+                    if dados_it.get("cenario"):
+                        copia_it["cenario"] = dados_it["cenario"]
+                    fotos_enriq.append(copia_it)
+                ord_c, sub_c = diagramar.agrupar_por_cenario_no_bloco(fotos_enriq, limiar=lim_c)
+                g["fotos"] = ord_c
+                total_cen += len(sub_c)
+            _redesenhar_canvas()
+            self.registrar(
+                "Fotos ordenadas por semelhança de cenário visual dentro de cada grupo (%d cenário(s) identificado(s))."
+                % max(1, total_cen)
+            )
+
+        def _subdividir_grupo_por_cenario():
+            idx = grupo_ativo_idx[0]
+            if not (0 <= idx < len(estado_grupos)):
+                return
+            lim_c = float((self.projeto.get("config") or {}).get("limiar_cenario", 0.28))
+            alvo_g = estado_grupos[idx]
+            fotos_enriq = []
+            for f_it in alvo_g["fotos"]:
+                ch_it = normalizar_caminho(f_it["caminho"])
+                dados_it = self.info.get(ch_it) or {}
+                copia_it = dict(f_it)
+                if dados_it.get("cenario"):
+                    copia_it["cenario"] = dados_it["cenario"]
+                fotos_enriq.append(copia_it)
+            _ord_c, sub_c = diagramar.agrupar_por_cenario_no_bloco(fotos_enriq, limiar=lim_c)
+            if len(sub_c) <= 1:
+                messagebox.showinfo(
+                    "Cenários no Grupo",
+                    "Todas as fotos deste grupo já pertencem ao mesmo cenário visual (1 cenário detectado).",
+                    parent=janela,
+                )
+                return
+            nome_base = alvo_g["nome"]
+            novos_sub = [
+                {
+                    "nome": "%s · Cenário %d" % (nome_base, ic + 1),
+                    "fotos": bloco_c,
+                    "recolhido": False,
+                }
+                for ic, bloco_c in enumerate(sub_c)
+            ]
+            estado_grupos[idx:idx + 1] = novos_sub
             _redesenhar_canvas()
 
         def _dividir_por_pastas():
