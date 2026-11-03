@@ -13,6 +13,18 @@ import threading
 import time
 from pathlib import Path
 
+try:
+    from PIL import Image as _PIL_Img_Compat
+    for _enum_c in (getattr(_PIL_Img_Compat, "Resampling", None), getattr(_PIL_Img_Compat, "Transpose", None)):
+        if _enum_c is not None:
+            for _k in dir(_enum_c):
+                if _k.isupper() and not hasattr(_PIL_Img_Compat, _k):
+                    setattr(_PIL_Img_Compat, _k, getattr(_enum_c, _k))
+    if not hasattr(_PIL_Img_Compat, "ANTIALIAS") and hasattr(_PIL_Img_Compat, "LANCZOS"):
+        setattr(_PIL_Img_Compat, "ANTIALIAS", getattr(_PIL_Img_Compat, "LANCZOS"))
+except Exception:
+    pass
+
 EXTENSOES = {".jpg", ".jpeg", ".jfif", ".png", ".tif", ".tiff", ".webp", ".bmp"}
 EXTENSOES_IMAGEM = EXTENSOES
 EXTENSOES_RAW = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".dng", ".pef", ".srw"}

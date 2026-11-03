@@ -141,10 +141,17 @@ for _p in reversed(_pastas_busca):
     if _ps not in sys.path:
         sys.path.insert(0, _ps)
 
-# 1. Garante PIL.ImageGrab no pacote PyInstaller (usando PIL.Image.core.grabscreen_win32 nativo)
+# 1. Garante PIL.ImageGrab e constantes legadas (LANCZOS, ROTATE_90, etc.) no Pillow 12+
 try:
     import PIL
     from PIL import Image as _PIL_Image
+    for _enum_cls in (getattr(_PIL_Image, "Resampling", None), getattr(_PIL_Image, "Transpose", None)):
+        if _enum_cls is not None:
+            for _attr_n in dir(_enum_cls):
+                if _attr_n.isupper() and not hasattr(_PIL_Image, _attr_n):
+                    setattr(_PIL_Image, _attr_n, getattr(_enum_cls, _attr_n))
+    if not hasattr(_PIL_Image, "ANTIALIAS") and hasattr(_PIL_Image, "LANCZOS"):
+        setattr(_PIL_Image, "ANTIALIAS", getattr(_PIL_Image, "LANCZOS"))
     try:
         from PIL import ImageGrab as _ig_mod
     except Exception:

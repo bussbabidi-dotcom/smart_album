@@ -236,6 +236,8 @@ def _procurar_executavel(pastas, nomes):
 
 
 def _registro_app_path(executavel):
+    if winreg is None:
+        return None
     for raiz in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
         try:
             with winreg.OpenKey(raiz, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\\" + executavel) as ch:

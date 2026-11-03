@@ -58,6 +58,9 @@ def edicao_padrao():
     }
 
 
+PADRAO_EDICAO = edicao_padrao()
+
+
 def _ed(edicao):
     ed = edicao_padrao()
     ed.update(edicao or {})

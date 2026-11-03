@@ -142,6 +142,20 @@ def esquecer_miniaturas(caminho):
     _memoria_previa.esquecer(chave)
 
 
+def esquecer(caminho):
+    """Remove a foto das miniaturas em RAM e do cache de análise para forçar releitura."""
+    global _cache_sujo
+    if not caminho:
+        return
+    esquecer_miniaturas(caminho)
+    ch = normalizar_caminho(caminho)
+    with _trava_cache:
+        if _cache is not None and "fotos" in _cache:
+            for k in [k for k in _cache["fotos"] if k == ch or k.startswith(ch + "|")]:
+                _cache["fotos"].pop(k, None)
+                _cache_sujo = True
+
+
 def esquecer_pasta(pasta):
     """Remove da memória RAM e do cache de análise todas as fotos de uma pasta (ex.: pasta temporária do Drive)."""
     global _cache_sujo

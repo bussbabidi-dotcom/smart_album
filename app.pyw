@@ -580,7 +580,7 @@ class Aplicativo:
         )
         self.botao_1clique["menu"] = menu_1c
         self.botao_1clique.pack(side="right", padx=1)
-        self.dica(
+        tema.dica(
             self.botao_1clique,
             "Melhoria rápida em 1 clique (Leve, Médio ou Pesado) e edição em lote de luz, cor e saturação com Ctrl+Z",
         )
@@ -11236,13 +11236,14 @@ class Aplicativo:
         self.atualizar_tudo()
         nome_escopo = "na lâmina atual" if escopo == "lamina" else "no álbum inteiro"
         self.registrar("Ajustes de luz, cor e saturação aplicados em %d foto(s) %s (Ctrl+Z desfaz)." % (len(fotos), nome_escopo))
+        return len(fotos)
 
     def restaurar_luz_cor_lote(self, fotos_alvo=None, escopo="auto", janela_pai=None):
         """Restaura luz, cor e saturação originais nas fotos do escopo escolhido com suporte a Ctrl+Z."""
         fotos = self._resolver_fotos_lote(fotos_alvo=fotos_alvo, escopo=escopo)
         if not fotos:
             self.registrar("Nenhuma foto selecionada para restaurar.")
-            return
+            return 0
         self.marcar_historico()
         for cam in fotos:
             self.zerar_ajustes_luz_cor_foto(cam)
@@ -11250,6 +11251,7 @@ class Aplicativo:
         self._marcar_modificado()
         self.atualizar_tudo()
         self.registrar("Luz, cor e saturação originais restauradas em %d foto(s) (Ctrl+Z desfaz)." % len(fotos))
+        return len(fotos)
 
     def aplicar_lote_inteligente(
         self,
@@ -11273,7 +11275,7 @@ class Aplicativo:
                     "Selecione uma foto, lâmina ou carregue fotos no projeto primeiro.",
                     parent=janela_pai or self.root,
                 )
-            return
+            return 0
         extras = dict(extras or {})
         nomes_nivel = {
             "leve": "1-Clique LEVE",
@@ -11284,8 +11286,7 @@ class Aplicativo:
         }
 
         if nivel == "original":
-            self.restaurar_luz_cor_lote(fotos_alvo=fotos, escopo=escopo, janela_pai=janela_pai)
-            return
+            return self.restaurar_luz_cor_lote(fotos_alvo=fotos, escopo=escopo, janela_pai=janela_pai)
 
         def _aplicar_resultado_edicoes(mapa_edicoes):
             self.marcar_historico()
@@ -11332,7 +11333,7 @@ class Aplicativo:
                     ed_calc["pb"] = bool(extras["pb"])
                 mapa[ch] = ed_calc
             _aplicar_resultado_edicoes(mapa)
-            return
+            return len(fotos)
 
         # Para lotes maiores, executa com barra de progresso
         bases_iniciais = {normalizar_caminho(c): self.obter_edicao_foto(c) for c in fotos}
@@ -11363,6 +11364,7 @@ class Aplicativo:
             _aplicar_resultado_edicoes(resultado)
 
         self.executar("Aplicando %s em %d fotos" % (nomes_nivel.get(nivel, "Melhoria"), len(fotos)), trabalho, fim)
+        return len(fotos)
 
     # ==================================================================
     # Photoshop e Lightroom
@@ -11474,6 +11476,12 @@ class Aplicativo:
     # ==================================================================
     # Janelas de tratamento e exportação, programa de capas
     # ==================================================================
+
+    def dica(self, widget, texto):
+        return tema.dica(widget, texto)
+
+    def tratar_no_lightroom(self, fotos=None):
+        return self.abrir_tratamento(fotos)
 
     def abrir_tratamento(self, fotos=None):
         """Janela de tratamento; com fotos, já vem com elas escolhidas."""
