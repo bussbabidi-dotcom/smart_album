@@ -1924,60 +1924,62 @@ def _assinatura_de_foto(foto, info=None):
 
 def detectar_nome_evento_foto(foto, info=None, indice=0):
     """
-    Detecta o nome canônico do Evento/Capítulo de uma foto com base na pasta, nome do arquivo,
-    rótulo de cenário e luminosidade/assinatura visual:
-      - 'Cerimônia do Jaleco'
-      - 'Fotos Externas'
-      - 'Baile de Gala'
-      - 'Culto Ecumênico'
-      - 'Colação 2'
-      - 'Colação 1'
+    Identifica o nome de um Evento/Capítulo APENAS quando houver indicação explícita
+    no nome do grupo, pasta ou arquivo. Nunca inventa eventos fixos por índice ou brilho,
+    pois nem todo álbum tem todos os eventos e quem decide os eventos e sua ordem é o usuário.
     """
     if not isinstance(foto, dict):
-        return "Colação 1"
+        return ""
+    nome_g = str(foto.get("nome_grupo") or "").strip()
+    if (
+        nome_g
+        and not nome_g.startswith("Cenário ")
+        and not nome_g.startswith("Grupo ")
+        and not nome_g.startswith("Capítulo ")
+    ):
+        return nome_g
+
     partes = [
-        str(foto.get("nome_grupo") or ""),
+        nome_g,
         str(foto.get("pasta") or ""),
         str(foto.get("nome_pasta") or ""),
-        str(foto.get("rotulo_cenario") or ""),
-        str(foto.get("cenario") if isinstance(foto.get("cenario"), str) else ""),
         str(foto.get("caminho") or ""),
     ]
     txt = " ".join(partes).lower()
-    if any(k in txt for k in ("jaleco", "medicin", "odonto", "enferm", "saude", "saúde", "branco", "hospital", "clinica")):
+    if any(k in txt for k in ("jaleco", "cerimonia_jaleco", "cerimonia do jaleco", "cerimônia do jaleco")):
         return "Cerimônia do Jaleco"
-    if any(k in txt for k in ("extern", "parque", "praia", "campus", "ar_livre", "jardim", "natureza", "outdoor", "sol")):
+    if any(k in txt for k in ("externa", "parque", "praia", "ar_livre", "jardim", "botanic", "outdoor")):
         return "Fotos Externas"
-    if any(k in txt for k in ("baile", "gala", "festa", "pista", "brinde", "balada", "valsa", "recepcao", "recepção")):
+    if any(k in txt for k in ("baile", "gala", "valsa", "festa_formatura")):
         return "Baile de Gala"
-    if any(k in txt for k in ("culto", "missa", "solenidade", "homenagem")):
+    if any(k in txt for k in ("culto", "missa", "igreja")):
         return "Culto Ecumênico"
-    if any(k in txt for k in ("colacao 2", "colação 2", "colacao_2", "estudio 2", "estúdio 2", "bokeh")):
+    if any(k in txt for k in ("ensaio", "pre_wedding", "making")):
+        return "Ensaio Fotográfico"
+    if any(k in txt for k in ("colacao 2", "colação 2", "colacao_2", "solenidade", "tribuna", "canudo")):
         return "Colação 2"
-    if any(k in txt for k in ("colacao", "colação", "beca", "canudo", "grau", "oficial", "estudio", "estúdio")):
+    if any(k in txt for k in ("colacao", "colação", "beca", "juramento")):
         return "Colação 1"
 
-    vetor = _assinatura_de_foto(foto, info=info)
-    if vetor and len(vetor) >= 6:
-        media_v = sum(vetor) / float(len(vetor))
-        max_v = max(vetor)
-        if media_v > 0.012 and max_v < 0.08:
-            return "Cerimônia do Jaleco"
-    nomes_padrao = ("Colação 1", "Colação 2", "Cerimônia do Jaleco", "Fotos Externas", "Baile de Gala")
-    return nomes_padrao[int(indice) % len(nomes_padrao)]
+    return ""
 
 
 def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
     """
-    Separa automaticamente uma lista de fotos em capítulos por Evento
-    ('Colação 1', 'Colação 2', 'Cerimônia do Jaleco', 'Fotos Externas', 'Baile de Gala'),
-    subdividindo também se um mesmo evento tiver ambientes visuais muito distintos (ex.: Colação 1 e Colação 2).
+    Separa uma lista de fotos em blocos quando o usuário aciona explicitamente
+    'Separar p/ Evento / Cenário', agrupando por pasta/evento explícito e transições reais
+    de cenário visual (assinatura HSV de fundo), sem inventar eventos inexistentes nem forçar
+    um ciclo fixo de formatura.
     Devolve lista de dicts: [{"nome": str, "fotos": [dict, ...], "recolhido": False}]
     """
     lista = [dict(f) for f in (fotos or []) if isinstance(f, dict)]
     if not lista:
         return []
-    # Enriquecer com assinatura de cenário de `info` quando disponível
+    try:
+        lim = max(0.14, min(0.55, float(limiar or 0.28)))
+    except (TypeError, ValueError):
+        lim = 0.28
+
     if isinstance(info, dict):
         from comum import normalizar_caminho
         for f in lista:
@@ -1987,61 +1989,107 @@ def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
                 if dados_i.get("cenario"):
                     f["cenario"] = dados_i["cenario"]
 
-    # 1. Agrupa primeiro pelo evento detectado em cada foto (preservando ordem de aparição)
-    por_evento = {}
-    ordem_eventos = []
-    for idx_f, f in enumerate(lista):
-        ev = detectar_nome_evento_foto(f, info=info, indice=idx_f // max(1, len(lista) // 4 or 1))
-        if ev not in por_evento:
-            por_evento[ev] = []
-            ordem_eventos.append(ev)
-        por_evento[ev].append(f)
+    blocos = []  # [{"ev_exp": str, "pasta": str, "fotos": [dict, ...], "centroide": list|None}]
+    for i, f in enumerate(lista):
+        ev_exp = detectar_nome_evento_foto(f, info=info, indice=i)
+        pasta_f = str(f.get("pasta") or f.get("nome_pasta") or "")
+        vetor = _assinatura_de_foto(f, info=info)
 
-    # 2. Se todas caíram em apenas 1 evento mas possuem múltiplos cenários visuais, subdivide por cenário!
-    if len(ordem_eventos) <= 1 and len(lista) >= 2:
-        _ord_c, sub_c = agrupar_por_cenario_no_bloco(lista, limiar=max(0.16, limiar * 0.85))
-        if len(sub_c) > 1:
-            nomes_padrao = ["Colação 1", "Colação 2", "Cerimônia do Jaleco", "Fotos Externas", "Baile de Gala"]
-            saida_sub = []
-            contagem_nomes = {}
-            for idx_b, bloco in enumerate(sub_c):
-                nome_sug = detectar_nome_evento_foto(bloco[0], info=info, indice=idx_b)
-                if idx_b > 0 and nome_sug == "Colação 1":
-                    nome_sug = nomes_padrao[idx_b % len(nomes_padrao)]
-                qtd_ja = contagem_nomes.get(nome_sug, 0) + 1
-                contagem_nomes[nome_sug] = qtd_ja
-                if qtd_ja > 1:
-                    if nome_sug.startswith("Colação"):
-                        nome_sug = "Colação %d" % qtd_ja
-                    else:
-                        nome_sug = "%s %d" % (nome_sug, qtd_ja)
-                saida_sub.append({"nome": nome_sug, "fotos": bloco, "recolhido": False})
-            return saida_sub
-
-    # 3. Dentro de cada evento, se houver 2 ambientes muito diferentes em 'Colação 1' (>= 4 fotos), separa em Colação 1 e Colação 2
-    resultado = []
-    contagem_colacao = 0
-    for ev_nome in ordem_eventos:
-        bloco_ev = por_evento[ev_nome]
-        _ord_ev, sub_ev = agrupar_por_cenario_no_bloco(bloco_ev, limiar=max(0.22, limiar))
-        if ev_nome.startswith("Colação") and len(sub_ev) >= 2 and len(bloco_ev) >= 4:
-            for sub_b in sub_ev:
-                contagem_colacao += 1
-                resultado.append({
-                    "nome": "Colação %d" % contagem_colacao,
-                    "fotos": sub_b,
-                    "recolhido": False,
-                })
-        else:
-            nome_final = ev_nome
-            if ev_nome.startswith("Colação"):
-                contagem_colacao += 1
-                nome_final = "Colação %d" % contagem_colacao
-            resultado.append({
-                "nome": nome_final,
-                "fotos": _ord_ev if _ord_ev else bloco_ev,
-                "recolhido": False,
+        if not blocos:
+            blocos.append({
+                "ev_exp": ev_exp,
+                "pasta": pasta_f,
+                "fotos": [f],
+                "centroide": list(vetor) if vetor else None,
             })
+            continue
+
+        ult = blocos[-1]
+        mudou_pasta = bool(ult["pasta"] and pasta_f and ult["pasta"] != pasta_f)
+        mudou_ev = bool(ult["ev_exp"] and ev_exp and ult["ev_exp"] != ev_exp)
+
+        d_ult = distancia_cenario(ult["fotos"][-1], f)
+        d_centro = (
+            0.5 * sum(abs(a - b) for a, b in zip(ult["centroide"], vetor))
+            if (ult["centroide"] and vetor and len(ult["centroide"]) == len(vetor))
+            else d_ult
+        )
+        d_efetiva = min(d_ult, d_centro * 0.95)
+
+        retorno_logo_apos = False
+        if not mudou_pasta and not mudou_ev and d_efetiva > lim and (i + 1) < len(lista):
+            v_prox = _assinatura_de_foto(lista[i + 1], info=info)
+            if ult["centroide"] and v_prox and len(ult["centroide"]) == len(v_prox):
+                d_prox = 0.5 * sum(abs(a - b) for a, b in zip(ult["centroide"], v_prox))
+                if d_prox <= lim * 0.95:
+                    retorno_logo_apos = True
+
+        if mudou_pasta or mudou_ev or (d_efetiva > lim and not retorno_logo_apos):
+            blocos.append({
+                "ev_exp": ev_exp,
+                "pasta": pasta_f,
+                "fotos": [f],
+                "centroide": list(vetor) if vetor else None,
+            })
+        else:
+            ult["fotos"].append(f)
+            if vetor and ult["centroide"] and len(vetor) == len(ult["centroide"]):
+                k = float(len(ult["fotos"]))
+                ult["centroide"] = [
+                    ((k - 1.0) * c_val + v_val) / k
+                    for c_val, v_val in zip(ult["centroide"], vetor)
+                ]
+
+    # Mescla fragmentos isolados de 1 foto ao bloco vizinho mais parecido quando da mesma pasta
+    if len(blocos) > 2:
+        for idx_b in range(len(blocos) - 1, -1, -1):
+            if len(blocos) <= 1:
+                break
+            b_at = blocos[idx_b]
+            if len(b_at["fotos"]) == 1:
+                v_esq = blocos[idx_b - 1] if idx_b > 0 else None
+                v_dir = blocos[idx_b + 1] if (idx_b + 1) < len(blocos) else None
+                d_esq = (
+                    distancia_cenario(v_esq["fotos"][-1], b_at["fotos"][0])
+                    if (v_esq and (not b_at["pasta"] or not v_esq["pasta"] or b_at["pasta"] == v_esq["pasta"]))
+                    else 999.0
+                )
+                d_dir = (
+                    distancia_cenario(v_dir["fotos"][0], b_at["fotos"][0])
+                    if (v_dir and (not b_at["pasta"] or not v_dir["pasta"] or b_at["pasta"] == v_dir["pasta"]))
+                    else 999.0
+                )
+                if d_esq <= d_dir and d_esq <= lim * 1.40 and v_esq is not None:
+                    v_esq["fotos"].extend(b_at["fotos"])
+                    blocos.pop(idx_b)
+                elif d_dir < d_esq and d_dir <= lim * 1.40 and v_dir is not None:
+                    v_dir["fotos"] = b_at["fotos"] + v_dir["fotos"]
+                    blocos.pop(idx_b)
+
+    total_por_base = {}
+    for b in blocos:
+        base_n = (b["ev_exp"] or "").rstrip("0123456789 ").strip()
+        if base_n:
+            total_por_base[base_n] = total_por_base.get(base_n, 0) + 1
+
+    contagem_por_base = {}
+    resultado = []
+    for idx_b, b in enumerate(blocos, start=1):
+        base_n = (b["ev_exp"] or "").rstrip("0123456789 ").strip()
+        if not base_n:
+            nome_final = "Evento %d" % idx_b
+        else:
+            num_oc = contagem_por_base.get(base_n, 0) + 1
+            contagem_por_base[base_n] = num_oc
+            if total_por_base.get(base_n, 1) > 1:
+                nome_final = "%s %d" % (base_n, num_oc)
+            else:
+                nome_final = b["ev_exp"]
+        resultado.append({
+            "nome": nome_final,
+            "fotos": b["fotos"],
+            "recolhido": False,
+        })
     return resultado
 
 
@@ -2097,7 +2145,8 @@ def agrupar_por_cenario_no_bloco(fotos_bloco, limiar=0.28, offset_cenario=0):
                     if (ult_v and len(ult_v) == len(vetor))
                     else d_centro
                 )
-                d = min(d_centro, d_ult * 0.95)
+                bonus_cont = 0.92 if idx_c == (len(clusters) - 1) else 1.0
+                d = min(d_centro, d_ult * 0.95) * bonus_cont
                 if d <= lim and d < menor_dist:
                     menor_dist = d
                     melhor_idx = idx_c

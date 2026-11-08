@@ -6011,23 +6011,10 @@ class Aplicativo:
         ]
         if not estado_grupos:
             estado_grupos = [{
-                "nome": "Grupo 1",
+                "nome": "Evento 1",
                 "fotos": [dict(f) for f in self.projeto.get("fotos", [])],
                 "recolhido": False,
             }]
-        # Se houver apenas 1 grupo inicial com várias fotos, separa automaticamente por evento/momento
-        if len(estado_grupos) == 1 and len(estado_grupos[0].get("fotos") or []) >= 2:
-            fotos_enriq_ini = []
-            for f_ini in estado_grupos[0]["fotos"]:
-                ch_ini = normalizar_caminho(f_ini["caminho"])
-                dados_ini = self.info.get(ch_ini) or {}
-                copia_ini = dict(f_ini)
-                if dados_ini.get("cenario"):
-                    copia_ini["cenario"] = dados_ini["cenario"]
-                fotos_enriq_ini.append(copia_ini)
-            grupos_auto_ev = diagramar.separar_fotos_por_evento_automatico(fotos_enriq_ini)
-            if len(grupos_auto_ev) > 1:
-                estado_grupos = grupos_auto_ev
 
         grupo_ativo_idx = [0]
         fotos_sel_chaves = set()
@@ -6053,7 +6040,7 @@ class Aplicativo:
 
         ttk.Button(
             barra_acoes,
-            text="＋ Novo Grupo",
+            text="＋ Novo Evento",
             style="PrimarioCompacto.TButton",
             command=lambda: _criar_novo_grupo(),
         ).pack(side="left", padx=(0, 2))
@@ -6063,15 +6050,51 @@ class Aplicativo:
             style="Compacto.TButton",
             command=lambda: _renomear_grupo_ativo(),
         ).pack(side="left", padx=1)
+
+        # Seletor rápido de Tipo de Evento para o grupo ativo
+        preset_evento_var = tk.StringVar(value="⚡ Tipo de Evento...")
+        opcoes_preset_ev = (
+            "⚡ Tipo de Evento...",
+            "Colação 1",
+            "Colação 2",
+            "Colação 3",
+            "Cerimônia do Jaleco",
+            "Fotos Externas",
+            "Baile de Gala",
+            "Culto Ecumênico",
+            "Ensaio Fotográfico",
+            "Jantar / Recepção",
+        )
+        combo_preset_ev = ttk.Combobox(
+            barra_acoes,
+            textvariable=preset_evento_var,
+            values=opcoes_preset_ev,
+            state="readonly",
+            width=18,
+        )
+        combo_preset_ev.pack(side="left", padx=(2, 2))
+
+        def _aplicar_preset_evento(_ev=None):
+            val_ev = preset_evento_var.get()
+            if not val_ev or val_ev.startswith("⚡"):
+                return
+            idx_at = grupo_ativo_idx[0]
+            if 0 <= idx_at < len(estado_grupos):
+                estado_grupos[idx_at]["nome"] = val_ev
+                preset_evento_var.set("⚡ Tipo de Evento...")
+                _redesenhar_canvas()
+
+        combo_preset_ev.bind("<<ComboboxSelected>>", _aplicar_preset_evento)
+
         ttk.Button(
             barra_acoes,
-            text="▲ Subir Grupo",
+            text="▲ Subir Evento",
             style="Compacto.TButton",
             command=lambda: _mover_grupo(-1),
         ).pack(side="left", padx=1)
         ttk.Button(
             barra_acoes,
-            text="▼ Descer Grupo",
+            text="▼ Descer Evento",
             style="Compacto.TButton",
             command=lambda: _mover_grupo(1),
         ).pack(side="left", padx=1)
@@ -6101,7 +6124,7 @@ class Aplicativo:
 
         ttk.Button(
             barra_acoes,
-            text="⚡ Separar p/ Evento",
+            text="⚡ Separar p/ Cenário",
             style="PrimarioCompacto.TButton",
             command=lambda: _separar_por_evento_automatico(),
         ).pack(side="left", padx=1)
