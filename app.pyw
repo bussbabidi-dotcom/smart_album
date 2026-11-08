@@ -468,8 +468,9 @@ class Aplicativo:
         self.canvas.bind("<B3-Motion>", self._pan_direito_mover)
         self.canvas.bind("<ButtonRelease-3>", self._pan_direito_soltar)
         self.canvas.bind("<MouseWheel>", self._lamina_roda)
-        self.canvas.bind("<ButtonPress-2>", self._pan_inicio)
-        self.canvas.bind("<B2-Motion>", self._pan_mover)
+        self.canvas.bind("<ButtonPress-2>", self._scroll_click_inicio)
+        self.canvas.bind("<B2-Motion>", self._scroll_mover)
+        self.canvas.bind("<ButtonRelease-2>", self._scroll_soltar)
         self.canvas.bind("<Motion>", self._lamina_passou)
 
     def _botao(self, pai, texto, comando, dica=None, estilo="Compacto.TButton", **opcoes):
@@ -987,6 +988,7 @@ class Aplicativo:
         self.canvas_timeline.bind("<ButtonPress-1>", self._timeline_pressionou)
         self.canvas_timeline.bind("<B1-Motion>", self._mover_arrasto)
         self.canvas_timeline.bind("<ButtonRelease-1>", self._soltar_arrasto)
+        self.canvas_timeline.bind("<ButtonPress-2>", self._timeline_scroll_pressionou)
         self.canvas_timeline.bind("<Button-3>", self._timeline_menu)
 
     # ---------------- arranjo dos painéis ----------------
@@ -7503,6 +7505,100 @@ class Aplicativo:
         if antes is not None:
             self._animar_transicao_layout(antes, lb.get("espacos", []))
 
+    def transferir_grupo_entre_laminas(self, li_orig, indices_orig, li_dest, modo="jogar", indices_dest=None):
+        """
+        Joga (move) ou troca de lugar um grupo de fotos da lâmina `li_orig` para a lâmina `li_dest`
+        (acionado pelo botão do Scroll do mouse ou arraste de múltiplos espaços), reajustando o layout
+        de ambas as lâminas com animação suave.
+        """
+        la = self._lamina(li_orig)
+        lb = self._lamina(li_dest)
+        if la is None or lb is None:
+            return
+        validos_orig = sorted({i for i in (indices_orig or []) if 0 <= i < len(la.get("espacos", []))})
+        if not validos_orig:
+            return
+        if li_orig == li_dest:
+            if indices_dest and len(indices_dest) == 1 and len(validos_orig) == 1 and validos_orig[0] != indices_dest[0]:
+                self.trocar_espacos(li_orig, validos_orig[0], li_dest, indices_dest[0])
+            self._grupo_scroll_troca = None
+            return
+
+        antes_dest = [dict(e) for e in lb.get("espacos", [])]
+        self.marcar_historico()
+
+        if modo == "trocar":
+            if indices_dest:
+                validos_dest = sorted({i for i in indices_dest if 0 <= i < len(lb.get("espacos", []))})
+            elif self.atual == li_dest and self._indices_espacos_selecionados():
+                validos_dest = sorted(self._indices_espacos_selecionados())
+            else:
+                validos_dest = list(range(len(lb.get("espacos", []))))
+
+            if len(validos_orig) == len(validos_dest) and len(validos_orig) > 0:
+                for i_o, i_d in zip(validos_orig, validos_dest):
+                    ea, eb = la["espacos"][i_o], lb["espacos"][i_d]
+                    ea["foto"], eb["foto"] = eb.get("foto"), ea.get("foto")
+                    eda, edb = dict(ea.get("edicao") or {}), dict(eb.get("edicao") or {})
+                    eda.pop("corte", None)
+                    edb.pop("corte", None)
+                    ea["edicao"], eb["edicao"] = edb, eda
+                diagramar.ajustar_espacos_lamina(la, self._mapa_proporcoes(la), self.produto, self._cfg())
+                diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
+                self._grupo_scroll_troca = None
+                self.atual = li_dest
+                self._definir_selecao_espacos(set(validos_dest), validos_dest[0])
+                self.atualizar_tudo()
+                self._animar_transicao_layout(antes_dest, lb.get("espacos", []))
+                self.registrar("🖱 Grupo de %d foto(s) trocado de lugar entre a Lâmina %d e a Lâmina %d." % (
+                    len(validos_orig), li_orig + 1, li_dest + 1
+                ))
+                return
+
+            fotos_orig_mov = [la["espacos"][i].get("foto") for i in validos_orig if la["espacos"][i].get("foto")]
+            fotos_dest_mov = [lb["espacos"][i].get("foto") for i in validos_dest if lb["espacos"][i].get("foto")]
+            set_o, set_d = set(validos_orig), set(validos_dest)
+            fotos_orig_ficam = [e.get("foto") for idx, e in enumerate(la["espacos"]) if idx not in set_o and e.get("foto")]
+            fotos_dest_ficam = [e.get("foto") for idx, e in enumerate(lb["espacos"]) if idx not in set_d and e.get("foto")]
+
+            self.relayout(li_orig, fotos_orig_ficam + fotos_dest_mov, marcar=False)
+            self.relayout(li_dest, fotos_dest_ficam + fotos_orig_mov, marcar=False)
+            self._grupo_scroll_troca = None
+            self.atual = li_dest
+            novos_sel = {idx for idx, e in enumerate(lb.get("espacos", [])) if e.get("foto") in set(fotos_orig_mov)}
+            self._definir_selecao_espacos(novos_sel, min(novos_sel) if novos_sel else None)
+            self.atualizar_tudo()
+            self._animar_transicao_layout(antes_dest, lb.get("espacos", []))
+            self.registrar("🖱 Grupo de %d foto(s) da Lâmina %d trocado com %d foto(s) da Lâmina %d." % (
+                len(fotos_orig_mov), li_orig + 1, len(fotos_dest_mov), li_dest + 1
+            ))
+            return
+
+        # Modo "jogar": move todas as fotos selecionadas da lâmina origem para a lâmina destino
+        fotos_movidas = [la["espacos"][i].get("foto") for i in validos_orig if la["espacos"][i].get("foto")]
+        if not fotos_movidas:
+            self._grupo_scroll_troca = None
+            return
+        set_o = set(validos_orig)
+        fotos_orig_restantes = [e.get("foto") for idx, e in enumerate(la["espacos"]) if idx not in set_o and e.get("foto")]
+        fotos_dest_atuais = [e.get("foto") for e in lb["espacos"] if e.get("foto")]
+
+        if fotos_orig_restantes:
+            self.relayout(li_orig, fotos_orig_restantes, marcar=False)
+        else:
+            la["espacos"] = []
+            la["modelo"] = None
+        self.relayout(li_dest, fotos_dest_atuais + fotos_movidas, marcar=False)
+        self._grupo_scroll_troca = None
+        self.atual = li_dest
+        novos_sel = {idx for idx, e in enumerate(lb.get("espacos", [])) if e.get("foto") in set(fotos_movidas)}
+        self._definir_selecao_espacos(novos_sel, min(novos_sel) if novos_sel else None)
+        self.atualizar_tudo()
+        self._animar_transicao_layout(antes_dest, lb.get("espacos", []))
+        self.registrar("🖱 Grupo de %d foto(s) jogado da Lâmina %d para a Lâmina %d!" % (
+            len(fotos_movidas), li_orig + 1, li_dest + 1
+        ))
+
     def tirar_foto(self, li, ei, marcar=True):
         """Remove a foto da lâmina `li` e reajusta as fotos restantes na mesma lâmina sem mudar de lâmina."""
         lamina = self._lamina(li)
@@ -8519,8 +8615,31 @@ class Aplicativo:
                     width=1, tags=("espaco", "anel_brilho")
                 )
 
-            # Selo indicador quando múltiplos espaços estão selecionados
-            if multi and (x1 - x0) > 48 and (y1 - y0) > 28:
+            # Selo indicador quando múltiplos espaços estão selecionados ou no Grupo do Botão Scroll
+            grupo_scroll = getattr(self, "_grupo_scroll_troca", None)
+            em_scroll = bool(
+                grupo_scroll
+                and grupo_scroll.get("lamina") == self.atual
+                and i in (grupo_scroll.get("espacos") or [])
+            )
+            if em_scroll and (x1 - x0) > 48 and (y1 - y0) > 28:
+                lista_sc = list(grupo_scroll.get("espacos") or [])
+                pos_sc = lista_sc.index(i) + 1 if i in lista_sc else 1
+                txt_sel = "🖱 %d/%d" % (pos_sc, len(lista_sc))
+                tw = max(44, len(txt_sel) * 6 + 10)
+                bx1, by0 = x1 - 5, y0 + 5
+                bx0, by1 = bx1 - tw, by0 + 17
+                c.create_rectangle(
+                    bx0, by0, bx1, by1,
+                    fill="#3b2606", outline="#f5a623", width=1,
+                    tags=("espaco", "anel_brilho")
+                )
+                c.create_text(
+                    (bx0 + bx1) / 2, (by0 + by1) / 2,
+                    text=txt_sel, fill="#fde68a", font=tema.FONTE_PEQUENA,
+                    tags=("espaco", "anel_brilho")
+                )
+            elif multi and (x1 - x0) > 48 and (y1 - y0) > 28:
                 txt_sel = "✦ %d/%d" % (pos_sel, len(ordem_lista))
                 tw = max(38, len(txt_sel) * 6 + 8)
                 bx1, by0 = x1 - 5, y0 + 5
@@ -8754,6 +8873,93 @@ class Aplicativo:
         self.pan = [pan[0] + evento.x - x0, pan[1] + evento.y - y0]
         self.agendar("pan", 15, self.desenhar_lamina)
 
+    def _scroll_click_inicio(self, evento):
+        """
+        Clique com o botão do Scroll (meio do mouse, <ButtonPress-2>):
+        - Sobre uma foto na lâmina: seleciona/adiciona ao grupo de troca/transferência entre lâminas
+          (ou se já houver um grupo vindo de outra lâmina, troca/joga o grupo aqui).
+        - Também permite arrastar o grupo com o botão do Scroll pressionado até outra lâmina na linha do tempo.
+        - Se clicar fora de qualquer foto e sem grupo pendente de outra lâmina, faz pan da mesa.
+        """
+        indice = self._espaco_em(evento.x, evento.y)
+        grupo_atual = getattr(self, "_grupo_scroll_troca", None)
+        com_shift = bool(getattr(evento, "state", 0) & SHIFT)
+
+        if grupo_atual and isinstance(self.atual, int) and grupo_atual.get("lamina") != self.atual:
+            if indice is not None:
+                sel_atuais = self._indices_espacos_selecionados()
+                alvos_dest = sorted(sel_atuais) if (len(sel_atuais) > 1 and indice in sel_atuais) else [indice]
+                self.transferir_grupo_entre_laminas(
+                    grupo_atual["lamina"],
+                    grupo_atual["espacos"],
+                    self.atual,
+                    modo="jogar" if com_shift else "trocar",
+                    indices_dest=alvos_dest,
+                )
+                return
+            elif self._dentro_da_lamina(evento.x, evento.y):
+                self.transferir_grupo_entre_laminas(
+                    grupo_atual["lamina"],
+                    grupo_atual["espacos"],
+                    self.atual,
+                    modo="trocar" if com_shift else "jogar",
+                )
+                return
+
+        if indice is not None and isinstance(self.atual, int):
+            sel_atuais = self._indices_espacos_selecionados()
+            if not grupo_atual or grupo_atual.get("lamina") != self.atual:
+                if len(sel_atuais) > 1 and indice in sel_atuais:
+                    novos = sorted(sel_atuais)
+                else:
+                    novos = [indice]
+            else:
+                atuais_sc = list(grupo_atual.get("espacos") or [])
+                if indice in atuais_sc:
+                    atuais_sc.remove(indice)
+                else:
+                    atuais_sc.append(indice)
+                novos = sorted(set(atuais_sc))
+
+            if not novos:
+                self._grupo_scroll_troca = None
+                self._definir_selecao_espacos(set())
+                self._desenhar_espacos()
+                self.registrar("Seleção de grupo do botão Scroll cancelada.")
+                return
+
+            self._grupo_scroll_troca = {"lamina": self.atual, "espacos": novos}
+            self._definir_selecao_espacos(set(novos), indice if indice in novos else novos[0])
+            self._desenhar_espacos()
+            self._arrasto = {
+                "tipo": "espaco",
+                "lamina": self.atual,
+                "espaco": novos[0],
+                "espacos_grupo": list(novos),
+                "x": evento.x_root,
+                "y": evento.y_root,
+                "ativo": False,
+            }
+            self.registrar(
+                "🖱 Scroll: %d foto(s) selecionada(s) na Lâmina %d · Clique com o Scroll em mais fotos ou clique com o Scroll em outra lâmina para jogar/trocar o grupo!"
+                % (len(novos), self.atual + 1)
+            )
+            return
+
+        self._pan_inicio(evento)
+
+    def _scroll_mover(self, evento):
+        if getattr(self, "_arrasto", None) is not None:
+            self._mover_arrasto(evento)
+        elif hasattr(self, "_pan_ref"):
+            self._pan_mover(evento)
+
+    def _scroll_soltar(self, evento):
+        if getattr(self, "_arrasto", None) is not None:
+            self._soltar_arrasto(evento)
+        if hasattr(self, "_pan_ref"):
+            del self._pan_ref
+
     def _pan_direito_inicio(self, evento):
         self._pan_ref_direito = (evento.x, evento.y, list(self.pan), False)
         self.canvas.configure(cursor="fleur")
@@ -8854,7 +9060,9 @@ class Aplicativo:
         if indice is not None:
             lamina = self._lamina()
             if lamina["espacos"][indice].get("foto"):
+                sel_grupo = sorted(self._indices_espacos_selecionados())
                 self._arrasto = {"tipo": "espaco", "lamina": self.atual, "espaco": indice,
+                                 "espacos_grupo": sel_grupo if (len(sel_grupo) > 1 and indice in sel_grupo) else [indice],
                                  "x": evento.x_root, "y": evento.y_root, "ativo": False}
             if self.editor:
                 self.editor.mostrar(("lamina", self.atual, indice))
@@ -10577,7 +10785,9 @@ class Aplicativo:
             self._fantasma.overrideredirect(True)
             self._fantasma.attributes("-topmost", True)
             self._fantasma.attributes("-alpha", 0.85)
-            texto = {"foto": "%s foto(s)" % len(a.get("fotos", [])), "espaco": "mover foto",
+            qtd_esp_g = len(a.get("espacos_grupo") or [1])
+            texto = {"foto": "%s foto(s)" % len(a.get("fotos", [])),
+                     "espaco": ("mover grupo (%d fotos)" % qtd_esp_g) if qtd_esp_g > 1 else "mover foto",
                      "lamina": "mover lâmina", "fundo": "fundo: %s" % Path(a.get("caminho", "")).name}[a["tipo"]]
             tk.Label(self._fantasma, text=texto, bg=tema.DESTAQUE, fg="#ffffff", padx=8, pady=3).pack()
             if a["tipo"] == "lamina" and not self._rolando_tl:
@@ -10701,17 +10911,24 @@ class Aplicativo:
                 elif self._dentro_da_lamina(x, y):
                     self.adicionar_na_lamina(a["fotos"], self.atual)
             elif a["tipo"] == "espaco" and indice is not None and (a["lamina"], a["espaco"]) != (self.atual, indice):
-                self.trocar_espacos(a["lamina"], a["espaco"], self.atual, indice)
+                grupo_esp = a.get("espacos_grupo") or [a["espaco"]]
+                if a["lamina"] != self.atual and len(grupo_esp) > 1:
+                    self.transferir_grupo_entre_laminas(a["lamina"], grupo_esp, self.atual, modo="trocar", indices_dest=[indice])
+                else:
+                    self.trocar_espacos(a["lamina"], a["espaco"], self.atual, indice)
         elif alvo is self.canvas_timeline:
             item = self._timeline_em(self._eixo_tl_root(evento.x_root, evento.y_root))
             if a["tipo"] == "foto" and isinstance(item, int):
                 self.adicionar_na_lamina(a["fotos"], item)
             elif a["tipo"] == "espaco" and isinstance(item, int) and item != a["lamina"]:
-                foto = self._lamina(a["lamina"])["espacos"][a["espaco"]]["foto"]
-                self.marcar_historico()
-                self.tirar_foto(a["lamina"], a["espaco"], marcar=False)
-                self.relayout(a["lamina"], marcar=False)
-                self.adicionar_na_lamina([foto], item, marcar=False)
+                grupo_esp = a.get("espacos_grupo") or [a["espaco"]]
+                com_shift = bool(getattr(evento, "state", 0) & SHIFT)
+                self.transferir_grupo_entre_laminas(
+                    a["lamina"],
+                    grupo_esp,
+                    item,
+                    modo="trocar" if com_shift else "jogar",
+                )
         elif alvo is self.canvas_fotos and a["tipo"] == "espaco":
             self.tirar_foto(a["lamina"], a["espaco"])
 
@@ -11581,6 +11798,46 @@ class Aplicativo:
             self._arrasto = {"tipo": "lamina", "item": item, "x": evento.x_root, "y": evento.y_root, "ativo": False}
         else:
             self.selecionar_lamina(item)
+
+    def _timeline_scroll_pressionou(self, evento):
+        """
+        Clique com o botão do Scroll (meio do mouse, <ButtonPress-2>) em uma miniatura da linha do tempo:
+        - Se houver fotos selecionadas no Grupo do Scroll (ou espaços selecionados na lâmina atual),
+          joga (move) o grupo inteiro para a lâmina clicada (ou troca de lugar se segurar Shift).
+        - Caso contrário, captura todas as fotos da lâmina clicada no Grupo do Scroll.
+        """
+        item = self._timeline_em(self._eixo_tl(evento.x, evento.y))
+        if not isinstance(item, int):
+            return
+        com_shift = bool(getattr(evento, "state", 0) & SHIFT)
+        grupo_atual = getattr(self, "_grupo_scroll_troca", None)
+        if grupo_atual and grupo_atual.get("lamina") != item and grupo_atual.get("espacos"):
+            self.transferir_grupo_entre_laminas(
+                grupo_atual["lamina"],
+                grupo_atual["espacos"],
+                item,
+                modo="trocar" if com_shift else "jogar",
+            )
+            return
+        if isinstance(self.atual, int) and self.atual != item and self._indices_espacos_selecionados():
+            self.transferir_grupo_entre_laminas(
+                self.atual,
+                sorted(self._indices_espacos_selecionados()),
+                item,
+                modo="trocar" if com_shift else "jogar",
+            )
+            return
+        lam = self._lamina(item)
+        if lam and lam.get("espacos"):
+            todos = list(range(len(lam["espacos"])))
+            self._grupo_scroll_troca = {"lamina": item, "espacos": todos}
+            self.selecionar_lamina(item, manter_selecao=False)
+            self._definir_selecao_espacos(set(todos), 0)
+            self._desenhar_espacos()
+            self.registrar(
+                "🖱 Scroll: Todas as %d foto(s) da Lâmina %d capturadas · Clique com o Scroll em outra lâmina para jogar ou trocar o grupo!"
+                % (len(todos), item + 1)
+            )
 
     def selecionar_todas_laminas(self):
         total = len(self.projeto.get("laminas", []))
