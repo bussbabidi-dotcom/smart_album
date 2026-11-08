@@ -29,7 +29,7 @@ LADO_ANALISE = 1024
 LADO_PREVIA = 1600
 LADO_MINIATURA = 220
 TOLERANCIA_QUADRADO = 0.08
-VERSAO_CACHE = 3
+VERSAO_CACHE = 4
 
 PASTA_MINIATURAS = pasta_dados() / "miniaturas"
 ARQUIVO_CACHE = pasta_dados() / "analise.json"
@@ -220,8 +220,8 @@ def detectar_rosto(img):
     """
     Detecta TODOS os rostos na imagem (YuNet DNN + fallback Haar Cascade),
     conta quantas pessoas existem ('qtd') e calcula a caixa de proteção de todo
-    o grupo ('x0', 'y0', 'x1', 'y1' em 0..1, incluindo margem para topo da cabeça,
-    cabelo/beca e ombros) para garantir que nenhuma pessoa seja cortada.
+    o grupo ('x0', 'y0', 'x1', 'y1' em 0..1, incluindo margem generosa para topo da cabeça,
+    penteado, capelo/beca e ombros) para garantir que nenhuma pessoa tenha a cabeça cortada.
     """
     w, h = img.size
     if w < 24 or h < 24:
@@ -302,10 +302,10 @@ def detectar_rosto(img):
         fh_n = min(1.0, fh / float(h))
         maior_h_norm = max(maior_h_norm, fh_n)
 
-        # Margem de segurança de cada pessoa (protege topo da cabeça/cabelo/beca, ombros laterais e queixo/colo)
-        pad_x = max(0.035, fw_n * 0.42)
-        pad_top = max(0.045, fh_n * 0.52)
-        pad_bot = max(0.055, fh_n * 0.65)
+        # Margem de segurança ampla de cada pessoa (protege topo da cabeça/penteado/capelo, ombros e busto)
+        pad_x = max(0.06, fw_n * 0.55)
+        pad_top = max(0.09, fh_n * 0.92)
+        pad_bot = max(0.08, fh_n * 0.80)
 
         rx0 = max(0.0, (fx / float(w)) - pad_x)
         ry0 = max(0.0, (fy / float(h)) - pad_top)

@@ -604,18 +604,25 @@ def _layouts_sem_corte(proporcoes, area, espaco, priorizar=False):
 def _caixa_grupo_rosto(foto):
     """
     Devolve (qtd, gx0, gy0, gx1, gy1, lista_rostos) normalizados (0..1) para a foto,
-    considerando todos os rostos detectados e a margem de segurança de cada pessoa.
+    considerando todos os rostos detectados e a margem de segurança de cada pessoa
+    (incluindo topo da cabeça/capelo). Para fotos verticais (retrato) sem rosto detectado,
+    projeta uma caixa de proteção vertical do sujeito para impedir que retratos sejam
+    esticados em faixas horizontais que cortem a cabeça.
     """
     rosto = foto.get("rosto") if isinstance(foto, dict) else None
     if not rosto or not isinstance(rosto, dict):
+        prop = max(0.1, float(foto.get("proporcao") or 1.5)) if isinstance(foto, dict) else 1.5
+        if prop < 0.92:
+            sintetico = [{"cx": 0.5, "cy": 0.30, "x0": 0.18, "y0": 0.05, "x1": 0.82, "y1": 0.85}]
+            return 1, 0.18, 0.05, 0.82, 0.85, sintetico
         return 0, 0.0, 0.0, 1.0, 1.0, []
     rx = float(rosto.get("cx", 0.5))
     ry = float(rosto.get("cy", 0.45))
-    rh = float(rosto.get("h", 0.14))
-    gx0 = max(0.0, min(1.0, float(rosto.get("x0", max(0.0, rx - max(0.08, rh * 0.65))))))
-    gy0 = max(0.0, min(1.0, float(rosto.get("y0", max(0.0, ry - max(0.10, rh * 0.75))))))
-    gx1 = max(gx0 + 0.02, min(1.0, float(rosto.get("x1", min(1.0, rx + max(0.08, rh * 0.65))))))
-    gy1 = max(gy0 + 0.02, min(1.0, float(rosto.get("y1", min(1.0, ry + max(0.12, rh * 0.95))))))
+    rh = max(0.08, float(rosto.get("h", 0.14)))
+    gx0 = max(0.0, min(1.0, min(float(rosto.get("x0", 1.0)), max(0.0, rx - max(0.10, rh * 0.72)))))
+    gy0 = max(0.0, min(1.0, min(float(rosto.get("y0", 1.0)), max(0.0, ry - max(0.14, rh * 1.02)))))
+    gx1 = max(gx0 + 0.04, min(1.0, max(float(rosto.get("x1", 0.0)), min(1.0, rx + max(0.10, rh * 0.72)))))
+    gy1 = max(gy0 + 0.04, min(1.0, max(float(rosto.get("y1", 0.0)), min(1.0, ry + max(0.14, rh * 1.02)))))
     lista = rosto.get("rostos") or [{"cx": rx, "cy": ry, "x0": gx0, "y0": gy0, "x1": gx1, "y1": gy1}]
     qtd = max(1, int(rosto.get("qtd") or len(lista) or 1))
     return qtd, gx0, gy0, gx1, gy1, lista
@@ -689,22 +696,29 @@ def caixa_segura_pessoas(foto, area):
 
 def _proteger_espacos_contra_corte_pessoas(espacos, fotos, produto, cfg):
     """
-    Percorre os espaços gerados em uma opção de layout e, quando `reconhecer_rostos` e
-    `nao_cortar_pessoas` estão ativos, garante que nenhum espaço corte uma pessoa
-    (ajustando o quadro daquela foto para `caixa_segura_pessoas` e devolvendo a penalidade residual).
-    Preserva espaços sangrados / em destaque que passam da Safe Zone até a sangria.
+    Percorre os espaços gerados em uma opção de layout e garante que nenhum espaço
+    corte cabeças/pessoas ou estique fotos além do limite seguro.
+    - Espaços sangrados (Meio Termo, Transpasse Sangrado, Sangria Total) são preservados
+      intactos na sangria SE a foto couber sem cortar pessoas e dentro do corte máximo;
+      caso contrário, recebem penalidade alta (para o motor descartar o candidato ruim)
+      e têm sua caixa ajustada para nunca decepar cabeças.
     """
     if not cfg or not cfg.get("reconhecer_rostos", True) or not cfg.get("nao_cortar_pessoas", True):
         return espacos, 0.0
     lw, lh = lamina_mm(produto)
+    corte_max = _limite_corte_cfg(cfg)
     mapa_fotos = {f.get("caminho"): f for f in (fotos or []) if isinstance(f, dict) and f.get("caminho")}
     novos = []
     penalidade_total = 0.0
     for e in espacos:
         f_info = mapa_fotos.get(e.get("foto"))
-        if not f_info or not f_info.get("rosto"):
+        if not f_info:
             novos.append(e)
             continue
+        quadro_mm = (e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh)
+        prop_f = max(0.1, float(f_info.get("proporcao") or 1.5))
+        corte_q = _corte_quadro(prop_f, quadro_mm)
+        exc_x, exc_y, pen = _risco_cortar_pessoas(f_info, quadro_mm)
         eh_sangrado = (
             float(e.get("x", 0.0)) <= 0.006
             or float(e.get("y", 0.0)) <= 0.006
@@ -712,16 +726,27 @@ def _proteger_espacos_contra_corte_pessoas(espacos, fotos, produto, cfg):
             or (float(e.get("y", 0.0)) + float(e.get("h", 0.0))) >= 0.994
         )
         if eh_sangrado:
-            novos.append(e)
+            if exc_x <= 0.003 and exc_y <= 0.003 and corte_q <= corte_max * 1.08:
+                novos.append(e)
+                continue
+            # Candidato sangrado cortaria pessoa ou esticaria a foto além do limite:
+            # penaliza fortemente para não vencer layouts compatíveis e corrige a caixa
+            penalidade_total += pen * 1.8 + max(0.0, corte_q - corte_max) * 14.0
+            quadro_base = caixa_proporcao_padrao(prop_f, quadro_mm) if corte_q > corte_max * 1.12 else quadro_mm
+            quadro_seguro = caixa_segura_pessoas(f_info, quadro_base)
+            # Se tocava a borda esquerda ou direita da sangria, ancora naquela borda
+            if float(e.get("x", 0.0)) <= 0.006 and (float(e.get("x", 0.0)) + float(e.get("w", 0.0))) < 0.994:
+                quadro_seguro = (0.0, quadro_seguro[1], quadro_seguro[2], quadro_seguro[3])
+            elif (float(e.get("x", 0.0)) + float(e.get("w", 0.0))) >= 0.994 and float(e.get("x", 0.0)) > 0.006:
+                quadro_seguro = (lw - quadro_seguro[2], quadro_seguro[1], quadro_seguro[2], quadro_seguro[3])
+            novos.append(_espaco(produto, quadro_seguro, e.get("foto"), e.get("edicao")))
             continue
-        quadro_mm = (e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh)
-        exc_x, exc_y, pen = _risco_cortar_pessoas(f_info, quadro_mm)
-        if exc_x > 0.004 or exc_y > 0.004:
+
+        if exc_x > 0.003 or exc_y > 0.003:
             quadro_seguro = caixa_segura_pessoas(f_info, quadro_mm)
             e_seg = _espaco(produto, quadro_seguro, e.get("foto"), e.get("edicao"))
             novos.append(e_seg)
-            # Pequena penalidade para que o motor prefira nativamente um layout que já encaixe todas as pessoas sem precisar encolher o quadro
-            penalidade_total += min(1.8, pen * 0.18)
+            penalidade_total += min(2.4, pen * 0.25)
         else:
             novos.append(e)
     return novos, penalidade_total
@@ -807,7 +832,8 @@ def _layouts_transpasse_central(fotos, produto, cfg):
                     f_hero = fotos[idx_hero]
                     p_hero = max(0.15, float(f_hero["proporcao"]))
                     corte_h_s = _corte_quadro(p_hero, q_hero_sang)
-                    if corte_h_s > max(corte_max, CORTE_MAXIMO) * 1.32 and not f_hero.get("destaque"):
+                    _ex_x, _ex_y, pen_pessoas_s = _risco_cortar_pessoas(f_hero, q_hero_sang)
+                    if corte_h_s > corte_max * 1.08 or pen_pessoas_s > 0.0:
                         continue
 
                     indices_rest = [i for i in range(n) if i != idx_hero]
@@ -824,12 +850,12 @@ def _layouts_transpasse_central(fotos, produto, cfg):
                     quadros = [quadros_mapa[i] for i in range(n)]
                     cortes = [_corte_quadro(fotos[i]["proporcao"], q) for i, q in enumerate(quadros)]
                     pen_rosto, _dobra_h = _custo_rosto_na_dobra(f_hero, q_hero_sang, W)
-                    bonus_s = -0.68 if f_hero.get("destaque") else (-0.22 if p_hero >= 1.35 else 0.12)
+                    bonus_s = -0.22 if f_hero.get("destaque") else (-0.08 if p_hero >= 1.35 else 0.15)
 
                     custo_s = (
-                        0.24
+                        0.28
                         + bonus_s
-                        + PESO_CORTE * 0.55 * sum(math.log(max(1.0, min(c, 1.38))) ** 2 for c in cortes) / n
+                        + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n
                         + pen_rosto
                     )
                     espacos = []
@@ -866,9 +892,8 @@ def _layouts_transpasse_central(fotos, produto, cfg):
             for idx_hero in candidatos_hero:
                 p_hero = max(0.15, float(fotos[idx_hero]["proporcao"]))
                 q_hero = area_hero
-                if _corte_quadro(p_hero, q_hero) > corte_max + 0.08:
+                if _corte_quadro(p_hero, q_hero) > corte_max + 0.04 or _risco_cortar_pessoas(fotos[idx_hero], q_hero)[2] > 0.0:
                     q_hero = caixa_proporcao_padrao(p_hero, area_hero)
-                    # Garante que mesmo na proporção padrão o quadro continue atravessando o meio se couber
                     if lado_hero == "esq":
                         q_hero = (margem, q_hero[1], q_hero[2], q_hero[3])
                     else:
@@ -918,42 +943,46 @@ def _layouts_transpasse_central(fotos, produto, cfg):
                     "tipo_layout": etiqueta_tipo,
                 })
 
-    # 2. Layout Panorâmico Horizontal Sangrado atravessando o meio no topo
+    # 2. Layout Panorâmico Horizontal Sangrado atravessando o meio no topo (APENAS para fotos realmente panorâmicas)
     indice_hero = candidatos_hero[0]
-    p_hero = max(0.2, float(fotos[indice_hero]["proporcao"]))
-    hero_h_ideal = W / p_hero
-    hero_h = min(H * 0.56, max(H * 0.34, hero_h_ideal))
-    if hero_h > 0:
-        inferior_y = max(margem, hero_h + intervalo)
-        inferior_h = H - margem - inferior_y
-        if inferior_h > 15:
-            indices_restantes = [i for i in range(n) if i != indice_hero]
-            props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
-            area_inferior = (margem, inferior_y, area_w, inferior_h)
-            melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
-            if melhores_inf and melhores_inf[0][1]:
-                _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
-                quadro_hero = (0.0, 0.0, W, hero_h)
-                quadros_mapa = {indice_hero: quadro_hero}
-                for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
-                    quadros_mapa[indices_restantes[idx_rel]] = q_inf
-                quadros = [quadros_mapa[i] for i in range(n)]
-                cortes = [_corte_quadro(fotos[i]["proporcao"], quadro) for i, quadro in enumerate(quadros)]
-                pen_rosto, _dobra = _custo_rosto_na_dobra(fotos[indice_hero], quadro_hero, W)
-                bonus_pan = -0.58 if fotos[indice_hero].get("destaque") else -0.10
-                custo = 0.28 + bonus_pan + PESO_CORTE * 0.6 * sum(math.log(max(1.0, min(c, 1.38))) ** 2 for c in cortes) / n + pen_rosto
-                espacos = []
-                for foto_item, quadro_item in zip(fotos, quadros):
-                    _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
-                    ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
-                    espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
-                saida.append({
-                    "custo": custo,
-                    "espacos": espacos,
-                    "sobreposicoes": [],
-                    "modelo": None,
-                    "tipo_layout": "panoramico_meio",
-                })
+    f_hero_pan = fotos[indice_hero]
+    p_hero = max(0.2, float(f_hero_pan["proporcao"]))
+    if p_hero >= 1.90:
+        hero_h_ideal = W / p_hero
+        hero_h = min(H * 0.56, max(H * 0.34, hero_h_ideal))
+        quadro_hero = (0.0, 0.0, W, hero_h)
+        corte_pan = _corte_quadro(p_hero, quadro_hero)
+        _ex_px, _ex_py, pen_pessoas_pan = _risco_cortar_pessoas(f_hero_pan, quadro_hero)
+        if hero_h > 0 and corte_pan <= corte_max * 1.08 and pen_pessoas_pan <= 0.0:
+            inferior_y = max(margem, hero_h + intervalo)
+            inferior_h = H - margem - inferior_y
+            if inferior_h > 15:
+                indices_restantes = [i for i in range(n) if i != indice_hero]
+                props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
+                area_inferior = (margem, inferior_y, area_w, inferior_h)
+                melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
+                if melhores_inf and melhores_inf[0][1]:
+                    _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
+                    quadros_mapa = {indice_hero: quadro_hero}
+                    for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
+                        quadros_mapa[indices_restantes[idx_rel]] = q_inf
+                    quadros = [quadros_mapa[i] for i in range(n)]
+                    cortes = [_corte_quadro(fotos[i]["proporcao"], quadro) for i, quadro in enumerate(quadros)]
+                    pen_rosto, _dobra = _custo_rosto_na_dobra(f_hero_pan, quadro_hero, W)
+                    bonus_pan = -0.22 if f_hero_pan.get("destaque") else -0.06
+                    custo = 0.30 + bonus_pan + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n + pen_rosto
+                    espacos = []
+                    for foto_item, quadro_item in zip(fotos, quadros):
+                        _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
+                        ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
+                        espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
+                    saida.append({
+                        "custo": custo,
+                        "espacos": espacos,
+                        "sobreposicoes": [],
+                        "modelo": None,
+                        "tipo_layout": "panoramico_meio",
+                    })
 
     saida.sort(key=lambda op: op["custo"])
     return saida
@@ -962,8 +991,8 @@ def _layouts_transpasse_central(fotos, produto, cfg):
 def _layouts_meio_termo(fotos, produto, cfg):
     """
     Layouts Híbridos ("Meio Termo"):
-    - Uma página inteira (esquerda ou direita) ocupada 100% por uma foto grande sangrada
-      (passando das linhas da Safe Zone, até a sangria e a dobra central)
+    - Uma página (esquerda ou direita) com 1 foto em destaque sangrada (passando das linhas da Safe Zone
+      até a sangria, respeitando a proporção e a altura das pessoas para nunca cortar cabeças)
       e a outra página com 1, 2, 3 ou mais fotos rigorosamente dentro das linhas da Safe Zone.
     """
     if not cfg.get("permitir_meio_termo", True):
@@ -971,10 +1000,10 @@ def _layouts_meio_termo(fotos, produto, cfg):
     n = len(fotos)
     if n < 2 or n > 9 or produto.get("paginas_por_lamina", 1) < 2:
         return []
+    lw, _lh = lamina_mm(produto)
     margem = float(cfg["margem_mm"])
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
     corte_max = _limite_corte_cfg(cfg)
-    corte_sangria = max(corte_max, 1.38)
     saida = []
 
     for pagina_sangrada in (0, 1):
@@ -984,7 +1013,7 @@ def _layouts_meio_termo(fotos, produto, cfg):
         etiqueta = "meio_termo_esq" if pagina_sangrada == 0 else "meio_termo_dir"
         aspecto_pag = area_sangrada[2] / max(1.0, float(area_sangrada[3]))
 
-        # Escolhe as melhores candidatas para ocupar a página sangrada inteira (1 foto grande)
+        # Escolhe as melhores candidatas para ocupar a página sangrada
         candidatos_hero = sorted(
             range(n),
             key=lambda i: (
@@ -994,6 +1023,29 @@ def _layouts_meio_termo(fotos, produto, cfg):
         )[:min(n, 3)]
 
         for idx_hero in candidatos_hero:
+            f_hero = fotos[idx_hero]
+            p_hero = max(0.15, float(f_hero["proporcao"]))
+            corte_full = _corte_quadro(p_hero, area_sangrada)
+            _ex_x, _ex_y, pen_pessoas_full = _risco_cortar_pessoas(f_hero, area_sangrada)
+
+            if corte_full <= corte_max * 1.08 and pen_pessoas_full <= 0.0:
+                q_hero = area_sangrada
+            else:
+                # Se a foto for vertical (retrato) e a página for horizontal, sangra no topo, base e lateral externa
+                # mantendo a proporção segura para nunca esticar a foto nem cortar a cabeça
+                sx, sy, sw, sh = area_sangrada
+                w_seguro = min(sw, sh * p_hero * min(corte_max, 1.15))
+                if w_seguro < sw * 0.42:
+                    continue
+                x_seguro = 0.0 if pagina_sangrada == 0 else (lw - w_seguro)
+                q_cand = (x_seguro, sy, w_seguro, sh)
+                if _corte_quadro(p_hero, q_cand) > corte_max * 1.08 or _risco_cortar_pessoas(f_hero, q_cand)[2] > 0.0:
+                    continue
+                q_hero = q_cand
+
+            corte_h = _corte_quadro(p_hero, q_hero)
+            eh_destaque = bool(f_hero.get("destaque"))
+
             indices_safe = [i for i in range(n) if i != idx_hero]
             props_safe = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_safe]
             opcoes_safe = layouts_pagina(
@@ -1001,11 +1053,6 @@ def _layouts_meio_termo(fotos, produto, cfg):
             )
             if not opcoes_safe:
                 continue
-
-            # Na página sangrada do Meio Termo, a foto ocupa 100% da página (passando das linhas da Safe Zone)
-            q_hero = area_sangrada
-            corte_h = _corte_quadro(fotos[idx_hero]["proporcao"], q_hero)
-            eh_destaque = bool(fotos[idx_hero].get("destaque"))
 
             for c_safe, quadros_safe, _mod_s, ordem_safe in opcoes_safe[:2]:
                 quadros_mapa = {idx_hero: q_hero}
@@ -1018,12 +1065,9 @@ def _layouts_meio_termo(fotos, produto, cfg):
                     ordem_final = [indices_safe[idx_rel] for idx_rel in ordem_safe] + [idx_hero]
 
                 espacos = [_espaco(produto, quadros_mapa[i], fotos[i]["caminho"]) for i in ordem_final]
-                peso_corte_h = 0.22 if eh_destaque else 0.42
-                pen_hero = PESO_CORTE * (math.log(max(1.0, min(corte_h, corte_sangria))) ** 2) * peso_corte_h
-                if corte_h > corte_sangria and not eh_destaque:
-                    pen_hero += 6.0 * ((corte_h - corte_sangria) ** 2)
-                bonus = -0.74 if eh_destaque else -0.06
-                custo = 0.34 + bonus + pen_hero + c_safe
+                pen_hero = PESO_CORTE * (math.log(max(1.0, corte_h)) ** 2) * 0.55
+                bonus = -0.24 if eh_destaque else -0.04
+                custo = 0.30 + bonus + pen_hero + c_safe
 
                 saida.append({
                     "custo": custo,
@@ -1040,8 +1084,8 @@ def _layouts_meio_termo(fotos, produto, cfg):
 def _layouts_preenchimento_maximo(fotos, produto, cfg):
     """
     Layouts de Preenchimento Máximo ("Sangria Total / Sem Margem"):
-    - Variações opcionais que ignoram as linhas da Safe Zone e expandem as fotos até o limite
-      máximo da página/lâmina (incluindo sangria externa), mantendo apenas o espaçamento fino entre quadros.
+    - Variações opcionais que expandem as fotos até o limite da página/lâmina (incluindo sangria externa),
+      mas somente quando a proporção das fotos é compatível e não corta cabeças/pessoas.
     """
     if not cfg.get("permitir_sangria_total", True):
         return []
@@ -1052,30 +1096,39 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
     paginas = produto.get("paginas_por_lamina", 1)
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
     max_pagina = max(1, int(cfg.get("max_fotos_pagina", MAX_POR_PAGINA)))
-    corte_sangria = max(_limite_corte_cfg(cfg), 1.34)
+    corte_max = _limite_corte_cfg(cfg)
     saida = []
 
     if n == 1:
-        eh_dest0 = bool(fotos[0].get("destaque"))
-        saida.append({
-            "custo": 0.04 if eh_dest0 else 0.45,
-            "espacos": [_espaco(produto, (0.0, 0.0, lw, lh), fotos[0]["caminho"])],
-            "sobreposicoes": [],
-            "modelo": None,
-            "tipo_layout": "sangria_total",
-        })
+        f0 = fotos[0]
+        p0 = max(0.15, float(f0["proporcao"]))
+        eh_dest0 = bool(f0.get("destaque"))
+        q_total = (0.0, 0.0, lw, lh)
+        corte_tot = _corte_quadro(p0, q_total)
+        # Só permite que 1 única foto ocupe a lâmina inteira de ponta a ponta se for panorâmica compatível e não cortar pessoas
+        if p0 >= 1.85 and corte_tot <= corte_max * 1.08 and _risco_cortar_pessoas(f0, q_total)[2] <= 0.0:
+            saida.append({
+                "custo": (0.18 if eh_dest0 else 0.55) + PESO_CORTE * math.log(max(1.0, corte_tot)) ** 2,
+                "espacos": [_espaco(produto, q_total, f0["caminho"])],
+                "sobreposicoes": [],
+                "modelo": None,
+                "tipo_layout": "sangria_total",
+            })
         if paginas >= 2:
             for p_idx, etq in ((0, "meio_termo_esq"), (1, "meio_termo_dir")):
-                saida.append({
-                    "custo": 0.12 if eh_dest0 else 0.65,
-                    "espacos": [_espaco(produto, area_pagina_mm(produto, p_idx), fotos[0]["caminho"])],
-                    "sobreposicoes": [],
-                    "modelo": None,
-                    "tipo_layout": etq,
-                })
+                area_p = area_pagina_mm(produto, p_idx)
+                corte_p = _corte_quadro(p0, area_p)
+                if corte_p <= corte_max * 1.08 and _risco_cortar_pessoas(f0, area_p)[2] <= 0.0:
+                    saida.append({
+                        "custo": (0.28 if eh_dest0 else 0.68) + PESO_CORTE * math.log(max(1.0, corte_p)) ** 2,
+                        "espacos": [_espaco(produto, area_p, f0["caminho"])],
+                        "sobreposicoes": [],
+                        "modelo": None,
+                        "tipo_layout": etq,
+                    })
         return saida
 
-    # Divisões página a página ocupando 100% de cada página até a sangria (apenas como sugestão opcional)
+    # Divisões página a página ocupando cada página até a sangria (apenas quando não estoura o limite de corte nem corta pessoas)
     divisoes = [(n,)] if paginas == 1 else [(k, n - k) for k in range(1, n)]
     for divisao in divisoes:
         if any(k > max_pagina for k in divisao):
@@ -1095,12 +1148,24 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
             else:
                 area_p = (px, py, pw, ph)
             ops_p = layouts_pagina(
-                [f["proporcao"] for f in grupo], area_p, intervalo, (), produto=None, pagina=pagina, maximo=2, corte_max=corte_sangria
+                [f["proporcao"] for f in grupo], area_p, intervalo, (), produto=None, pagina=pagina, maximo=2, corte_max=corte_max * 1.08
             )
-            if not ops_p:
+            ops_validas = []
+            for op_cand in ops_p:
+                _c_cand, quadros_cand, _m_cand, ord_cand = op_cand
+                if _m_cand == "__sem_corte__":
+                    continue
+                if any(
+                    _corte_quadro(grupo[idx_f]["proporcao"], q_c) > corte_max * 1.08
+                    or _risco_cortar_pessoas(grupo[idx_f], q_c)[2] > 0.0
+                    for q_c, idx_f in zip(quadros_cand, ord_cand)
+                ):
+                    continue
+                ops_validas.append(op_cand)
+            if not ops_validas:
                 viavel = False
                 break
-            por_pagina.append((grupo, ops_p))
+            por_pagina.append((grupo, ops_validas))
         if not viavel:
             continue
 
@@ -1110,7 +1175,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
             for (grupo, _ops), (_c, quadros, _mod, ordem) in zip(por_pagina, combinacao):
                 for quadro, indice in zip(quadros, ordem):
                     espacos.append(_espaco(produto, quadro, grupo[indice]["caminho"]))
-            custo = 1.45 + penalidade + sum(c[0] for c in combinacao)
+            custo = 0.95 + penalidade + sum(c[0] for c in combinacao)
             saida.append({
                 "custo": custo,
                 "espacos": espacos,
@@ -1292,15 +1357,15 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         m_seg = b + max(seg, margem)
         area_lamina_util = (m_seg, m_seg, max(1.0, lw - 2 * m_seg), max(1.0, lh - 2 * m_seg))
         corte_lamina = _corte_quadro(p, area_lamina_util)
-        if cfg.get("permitir_transpasse", True) and p >= 1.15:
-            bonus = -0.35 if fotos[0].get("destaque") and p > 1.25 else 0.0
-            quadro_l = area_lamina_util if corte_lamina <= corte_max else caixa_proporcao_padrao(p, area_lamina_util)
+        _ex_x1, _ex_y1, pen_p1 = _risco_cortar_pessoas(fotos[0], area_lamina_util)
+        if cfg.get("permitir_transpasse", True) and p >= 1.85 and corte_lamina <= corte_max and pen_p1 <= 0.0:
+            bonus = -0.20 if fotos[0].get("destaque") else 0.0
             opcoes.append({
-                "custo": 0.20 + PESO_CORTE * math.log(max(1.0, min(corte_lamina, corte_max))) ** 2 * 0.5 + bonus,
-                "espacos": [_espaco(produto, quadro_l, fotos[0]["caminho"])],
+                "custo": 0.25 + PESO_CORTE * math.log(max(1.0, corte_lamina)) ** 2 * 0.5 + bonus,
+                "espacos": [_espaco(produto, area_lamina_util, fotos[0]["caminho"])],
                 "sobreposicoes": [],
                 "modelo": None,
-                "tipo_layout": "panoramico_meio" if quadro_l == area_lamina_util else "sem_corte",
+                "tipo_layout": "panoramico_meio",
             })
 
     for modelo in modelos_lamina:
@@ -1361,8 +1426,8 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         vazias = sum(1 for k in divisao if k == 0)
         penalidade = 0.0
         if vazias:
-            penalidade = PESO_PAGINA_VAZIA if n > 1 else 0.8
-        if len(divisao) == 2:
+            penalidade = PESO_PAGINA_VAZIA if n > 1 else 0.12
+        if len(divisao) == 2 and n > 1:
             penalidade += PESO_DESEQUILIBRIO * abs(divisao[0] - divisao[1])
 
         for combinacao in itertools.product(*[p[2] for p in por_pagina]):
@@ -1430,12 +1495,13 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         if len(unicas) >= maximo:
             break
 
-    # Garante que as variações Meio Termo, Sangria Total e Transpasse 60/40 e 70/30 sempre apareçam nas sugestões
+    # Garante que as variações Meio Termo, Sangria Total e Transpasse 60/40 e 70/30 apareçam nas sugestões quando forem viáveis
     if maximo >= 6:
         for op_esp in reserva_especiais:
+            if float(op_esp.get("custo", 0.0)) > 2.2:
+                continue
             if not any(u.get("tipo_layout") == op_esp.get("tipo_layout") for u in unicas):
                 if len(unicas) >= maximo:
-                    # Substitui a última opção comum (sem tipo_layout especial)
                     idx_sub = next(
                         (idx for idx in range(len(unicas) - 1, 0, -1) if not unicas[idx].get("tipo_layout")),
                         len(unicas) - 1,
@@ -1523,8 +1589,11 @@ def ajustar_espacos_lamina(lamina, mapa_proporcoes, produto, cfg):
             for e in grupo_e
         )
         if pagina_sangrada and len(grupo_e) == 1:
-            novos_espacos.append(_espaco(produto, area_sang, grupo_e[0]["foto"], grupo_e[0].get("edicao")))
-            continue
+            p_unica = prop_de(grupo_e[0]["foto"])
+            if _corte_quadro(p_unica, area_sang) <= CORTE_MAXIMO * 1.08:
+                novos_espacos.append(_espaco(produto, area_sang, grupo_e[0]["foto"], grupo_e[0].get("edicao")))
+                continue
+            pagina_sangrada = False
         area_alvo = area_sang if pagina_sangrada else area_u
         ux, uy, uw, uh = area_alvo
         usado_p = sum((e["w"] * lw) * (e["h"] * lh) for e in grupo_e)
@@ -1533,7 +1602,7 @@ def ajustar_espacos_lamina(lamina, mapa_proporcoes, produto, cfg):
             _corte_quadro(prop_de(e["foto"]), (e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh))
             for e in grupo_e
         )
-        limite_p = max(CORTE_MAXIMO, 1.35) if pagina_sangrada else CORTE_MAXIMO
+        limite_p = CORTE_MAXIMO * 1.08 if pagina_sangrada else CORTE_MAXIMO
         if corte_max_p > limite_p + 0.01 or (vazio_p > 0.25 and corte_max_p < 1.05):
             props = [prop_de(e["foto"]) for e in grupo_e]
             opcoes_p = layouts_pagina(props, area_alvo, intervalo, (), produto, p, maximo=1, corte_max=limite_p)
@@ -2188,12 +2257,13 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
 
     def custo_grupo(j, i):
         tamanho = i - j
-        tem_destaque = destaques_ate[i] - destaques_ate[j]
-        if tem_destaque:
-            return 0.0 if tamanho == 1 else None
         if tamanho > maximo or tamanho < 1:
             return None
-        return 2.0 * (tamanho - alvo) ** 2 / max(1.0, alvo) - bonus[j]
+        tem_destaque = destaques_ate[i] - destaques_ate[j]
+        if tem_destaque > 1:
+            return None
+        bonus_dest = -0.45 if (tem_destaque == 1 and tamanho <= max(2, int(round(alvo)))) else 0.0
+        return 2.0 * (tamanho - alvo) ** 2 / max(1.0, alvo) - bonus[j] + bonus_dest
 
     infinito = float("inf")
     melhor = [[infinito] * (n + 1) for _ in range(s + 1)]
