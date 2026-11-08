@@ -117,7 +117,7 @@ DEFINICOES_ATALHOS = (
     ("abrir_tratamento", "Photoshop / Lightroom", "T"),
     ("abrir_capa", "Programa de capas", "K"),
 )
-VERSAO_ARRANJO = 4
+VERSAO_ARRANJO = 5
 ARRANJO_PADRAO = {
     "versao": VERSAO_ARRANJO,
     "geometria": "1280x760+30+20",
@@ -256,15 +256,21 @@ class Aplicativo:
     def __init__(self, root, argumentos=()):
         self.root = root
         tema.configurar(root)
-        root.title("Álbum")
+        root.title("Diagramador Inteligente")
         root.minsize(900, 540)
         self.arranjo = ler_arranjo()
+        self.arranjo["maximizada"] = True
         root.geometry(geometria_valida(self.arranjo.get("geometria"), root) or ARRANJO_PADRAO["geometria"])
-        if self.arranjo.get("maximizada", True):
+        self._tela_cheia_total = False
+        try:
+            root.state("zoomed")
+        except tk.TclError:
             try:
-                root.state("zoomed")
+                root.attributes("-zoomed", True)
             except tk.TclError:
                 pass
+        root.after(60, self._garantir_tela_cheia_inicial)
+        root.bind("<F11>", lambda _e: self.alternar_tela_cheia())
 
         self.fila = queue.Queue()
         self.pintor = Pintor()
@@ -473,26 +479,59 @@ class Aplicativo:
             tema.dica(botao, dica)
         return botao
 
+    def _garantir_tela_cheia_inicial(self):
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            try:
+                self.root.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
+
+    def alternar_tela_cheia(self):
+        self._tela_cheia_total = not getattr(self, "_tela_cheia_total", False)
+        try:
+            self.root.attributes("-fullscreen", self._tela_cheia_total)
+            if not self._tela_cheia_total:
+                self.root.state("zoomed")
+        except tk.TclError:
+            pass
+
     def _montar_topo(self, topo):
-        selo = tk.Label(topo, text="Sa", bg="#001e36", fg="#31a8ff",
-                        font=tema.FONTE_FORTE, bd=1, relief="solid", padx=5, pady=1)
+        selo = tk.Label(
+            topo,
+            text="DI",
+            bg="#001e36",
+            fg="#31a8ff",
+            font=("Segoe UI Black", 9),
+            bd=1,
+            relief="solid",
+            highlightbackground="#31a8ff",
+            highlightthickness=1,
+            padx=5,
+            pady=1,
+        )
         selo.pack(side="left", padx=(2, 6))
-        ttk.Label(topo, text="Smart Album", style="Logo.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Label(topo, text="Diagramador Inteligente", style="Logo.TLabel").pack(side="left", padx=(0, 8))
 
         arquivo = ttk.Menubutton(topo, text="Arquivo", style="Compacto.TMenubutton")
         menu = tk.Menu(arquivo, tearoff=0)
+        menu.add_command(label="📁 Carregar pasta de fotos...", accelerator="Ctrl+P", command=self.escolher_pasta)
+        menu.add_command(label="☁ Importar link do Google Drive...", accelerator="Ctrl+G", command=self.importar_link_drive)
+        menu.add_command(label="🖼 Carregar fotos avulsas...", accelerator="Ctrl+I", command=self.escolher_fotos)
+        menu.add_command(label="📋 Colar fotos do Explorer", accelerator="Ctrl+V", command=self.colar)
+        menu.add_separator()
         menu.add_command(label="Nova aba de álbum", accelerator="Ctrl+T", command=self.nova_aba_album)
         menu.add_command(label="Novo álbum (nesta aba)", accelerator="Ctrl+N", command=self.novo_projeto)
-        menu.add_command(label="Abrir...", accelerator="Ctrl+O", command=self.abrir_projeto)
-        menu.add_command(label="Abrir em nova aba...", command=lambda: self.abrir_projeto(em_nova_aba=True))
+        menu.add_command(label="📂 Abrir projeto (.album.json)...", accelerator="Ctrl+O", command=self.abrir_projeto)
+        menu.add_command(label="Abrir projeto em nova aba...", command=lambda: self.abrir_projeto(em_nova_aba=True))
         self.menu_recentes = tk.Menu(menu, tearoff=0, postcommand=self._montar_recentes)
         menu.add_cascade(label="Recentes", menu=self.menu_recentes)
         menu.add_separator()
-        menu.add_command(label="Salvar", accelerator="Ctrl+S", command=self.salvar_projeto)
-        menu.add_command(label="Salvar como...", accelerator="Ctrl+Shift+S", command=lambda: self.salvar_projeto(como=True))
+        menu.add_command(label="💾 Salvar projeto", accelerator="Ctrl+S", command=self.salvar_projeto)
+        menu.add_command(label="💾 Salvar projeto como...", accelerator="Ctrl+Shift+S", command=self.salvar_projeto_como)
+        menu.add_command(label="🔗 Relinkar fotos movidas...", command=self.consertar_caminhos)
         menu.add_separator()
-        menu.add_command(label="Colar fotos do Explorer", accelerator="Ctrl+V", command=self.colar)
-        menu.add_command(label="Relocalizar fotos movidas...", command=self.consertar_caminhos)
         menu.add_command(label="Escolher programa de capas...", command=self.escolher_programa_capa)
         menu.add_command(label='Criar atalho em "Enviar para"', command=self.criar_enviar_para)
         menu.add_command(
@@ -502,185 +541,235 @@ class Aplicativo:
         menu.add_separator()
         menu.add_command(label="Sair", command=self.sair)
         arquivo["menu"] = menu
-        arquivo.pack(side="left", padx=1)
+        arquivo.pack(side="left", padx=2)
         self.botao_arquivo = arquivo
 
-        exibir = ttk.Menubutton(topo, text="Exibir", style="Compacto.TMenubutton")
-        self.menu_exibir = tk.Menu(exibir, tearoff=0)
-        self._montar_menu_exibir(self.menu_exibir)
-        exibir["menu"] = self.menu_exibir
-        exibir.pack(side="left", padx=1)
-        self.botao_exibir = exibir
-
-        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4, pady=2)
-        self._botao(topo, "📁 Pasta", self.escolher_pasta,
-                    "Carregar pasta de fotos do computador", "Compacto.TButton").pack(side="left", padx=1)
-        self._botao(topo, "☁ Drive", self.importar_link_drive,
-                    "Colar link do Google Drive e baixar fotos em pasta temporária (apagada ao fechar)",
-                    "Compacto.TButton").pack(side="left", padx=1)
-        self._botao(topo, "🖼 Fotos", self.escolher_fotos,
-                    "Carregar fotos avulsas do computador", "Compacto.TButton").pack(side="left", padx=1)
-
-        tk.Frame(topo, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4, pady=2)
-        self._botao(topo, "💾 Salvar", self.salvar_projeto_como,
-                    "Salvar o arquivo JSON do álbum para continuar o projeto mais tarde",
-                    "Compacto.TButton").pack(side="left", padx=1)
-        self._botao(topo, "📂 Abrir", self.abrir_projeto,
-                    "Abrir um arquivo JSON de álbum salvo anteriormente",
-                    "Compacto.TButton").pack(side="left", padx=1)
-        self._botao(topo, "🔗 Relinkar", self.consertar_caminhos,
-                    "Relinkar a pasta de fotos caso o projeto ou as fotos tenham mudado de lugar",
-                    "Compacto.TButton").pack(side="left", padx=1)
-
-        ttk.Frame(topo, width=4).pack(side="left")
+        ttk.Frame(topo, width=6).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
         self.rotulo_nome.pack(side="left", padx=(0, 4))
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
-                                          "Exportar álbum", "Compacto.TButton")
+                                          "Exportar álbum (JPG, PSD ou PDF)", "Compacto.TButton")
         self.botao_exportar.pack(side="right", padx=(2, 0))
-        self.botao_tratar = self._botao(topo, "✦ Ps/Lr", self.abrir_tratamento,
-                                        "Photoshop / Lightroom e Edição em Lote", "Compacto.TButton")
-        self.botao_tratar.pack(side="right", padx=1)
-        self.botao_1clique = ttk.Menubutton(
-            topo,
-            text="✨ 1-Clique / Lote",
-            style="Compacto.TButton",
-        )
-        menu_1c = tk.Menu(self.botao_1clique, tearoff=0)
-        menu_1c.add_command(
-            label="⚡ 1-Clique LEVE (Seleção / Lâmina Atual)",
-            command=lambda: self.aplicar_lote_inteligente(escopo="auto", nivel="leve"),
-        )
-        menu_1c.add_command(
-            label="✦ 1-Clique MÉDIO (Seleção / Lâmina Atual)",
-            command=lambda: self.aplicar_lote_inteligente(escopo="auto", nivel="medio"),
-        )
-        menu_1c.add_command(
-            label="🔥 1-Clique PESADO — Recuperar Foto Ruim (Seleção / Lâmina Atual)",
-            command=lambda: self.aplicar_lote_inteligente(escopo="auto", nivel="pesado"),
-        )
-        menu_1c.add_separator()
-        menu_1c.add_command(
-            label="⚡ Aplicar 1-Clique LEVE no Álbum Inteiro",
-            command=lambda: self.aplicar_lote_inteligente(escopo="album", nivel="leve"),
-        )
-        menu_1c.add_command(
-            label="✦ Aplicar 1-Clique MÉDIO no Álbum Inteiro",
-            command=lambda: self.aplicar_lote_inteligente(escopo="album", nivel="medio"),
-        )
-        menu_1c.add_command(
-            label="🔥 Aplicar 1-Clique PESADO no Álbum Inteiro",
-            command=lambda: self.aplicar_lote_inteligente(escopo="album", nivel="pesado"),
-        )
-        menu_1c.add_separator()
-        menu_1c.add_command(
-            label="↺ Restaurar Luz/Cor Original (Seleção / Lâmina Atual)",
-            command=lambda: self.restaurar_luz_cor_lote(escopo="auto"),
-        )
-        menu_1c.add_command(
-            label="🎛 Abrir Painel Completo de Edição em Lote (Luz, Cor e Saturação)...",
-            command=self.abrir_tratamento,
-        )
-        self.botao_1clique["menu"] = menu_1c
-        self.botao_1clique.pack(side="right", padx=1)
-        tema.dica(
-            self.botao_1clique,
-            "Melhoria rápida em 1 clique (Leve, Médio ou Pesado) e edição em lote de luz, cor e saturação com Ctrl+Z",
-        )
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
                                       "Abrir programa de capas", "Compacto.TButton")
         self.botao_capa.pack(side="right", padx=1)
 
         ttk.Frame(topo, width=4).pack(side="right")
         self._botao(topo, "? Guia", self.mostrar_guia_rapido,
-                    "Guia rápido passo a passo e dicas de uso para novos usuários", "Compacto.TButton").pack(side="right", padx=1)
-        self._botao(topo, "↷", self.refazer, "Refazer", "Icone.TButton", width=3).pack(side="right", padx=1)
-        self._botao(topo, "↶", self.desfazer, "Desfazer", "Icone.TButton", width=3).pack(side="right", padx=1)
+                    "Guia rápido passo a passo e dicas de uso", "Compacto.TButton").pack(side="right", padx=1)
+        self._botao(topo, "↷", self.refazer, "Refazer (Ctrl+Y)", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self._botao(topo, "↶", self.desfazer, "Desfazer (Ctrl+Z)", "Icone.TButton", width=3).pack(side="right", padx=1)
         ttk.Frame(topo, width=4).pack(side="right")
         self._botao(topo, "✦ Diagramar", self.abrir_diagramacao,
-                    "Diagramação automática", "PrimarioCompacto.TButton").pack(side="right", padx=1)
-        self._botao(topo, "🗂 Ordem/Grupos", self.abrir_ordem_grupos,
-                    "Definir qual foto ou grupo numerado vem primeiro sem alterar os arquivos no PC (nunca mistura grupos diferentes na mesma lâmina)",
-                    "Compacto.TButton").pack(side="right", padx=1)
+                    "Diagramação automática (F5)", "PrimarioCompacto.TButton").pack(side="right", padx=1)
 
     def _montar_barra_opcoes(self, barra):
-        """Barra de opções enxuta: apenas Produto, Margem, Espaçamento, Fotos/Lâmina, Aplicar em Todas e Guias."""
+        """Barra de opções enxuta: apenas Tamanho do Álbum, Mostrar/Ocultar Linhas e botão de Configurações."""
+        a = self.arranjo
+        self.var_mostrar = {
+            chave: tk.BooleanVar(value=a["mostrar_" + chave]) for chave in ("timeline", "fotos", "lateral")
+        }
+        self.var_lado_timeline = tk.StringVar(value=a["timeline"])
+        self.var_lado_lateral = tk.StringVar(value=a["lateral"])
+        for var_cfg in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
+            var_cfg.trace_add("write", lambda *args: self.agendar("config", 160, self._mudou_config))
+
         rot_alb = ttk.Label(barra, text="Álbum:", style="Fraco.TLabel")
         rot_alb.pack(side="left", padx=(2, 4))
         self.produto_var = tk.StringVar(value=self.produto["nome"] if self.produto else "")
-        self.combo_produto = ttk.Combobox(barra, textvariable=self.produto_var, state="readonly", width=8,
-                                          values=[p["nome"] for p in self.produtos])
+        self.combo_produto = ttk.Combobox(
+            barra,
+            textvariable=self.produto_var,
+            state="readonly",
+            width=9,
+            values=[p["nome"] for p in self.produtos],
+        )
         self.combo_produto.pack(side="left", padx=(0, 4))
         self.combo_produto.bind("<<ComboboxSelected>>", self._trocou_produto)
         self.rotulo_produto = ttk.Label(barra, text="", style="Fraco.TLabel")
-        self.rotulo_produto.pack(side="left", padx=(0, 6))
+        self.rotulo_produto.pack(side="left", padx=(0, 8))
         self.dica_produto = tema.Dica(self.rotulo_produto, "")
 
         tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
 
-        for rot_txt, dica_txt, var, de, ate, passo, sufixo in (
-            ("M:", "Margem externa (mm)", self.margem_var, 0, 60, 1, "mm"),
-            ("E:", "Espaçamento (mm)", self.espacamento_var, 0, 40, 0.5, "mm"),
-            ("F/L:", "Fotos por lâmina", self.fotos_lamina_var, 1, 12, 1, ""),
-            ("Auto-salvar:", "Intervalo de auto-salvamento do arquivo .album.json local em minutos (0 = desativado)", self.auto_salvar_var, 0, 60, 1, "min"),
-        ):
-            r = ttk.Label(barra, text=rot_txt, style="Fraco.TLabel")
-            r.pack(side="left", padx=(4, 2))
-            tema.dica(r, dica_txt)
-            sp = ttk.Spinbox(barra, from_=de, to=ate, increment=passo, textvariable=var, width=4,
-                             command=self._mudou_config)
-            sp.pack(side="left")
-            tema.dica(sp, dica_txt)
-            if sufixo:
-                ttk.Label(barra, text=sufixo, style="Fraco.TLabel").pack(side="left", padx=(1, 4))
-
-        tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
-
-        self._botao(barra, "⊞", self.rediagramar_todas,
-                    "Aplicar margem e espaçamento em todas as lâminas",
-                    "Icone.TButton", width=3).pack(side="left", padx=1)
-        bt_rostos = ttk.Checkbutton(
+        guias = ttk.Checkbutton(
             barra,
-            text="👤 Rostos",
-            variable=self.proteger_rostos_var,
-            command=self._alternou_protecao_rostos,
+            text="⌗ Mostrar Linhas",
+            variable=self.guias,
+            command=self.desenhar_lamina,
             style="Alternar.Toolbutton",
         )
-        bt_rostos.pack(side="left", padx=2)
-        tema.dica(
-            bt_rostos,
-            "Identificar quantos rostos existem em cada foto e ajustar o quadro/enquadramento para não cortar nenhuma pessoa",
-        )
-        bt_pastas = ttk.Checkbutton(
+        guias.pack(side="left", padx=2)
+        tema.dica(guias, "Mostrar ou ocultar as linhas guias de corte, sangria e dobra central (Tecla H)")
+
+        bt_cfg = self._botao(
             barra,
-            text="📁 Separar Pastas",
-            variable=self.separar_pastas_var,
-            command=self._alternou_separar_pastas,
-            style="Alternar.Toolbutton",
+            "⚙ Configurações",
+            self.abrir_janela_configuracoes,
+            "Abrir configurações de Margem, Espaçamento, Fotos por Lâmina, Proteção de Rostos, Pastas e Exibir Painéis",
+            "Compacto.TButton",
         )
-        bt_pastas.pack(side="left", padx=2)
-        tema.dica(
-            bt_pastas,
-            "Separar por pastas carregadas: fotos de pastas diferentes nunca se misturam na mesma lâmina",
-        )
-        guias = ttk.Checkbutton(barra, text="⌗", variable=self.guias, command=self.desenhar_lamina,
-                                style="Alternar.Toolbutton")
-        guias.pack(side="left", padx=1)
-        tema.dica(guias, "Mostrar/ocultar guias ciano (Safe Zone e Sangria)")
+        bt_cfg.pack(side="left", padx=(6, 2))
 
         self.rotulo_lamina = ttk.Label(barra, text="", style="Fraco.TLabel", anchor="e")
         self.rotulo_lamina.pack(side="right", padx=(8, 4))
 
+    def abrir_janela_configuracoes(self):
+        """Janela redimensionável que reúne Margem, Espaçamento, Regras e opções do antigo menu Exibir."""
+        if getattr(self, "janela_configuracoes", None) is not None:
+            try:
+                if self.janela_configuracoes.winfo_exists():
+                    self.janela_configuracoes.deiconify()
+                    self.janela_configuracoes.lift()
+                    self.janela_configuracoes.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        jan = tk.Toplevel(self.root)
+        jan.title("Configurações & Exibição · Diagramador Inteligente")
+        jan.configure(bg=tema.PAINEL)
+        jan.transient(self.root)
+        self.janela_configuracoes = jan
+
+        tema.criar_cabecalho_janela(
+            jan,
+            "Configurações da Lâmina & Exibição de Painéis",
+            "Ajuste margens, espaçamento, regras automáticas e posição dos painéis na tela",
+            icone="⚙",
+        )
+
+        rodape = tk.Frame(jan, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=12, pady=8)
+        rodape.pack(side="bottom", fill="x")
+        ttk.Button(rodape, text="Restaurar Layout Padrão", style="Compacto.TButton", command=self.restaurar_arranjo).pack(side="left")
+        ttk.Button(rodape, text="Concluir (OK)", style="PrimarioCompacto.TButton", command=jan.destroy).pack(side="right")
+
+        corpo, _cont, _cv = tema.criar_corpo_rolavel(jan, padding=12)
+
+        sec_med = ttk.LabelFrame(corpo, text="Margens, Espaçamento e Regras da Diagramação", padding=8)
+        sec_med.pack(fill="x", pady=(0, 8))
+
+        for rot_txt, dica_txt, var, de, ate, passo, sufixo in (
+            ("Margem externa:", "Margem externa da página em milímetros", self.margem_var, 0, 60, 1, "mm"),
+            ("Espaçamento entre fotos:", "Distância entre as fotos em milímetros", self.espacamento_var, 0, 40, 0.5, "mm"),
+            ("Fotos por lâmina (padrão):", "Quantidade ideal de fotos por lâmina na diagramação", self.fotos_lamina_var, 1, 12, 1, "fotos"),
+            ("Auto-salvar projeto:", "Intervalo de auto-salvamento local em minutos (0 = desativado)", self.auto_salvar_var, 0, 60, 1, "min"),
+        ):
+            linha_m = ttk.Frame(sec_med)
+            linha_m.pack(fill="x", pady=2)
+            r = ttk.Label(linha_m, text=rot_txt, width=24)
+            r.pack(side="left")
+            tema.dica(r, dica_txt)
+            sp = ttk.Spinbox(linha_m, from_=de, to=ate, increment=passo, textvariable=var, width=6, command=self._mudou_config)
+            sp.pack(side="left", padx=(4, 4))
+            tema.dica(sp, dica_txt)
+            if sufixo:
+                ttk.Label(linha_m, text=sufixo, style="Fraco.TLabel").pack(side="left")
+
+        ttk.Button(
+            sec_med,
+            text="⊞ Aplicar margem e espaçamento em todas as lâminas (Ctrl+R)",
+            style="Compacto.TButton",
+            command=self.rediagramar_todas,
+        ).pack(fill="x", pady=(6, 4))
+
+        ttk.Checkbutton(
+            sec_med,
+            text="👤 Proteger Rostos (ajustar enquadramento para não cortar pessoas)",
+            variable=self.proteger_rostos_var,
+            command=self._alternou_protecao_rostos,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            sec_med,
+            text="📁 Separar Pastas (fotos de pastas diferentes nunca se misturam na mesma lâmina)",
+            variable=self.separar_pastas_var,
+            command=self._alternou_separar_pastas,
+        ).pack(anchor="w", pady=2)
+
+        sec_exibir = ttk.LabelFrame(corpo, text="Exibir e Posição dos Painéis", padding=8)
+        sec_exibir.pack(fill="x", pady=(0, 8))
+
+        for chave, texto in (
+            ("timeline", "Mostrar Linha do Tempo (Lâminas)"),
+            ("fotos", "Mostrar Painel de Fotos"),
+            ("lateral", "Mostrar Painel de Abas Fixado na Lateral"),
+        ):
+            ttk.Checkbutton(
+                sec_exibir,
+                text=texto,
+                variable=self.var_mostrar[chave],
+                command=self._mudou_exibir,
+            ).pack(anchor="w", pady=2)
+
+        ttk.Separator(sec_exibir, orient="horizontal").pack(fill="x", pady=6)
+        ttk.Label(sec_exibir, text="Posição da Linha do Tempo (Lâminas):", style="Fraco.TLabel").pack(anchor="w", pady=(0, 3))
+        grade_tl = ttk.Frame(sec_exibir)
+        grade_tl.pack(fill="x", pady=(0, 4))
+        for idx_l, (valor, texto) in enumerate((
+            ("baixo", "Embaixo"),
+            ("cima", "Em cima"),
+            ("esquerda", "À esquerda"),
+            ("direita", "À direita"),
+        )):
+            rb_tl = ttk.Radiobutton(
+                grade_tl,
+                text=texto,
+                value=valor,
+                variable=self.var_lado_timeline,
+                style="Filtro.TRadiobutton",
+                command=self._mudou_exibir,
+            )
+            rb_tl.grid(row=0, column=idx_l, sticky="ew", padx=1)
+            grade_tl.columnconfigure(idx_l, weight=1)
+
+        ttk.Label(sec_exibir, text="Lado do Painel de Abas Fixado:", style="Fraco.TLabel").pack(anchor="w", pady=(4, 3))
+        linha_lat = ttk.Frame(sec_exibir)
+        linha_lat.pack(fill="x", pady=(0, 6))
+        for valor, texto in (("direita", "Painel fixado à direita"), ("esquerda", "Painel fixado à esquerda")):
+            ttk.Radiobutton(
+                linha_lat,
+                text=texto,
+                value=valor,
+                variable=self.var_lado_lateral,
+                style="Filtro.TRadiobutton",
+                command=self._mudou_exibir,
+            ).pack(side="left", fill="x", expand=True, padx=1)
+
+        linha_tam = ttk.Frame(sec_exibir)
+        linha_tam.pack(fill="x", pady=(2, 4))
+        ttk.Button(linha_tam, text="Lâminas +", style="Compacto.TButton", command=lambda: self.mudar_tamanho_painel("timeline", 30)).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(linha_tam, text="Lâminas −", style="Compacto.TButton", command=lambda: self.mudar_tamanho_painel("timeline", -30)).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(linha_tam, text="Fotos +", style="Compacto.TButton", command=lambda: self.mudar_tamanho_painel("fotos", 30)).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(linha_tam, text="Fotos −", style="Compacto.TButton", command=lambda: self.mudar_tamanho_painel("fotos", -30)).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        ttk.Button(
+            sec_exibir,
+            text="⛶ Alternar Modo Tela Cheia Total (F11)",
+            style="Compacto.TButton",
+            command=self.alternar_tela_cheia,
+        ).pack(fill="x", pady=(4, 0))
+
+        jan.bind("<Escape>", lambda _e: jan.destroy())
+        tema.configurar_janela_secundaria(
+            jan,
+            pai=self.root,
+            chave="janela_configuracoes",
+            largura=460,
+            altura=540,
+            min_largura=360,
+            min_altura=380,
+        )
+
     def _montar_ferramentas_esquerda(self, barra):
-        """Barra vertical esquerda com apenas 1 botão por ferramenta de edição de foto/espaço."""
+        """Barra vertical esquerda unificando ferramentas de edição de foto/espaço e os botões das abas."""
         bt_mover = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout,
                                    style="Alternar.Toolbutton", command=self._mudou_modo_layout, width=3)
         bt_mover.pack(pady=1)
-        tema.dica(bt_mover, "Mover / redimensionar espaços")
+        tema.dica(bt_mover, "Mover / redimensionar espaços (Tecla L)")
 
         self._botao(barra, "✂", self.editar_foto_selecionada,
-                    "Editor de cor e luz", "Icone.TButton", width=3).pack(pady=1)
+                    "Editor de Foto, 1-Clique e Edição em Lote (Enter)", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "↻", self.girar_foto_selecionada,
                     "Girar foto 90°", "Icone.TButton", width=3).pack(pady=1)
         self._botao(barra, "＝", lambda: self.alinhar_espaco("igualar"),
@@ -700,30 +789,37 @@ class Aplicativo:
         self._botao(barra, "🗑", self._tecla_apagar,
                     "Tirar foto / apagar espaço selecionado", "Icone.TButton", width=3).pack(pady=1)
 
-    def _montar_menu_exibir(self, menu):
-        a = self.arranjo
-        self.var_mostrar = {chave: tk.BooleanVar(value=a["mostrar_" + chave]) for chave in ("timeline", "fotos", "lateral")}
-        self.var_lado_timeline = tk.StringVar(value=a["timeline"])
-        self.var_lado_lateral = tk.StringVar(value=a["lateral"])
-        for chave, texto in (("timeline", "Linha do tempo (lâminas)"), ("fotos", "Painel de fotos"),
-                             ("lateral", "Painel lateral (Layouts, Fundo, Degradê)")):
-            menu.add_checkbutton(label=texto, variable=self.var_mostrar[chave], command=self._mudou_exibir)
-        menu.add_separator()
-        for valor, texto in (("esquerda", "Lâminas à esquerda"), ("direita", "Lâminas à direita"),
-                             ("cima", "Lâminas em cima"), ("baixo", "Lâminas embaixo")):
-            menu.add_radiobutton(label=texto, value=valor, variable=self.var_lado_timeline, command=self._mudou_exibir)
-        menu.add_separator()
-        menu.add_radiobutton(label="Painel lateral à direita", value="direita", variable=self.var_lado_lateral,
-                             command=self._mudou_exibir)
-        menu.add_radiobutton(label="Painel lateral à esquerda", value="esquerda", variable=self.var_lado_lateral,
-                             command=self._mudou_exibir)
-        menu.add_separator()
-        menu.add_command(label="Lâminas maiores", command=lambda: self.mudar_tamanho_painel("timeline", 30))
-        menu.add_command(label="Lâminas menores", command=lambda: self.mudar_tamanho_painel("timeline", -30))
-        menu.add_command(label="Fotos maiores", command=lambda: self.mudar_tamanho_painel("fotos", 30))
-        menu.add_command(label="Fotos menores", command=lambda: self.mudar_tamanho_painel("fotos", -30))
-        menu.add_separator()
-        menu.add_command(label="Restaurar layout padrão", command=self.restaurar_arranjo)
+        tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=2, pady=6)
+
+        self.botoes_abas_esquerda = {}
+        definicoes_abas = (
+            ("Layouts", "⊞", "Aba Layouts (Sugestões, Páginas e Editar) — Abrir/Fechar"),
+            ("Fundo", "🖼", "Aba Fundo (Cores, Gerador pelas Fotos e Pasta) — Abrir/Fechar"),
+            ("Degradê", "◐", "Aba Degradê (Máscara de Opacidade) — Abrir/Fechar"),
+            ("Moldura", "▭", "Aba Moldura (Traçado e Borda nas Fotos) — Abrir/Fechar"),
+            ("⌨ Atalhos", "⌨", "Aba Atalhos de Teclado — Abrir/Fechar"),
+        )
+        for chave_aba, icone_aba, dica_aba in definicoes_abas:
+            bt_aba = tk.Button(
+                barra,
+                text=icone_aba,
+                width=3,
+                bg=tema.PAINEL_2,
+                fg=tema.TEXTO,
+                activebackground=tema.DESTAQUE,
+                activeforeground="#ffffff",
+                font=tema.FONTE_ICONE,
+                relief="flat",
+                bd=1,
+                highlightthickness=1,
+                highlightbackground=tema.BORDA,
+                pady=3,
+                cursor="hand2",
+                command=lambda c=chave_aba: self.alternar_aba_lateral(c),
+            )
+            bt_aba.pack(pady=1)
+            tema.dica(bt_aba, dica_aba)
+            self.botoes_abas_esquerda[chave_aba] = bt_aba
 
     def _montar_status(self, status):
         self.rotulo_status = ttk.Label(status, text="Arraste fotos ou uma pasta para a janela.", style="Fraco.TLabel")
@@ -734,6 +830,16 @@ class Aplicativo:
         self.barra = ttk.Progressbar(status, length=180, mode="determinate")
         self.barra.pack(side="right")
 
+    def _mudou_filtro_fotos_menu(self):
+        mapa_txt = {
+            "todas": "▾ Filtro: Todas",
+            "nao_usadas": "▾ Filtro: Não usadas",
+            "usadas": "▾ Filtro: Usadas",
+        }
+        if hasattr(self, "botao_filtro_fotos"):
+            self.botao_filtro_fotos.configure(text=mapa_txt.get(self.filtro.get(), "▾ Filtro: Todas"))
+        self.atualizar_fotos()
+
     def _montar_fotos(self, pai):
         caixa = ttk.Frame(pai, padding=(8, 4, 8, 0))
         caixa.pack(fill="both", expand=True)
@@ -741,11 +847,25 @@ class Aplicativo:
         cabeca.pack(side="top", fill="x")
         self.rotulo_fotos = ttk.Label(cabeca, text="Fotos", style="Titulo.TLabel")
         self.rotulo_fotos.pack(side="left")
-        for valor, texto in (("todas", "Todas"), ("nao_usadas", "Não usadas"), ("usadas", "Usadas")):
-            ttk.Radiobutton(cabeca, text=texto, value=valor, variable=self.filtro, style="Filtro.TRadiobutton",
-                            command=self.atualizar_fotos).pack(side="left", padx=(8 if valor == "todas" else 2, 0))
 
-        ttk.Label(cabeca, text="📂", style="Fraco.TLabel").pack(side="left", padx=(8, 2))
+        self.botao_filtro_fotos = ttk.Menubutton(cabeca, text="▾ Filtro: Todas", style="Compacto.TMenubutton")
+        menu_filtro = tk.Menu(self.botao_filtro_fotos, tearoff=0)
+        for valor, texto in (
+            ("todas", "Todas as fotos"),
+            ("nao_usadas", "Não usadas no álbum"),
+            ("usadas", "Usadas no álbum"),
+        ):
+            menu_filtro.add_radiobutton(
+                label=texto,
+                value=valor,
+                variable=self.filtro,
+                command=self._mudou_filtro_fotos_menu,
+            )
+        self.botao_filtro_fotos["menu"] = menu_filtro
+        self.botao_filtro_fotos.pack(side="left", padx=(8, 2))
+        tema.dica(self.botao_filtro_fotos, "Escolher filtro de exibição de fotos (Todas, Não usadas ou Usadas)")
+
+        ttk.Label(cabeca, text="📂", style="Fraco.TLabel").pack(side="left", padx=(6, 2))
         self.combo_pasta_filtro = ttk.Combobox(cabeca, state="readonly", width=15,
                                                values=["Todas as pastas"])
         self.combo_pasta = self.combo_pasta_filtro
@@ -971,43 +1091,242 @@ class Aplicativo:
             pass
 
     def _montar_direita(self, direita):
-        abas = ttk.Notebook(direita)
-        abas.pack(fill="both", expand=True, padx=4, pady=4)
-        self.abas = abas
+        self.aba_fixada_ativa = "Layouts"
+        self.janelas_abas_flutuantes = {}
         self.quadros_abas = {}
-        abas_rolaveis = {"Fundo", "Degradê", "Moldura"}
-        for titulo, montar in (("Layouts", self._aba_layouts), ("Fundo", self._aba_fundo),
-                               ("Degradê", self._aba_degrade), ("Moldura", self._aba_moldura),
-                               ("⌨ Atalhos", self._aba_atalhos)):
-            if titulo in abas_rolaveis:
-                quadro = ttk.Frame(abas, padding=0)
-                abas.add(quadro, text=titulo)
-                self.quadros_abas[titulo] = quadro
-                interno, _cont, _cv = tema.criar_corpo_rolavel(quadro, padding=6)
-                montar(interno)
+        self._funcoes_montar_abas = {
+            "Layouts": (self._aba_layouts, False, "⊞ Layouts"),
+            "Fundo": (self._aba_fundo, True, "🖼 Fundo"),
+            "Degradê": (self._aba_degrade, True, "◐ Degradê"),
+            "Moldura": (self._aba_moldura, True, "▭ Moldura"),
+            "⌨ Atalhos": (self._aba_atalhos, False, "⌨ Atalhos"),
+        }
+
+        # Cabeçalho compacto da aba fixada na lateral (com botão 📌 Janela para desafixar e ✕ para fechar)
+        cab = tk.Frame(direita, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=8, pady=5)
+        cab.pack(side="top", fill="x")
+        self.cabecalho_aba_lateral = cab
+        self.rotulo_aba_lateral = tk.Label(cab, text="⊞ Layouts", bg=tema.CABECALHO, fg=tema.TEXTO, font=tema.FONTE_FORTE)
+        self.rotulo_aba_lateral.pack(side="left")
+
+        bt_fechar = self._botao(
+            cab,
+            "✕",
+            self.fechar_aba_fixada,
+            "Fechar aba lateral para ampliar a área da lâmina",
+            "Mini.TButton",
+            width=2,
+        )
+        bt_fechar.pack(side="right", padx=(2, 0))
+
+        bt_desafixar = self._botao(
+            cab,
+            "📌 Janela",
+            lambda: self.desafixar_aba_em_janela(self.aba_fixada_ativa),
+            "Desafixar esta aba em uma janela flutuante redimensionável",
+            "Compacto.TButton",
+        )
+        bt_desafixar.pack(side="right", padx=2)
+
+        self.container_abas_lateral = ttk.Frame(direita, padding=2)
+        self.container_abas_lateral.pack(side="top", fill="both", expand=True)
+
+        for titulo in self._funcoes_montar_abas:
+            self._criar_quadro_aba_lateral(titulo)
+
+        self._exibir_aba_fixada(self.aba_fixada_ativa)
+
+    def _criar_quadro_aba_lateral(self, titulo):
+        montar_fn, rolavel, _rotulo = self._funcoes_montar_abas[titulo]
+        anterior = self.quadros_abas.get(titulo)
+        if anterior is not None:
+            try:
+                anterior.destroy()
+            except tk.TclError:
+                pass
+        if rolavel:
+            quadro = ttk.Frame(self.container_abas_lateral, padding=0)
+            interno, _cont, _cv = tema.criar_corpo_rolavel(quadro, padding=6)
+            montar_fn(interno)
+        else:
+            quadro = ttk.Frame(self.container_abas_lateral, padding=6)
+            montar_fn(quadro)
+        self.quadros_abas[titulo] = quadro
+        return quadro
+
+    def _atualizar_botoes_abas_esquerda(self):
+        if not hasattr(self, "botoes_abas_esquerda"):
+            return
+        lat_visivel = bool(self.var_mostrar["lateral"].get()) and bool(self.aba_fixada_ativa)
+        for titulo, bt in self.botoes_abas_esquerda.items():
+            em_janela = titulo in self.janelas_abas_flutuantes
+            ativa_fixa = lat_visivel and self.aba_fixada_ativa == titulo
+            if ativa_fixa or em_janela:
+                bt.configure(bg=tema.DESTAQUE_ESCURO, fg="#ffffff", highlightbackground=tema.DESTAQUE)
             else:
-                quadro = ttk.Frame(abas, padding=6)
-                abas.add(quadro, text=titulo)
-                self.quadros_abas[titulo] = quadro
-                montar(quadro)
-        abas.bind("<<NotebookTabChanged>>", self._aba_mudou)
+                bt.configure(bg=tema.PAINEL_2, fg=tema.TEXTO, highlightbackground=tema.BORDA)
+
+    def _exibir_aba_fixada(self, titulo):
+        self.aba_fixada_ativa = titulo
+        for nome_t, q in list(self.quadros_abas.items()):
+            try:
+                q.pack_forget()
+            except tk.TclError:
+                pass
+        if titulo and titulo in self._funcoes_montar_abas:
+            if titulo not in self.quadros_abas or not self.quadros_abas[titulo].winfo_exists():
+                self._criar_quadro_aba_lateral(titulo)
+            _fn, _rol, rotulo_cab = self._funcoes_montar_abas[titulo]
+            self.rotulo_aba_lateral.configure(text=rotulo_cab)
+            self.quadros_abas[titulo].pack(side="top", fill="both", expand=True)
+            if not self.var_mostrar["lateral"].get():
+                self.var_mostrar["lateral"].set(True)
+                self._mudou_exibir()
+            self._aba_mudou(titulo)
+        self._atualizar_botoes_abas_esquerda()
+
+    def alternar_aba_lateral(self, titulo, forcar_abrir=False):
+        """Abre ou fecha a aba pela barra lateral esquerda (ou traz/fecha sua janela flutuante)."""
+        if titulo in self.janelas_abas_flutuantes:
+            jan = self.janelas_abas_flutuantes.get(titulo)
+            if jan is not None and jan.winfo_exists():
+                if forcar_abrir:
+                    jan.deiconify()
+                    jan.lift()
+                    jan.focus_force()
+                    return
+                self.fechar_janela_aba(titulo)
+                return
+            else:
+                self.janelas_abas_flutuantes.pop(titulo, None)
+
+        lat_visivel = bool(self.var_mostrar["lateral"].get())
+        if not forcar_abrir and lat_visivel and self.aba_fixada_ativa == titulo:
+            self.fechar_aba_fixada()
+            return
+        self._exibir_aba_fixada(titulo)
+
+    def fechar_aba_fixada(self):
+        self.aba_fixada_ativa = None
+        if self.var_mostrar["lateral"].get():
+            self.var_mostrar["lateral"].set(False)
+            self._mudou_exibir()
+        self._atualizar_botoes_abas_esquerda()
+
+    def desafixar_aba_em_janela(self, titulo):
+        """Desafixa a aba lateral e a abre como uma janela flutuante redimensionável."""
+        if not titulo or titulo not in self._funcoes_montar_abas:
+            return
+        if titulo in self.janelas_abas_flutuantes:
+            jan_exist = self.janelas_abas_flutuantes[titulo]
+            if jan_exist.winfo_exists():
+                jan_exist.deiconify()
+                jan_exist.lift()
+                return
+
+        # Se era a aba fixada ativa, fecha o painel lateral (ou mostra outra aba fixada se houver)
+        q_ant = self.quadros_abas.pop(titulo, None)
+        if q_ant is not None:
+            try:
+                q_ant.destroy()
+            except tk.TclError:
+                pass
+        if self.aba_fixada_ativa == titulo:
+            self.fechar_aba_fixada()
+
+        montar_fn, rolavel, rotulo_cab = self._funcoes_montar_abas[titulo]
+        jan = tk.Toplevel(self.root)
+        jan.title("%s · Diagramador Inteligente" % rotulo_cab)
+        jan.configure(bg=tema.PAINEL)
+        jan.transient(self.root)
+        self.janelas_abas_flutuantes[titulo] = jan
+
+        topo_j = tk.Frame(jan, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=10, pady=6)
+        topo_j.pack(side="top", fill="x")
+        tk.Label(topo_j, text=rotulo_cab, bg=tema.CABECALHO, fg=tema.TEXTO, font=tema.FONTE_CABECALHO).pack(side="left")
+
+        self._botao(
+            topo_j,
+            "✕",
+            lambda t=titulo: self.fechar_janela_aba(t),
+            "Fechar janela da aba",
+            "Mini.TButton",
+            width=2,
+        ).pack(side="right", padx=(2, 0))
+
+        self._botao(
+            topo_j,
+            "📌 Fixar na Lateral",
+            lambda t=titulo: self.fixar_aba_na_lateral(t),
+            "Encaixar novamente esta aba fixada na lateral da janela principal",
+            "PrimarioCompacto.TButton",
+        ).pack(side="right", padx=2)
+
+        corpo_j = ttk.Frame(jan, padding=2)
+        corpo_j.pack(side="top", fill="both", expand=True)
+        if rolavel:
+            interno_j, _c_j, _cv_j = tema.criar_corpo_rolavel(corpo_j, padding=8)
+            montar_fn(interno_j)
+        else:
+            quadro_j = ttk.Frame(corpo_j, padding=8)
+            quadro_j.pack(fill="both", expand=True)
+            montar_fn(quadro_j)
+
+        jan.protocol("WM_DELETE_WINDOW", lambda t=titulo: self.fechar_janela_aba(t))
+        jan.bind("<Escape>", lambda _e, t=titulo: self.fechar_janela_aba(t))
+        chave_geo = "aba_flutuante_" + re.sub(r"[^a-zA-Z0-9]+", "_", titulo.lower())
+        tema.configurar_janela_secundaria(
+            jan,
+            pai=self.root,
+            chave=chave_geo,
+            largura=370,
+            altura=620,
+            min_largura=290,
+            min_altura=320,
+        )
+        self._aba_mudou(titulo)
+        self._atualizar_botoes_abas_esquerda()
+
+    def fixar_aba_na_lateral(self, titulo):
+        """Fecha a janela flutuante da aba e volta a fixá-la na lateral principal."""
+        jan = self.janelas_abas_flutuantes.pop(titulo, None)
+        if jan is not None:
+            try:
+                jan.destroy()
+            except tk.TclError:
+                pass
+        self._criar_quadro_aba_lateral(titulo)
+        self._exibir_aba_fixada(titulo)
+
+    def fechar_janela_aba(self, titulo):
+        """Fecha a janela flutuante e recria o quadro oculto na lateral para uso futuro."""
+        jan = self.janelas_abas_flutuantes.pop(titulo, None)
+        if jan is not None:
+            try:
+                jan.destroy()
+            except tk.TclError:
+                pass
+        self._criar_quadro_aba_lateral(titulo)
+        self._atualizar_botoes_abas_esquerda()
 
     def abrir_aba_degrade(self):
-        if "Degradê" in self.quadros_abas:
-            self.abas.select(self.quadros_abas["Degradê"])
-            self._atualizar_degrade_ui()
+        self.alternar_aba_lateral("Degradê", forcar_abrir=True)
+        self._atualizar_degrade_ui()
 
     def abrir_aba_atalhos(self):
-        if "⌨ Atalhos" in self.quadros_abas:
-            self.abas.select(self.quadros_abas["⌨ Atalhos"])
+        self.alternar_aba_lateral("⌨ Atalhos", forcar_abrir=True)
 
-    def _aba_mudou(self, _evento=None):
-        selecionada = self.abas.select()
-        if selecionada == str(self.quadros_abas["Fundo"]):
+    def _aba_mudou(self, titulo_alvo=None):
+        selecionada = titulo_alvo if isinstance(titulo_alvo, str) else self.aba_fixada_ativa
+        if selecionada == "Layouts":
+            self.desenhar_sugestoes()
+            if getattr(self, "secao_layouts", None) and self.secao_layouts.get() == "modelos":
+                self.desenhar_modelos()
+        elif selecionada == "Fundo":
             self.atualizar_fundos()
-        elif selecionada == str(self.quadros_abas.get("Degradê")):
+        elif selecionada == "Degradê":
             self._atualizar_degrade_ui()
-        elif selecionada == str(self.quadros_abas["Moldura"]):
+        elif selecionada == "Moldura":
             self._atualizar_moldura_ui()
 
     def _aba_layouts(self, quadro):
@@ -1056,8 +1375,6 @@ class Aplicativo:
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
         self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
         self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
-        for var in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
-            var.trace_add("write", lambda *a: self.agendar("config", 160, self._mudou_config))
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
@@ -2419,7 +2736,7 @@ class Aplicativo:
         lim_nome = 18 if self.root.winfo_screenwidth() <= 1500 else 26
         curto = nome if len(nome) <= lim_nome else nome[:lim_nome - 2] + "…"
         self.rotulo_nome.configure(text=curto + (" *" if self.modificado else ""))
-        self.root.title("%s%s - Álbum" % (nome, " *" if self.modificado else ""))
+        self.root.title("%s%s - Diagramador Inteligente" % (nome, " *" if self.modificado else ""))
         self._salvar_estado_aba_atual()
         self._atualizar_barra_abas_albuns()
 
@@ -7256,7 +7573,7 @@ class Aplicativo:
 
         self.canvas.create_text(
             cx, y0 + 46,
-            text="Bem-vindo ao Smart Album Studio",
+            text="Bem-vindo ao Diagramador Inteligente (DI)",
             fill=tema.TEXTO, font=("Segoe UI Semibold", 17),
         )
         self.canvas.create_text(
@@ -7329,13 +7646,13 @@ class Aplicativo:
     def mostrar_guia_rapido(self):
         """Janela amigável e redimensionável com o passo a passo e atalhos principais para usuários novos."""
         jan = tk.Toplevel(self.root)
-        jan.title("Guia Rápido — Como usar o Smart Album")
+        jan.title("Guia Rápido — Como usar o Diagramador Inteligente")
         jan.configure(bg=tema.PAINEL)
         jan.transient(self.root)
 
         tema.criar_cabecalho_janela(
             jan,
-            "Bem-vindo ao Smart Album Studio",
+            "Bem-vindo ao Diagramador Inteligente (DI)",
             "Monte álbuns profissionais em poucos cliques seguindo este fluxo rápido",
             icone="✦",
         )
@@ -7849,8 +8166,18 @@ class Aplicativo:
     def editar_foto_selecionada(self):
         if isinstance(self.atual, int) and self._espaco_sel_valido():
             self.abrir_editor(("lamina", self.atual, self.espaco_sel))
-        else:
-            self.registrar("Selecione um espaço da lâmina para editar a foto (corte).")
+            return
+        lamina = self._lamina()
+        if lamina and lamina.get("espacos"):
+            idx_escolhido = 0
+            for idx_e, esp_e in enumerate(lamina["espacos"]):
+                if esp_e.get("foto"):
+                    idx_escolhido = idx_e
+                    break
+            self._definir_selecao_espacos({idx_escolhido}, idx_escolhido)
+            self.abrir_editor(("lamina", self.atual, idx_escolhido))
+            return
+        self.abrir_editor(("lamina", self.atual if isinstance(self.atual, int) else 0, 0))
 
     def _lamina_menu(self, evento):
         menu = tk.Menu(self.root, tearoff=0)
@@ -12300,7 +12627,7 @@ def main():
         root.mainloop()
     except Exception:
         try:
-            messagebox.showerror("Erro ao iniciar Smart Album", traceback.format_exc())
+            messagebox.showerror("Erro ao iniciar Diagramador Inteligente", traceback.format_exc())
         except Exception:
             pass
         raise

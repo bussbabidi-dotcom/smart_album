@@ -46,7 +46,7 @@ class EditorFoto(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)
         self.app = app
-        self.title("Editar foto · Lightroom & Enquadramento")
+        self.title("Editor de Foto & Edição em Lote · Diagramador Inteligente")
         self.configure(bg=tema.FUNDO)
         self.protocol("WM_DELETE_WINDOW", self.fechar)
         self.alvo = None
@@ -69,8 +69,8 @@ class EditorFoto(tk.Toplevel):
             self,
             pai=app.root,
             chave="editor_foto",
-            largura=1060,
-            altura=680,
+            largura=1080,
+            altura=700,
             min_largura=640,
             min_altura=420,
         )
@@ -87,9 +87,9 @@ class EditorFoto(tk.Toplevel):
     def _montar(self):
         tema.criar_cabecalho_janela(
             self,
-            "Camera Raw & Enquadramento de Foto · Photoshop CC",
-            "Arraste para enquadrar · Roda do mouse para zoom · Duplo clique nos controles para restaurar",
-            icone="📷",
+            "Editor de Foto, 1-Clique & Edição em Lote · Diagramador Inteligente",
+            "Arraste para enquadrar · Roda do mouse para zoom · Tratamento individual e em lote reunidos aqui",
+            icone="✂",
         )
         corpo = tk.PanedWindow(
             self,
@@ -110,13 +110,13 @@ class EditorFoto(tk.Toplevel):
         self.canvas.bind("<MouseWheel>", self._roda)
 
         # Painel lateral direito redimensionável com rolagem suave para caber todos os controles Lightroom / Camera Raw
-        container_lado = tk.Frame(corpo, width=360, bg=tema.PAINEL, highlightthickness=1, highlightbackground=tema.BORDA)
+        container_lado = tk.Frame(corpo, width=370, bg=tema.PAINEL, highlightthickness=1, highlightbackground=tema.BORDA)
         corpo.add(self.canvas, minsize=380, stretch="always")
-        corpo.add(container_lado, minsize=300, width=360, stretch="never")
+        corpo.add(container_lado, minsize=310, width=370, stretch="never")
 
         barra_rol = ttk.Scrollbar(container_lado, orient="vertical")
         barra_rol.pack(side="right", fill="y")
-        self.canvas_lado = tk.Canvas(container_lado, bg=tema.PAINEL, highlightthickness=0, width=338,
+        self.canvas_lado = tk.Canvas(container_lado, bg=tema.PAINEL, highlightthickness=0, width=348,
                                      yscrollcommand=barra_rol.set)
         self.canvas_lado.pack(side="left", fill="both", expand=True)
         barra_rol.configure(command=self.canvas_lado.yview)
@@ -171,11 +171,13 @@ class EditorFoto(tk.Toplevel):
         self.angulo = tk.DoubleVar(value=0)
         self._linha_escala(giro, "Endireitar", self.angulo, -15, 15, "angulo", "Gira suavemente em graus (duplo clique zera)")
 
-        # Melhoria Inteligente em 1 Clique (Leve, Médio, Pesado) + Lote Rápido
-        auto_box = ttk.LabelFrame(lado, text="✨ Melhoria em 1 Clique & Lote (Luz, Cor e Saturação)", padding=6)
+        # Melhoria Inteligente em 1 Clique (Foto Atual + Lote) & Edição em Lote Completa
+        auto_box = ttk.LabelFrame(lado, text="✨ 1-Clique & Edição em Lote (Luz, Cor e Saturação)", padding=6)
         auto_box.pack(fill="x", pady=3)
         self.rotulo_diagnostico = ttk.Label(auto_box, text="Análise: pronta para ajuste inteligente", style="Fraco.TLabel")
         self.rotulo_diagnostico.pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(auto_box, text="Nesta foto:", style="Fraco.TLabel").pack(anchor="w", pady=(0, 2))
         linha_auto = ttk.Frame(auto_box)
         linha_auto.pack(fill="x")
         btn_leve = ttk.Button(linha_auto, text="✨ Leve", style="Compacto.TButton",
@@ -198,22 +200,69 @@ class EditorFoto(tk.Toplevel):
         btn_orig.pack(side="left", fill="x", expand=True, padx=(2, 0))
         tema.dica(btn_orig, "Restaura a luz e a cor originais da foto")
 
+        ttk.Label(auto_box, text="Edição em Lote (Lâmina ou Álbum Inteiro):", style="Fraco.TLabel").pack(anchor="w", pady=(6, 2))
+        linha_lote_1c = ttk.Frame(auto_box)
+        linha_lote_1c.pack(fill="x")
+        bt_menu_1c = ttk.Menubutton(
+            linha_lote_1c,
+            text="✨ 1-Clique em Lote (Lâmina / Álbum)",
+            style="Compacto.TMenubutton",
+        )
+        menu_1c = tk.Menu(bt_menu_1c, tearoff=0)
+        menu_1c.add_command(
+            label="⚡ 1-Clique LEVE (Seleção / Lâmina Atual)",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="auto", nivel="leve"),
+        )
+        menu_1c.add_command(
+            label="✦ 1-Clique MÉDIO (Seleção / Lâmina Atual)",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="auto", nivel="medio"),
+        )
+        menu_1c.add_command(
+            label="🔥 1-Clique PESADO — Recuperar Foto Ruim (Seleção / Lâmina Atual)",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="auto", nivel="pesado"),
+        )
+        menu_1c.add_separator()
+        menu_1c.add_command(
+            label="⚡ Aplicar 1-Clique LEVE no Álbum Inteiro",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="album", nivel="leve"),
+        )
+        menu_1c.add_command(
+            label="✦ Aplicar 1-Clique MÉDIO no Álbum Inteiro",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="album", nivel="medio"),
+        )
+        menu_1c.add_command(
+            label="🔥 Aplicar 1-Clique PESADO no Álbum Inteiro",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="album", nivel="pesado"),
+        )
+        menu_1c.add_separator()
+        menu_1c.add_command(
+            label="↺ Restaurar Luz/Cor Original (Seleção / Lâmina Atual)",
+            command=lambda: self.app.restaurar_luz_cor_lote(escopo="auto"),
+        )
+        bt_menu_1c["menu"] = menu_1c
+        bt_menu_1c.pack(fill="x")
+        tema.dica(bt_menu_1c, "Aplica melhoria inteligente em 1 clique na seleção/lâmina atual ou no álbum inteiro")
+
         linha_lote_ed = ttk.Frame(auto_box)
         linha_lote_ed.pack(fill="x", pady=(4, 0))
-        btn_copiar_lam = ttk.Button(linha_lote_ed, text="📋 Aplicar na Lâmina", style="Compacto.TButton",
+        btn_copiar_lam = ttk.Button(linha_lote_ed, text="📋 Copiar p/ Lâmina", style="Compacto.TButton",
                                     command=lambda: self.copiar_ajustes_para_lote("lamina"))
         btn_copiar_lam.pack(side="left", fill="x", expand=True, padx=(0, 2))
         tema.dica(btn_copiar_lam, "Copia os ajustes atuais de Luz, Cor e Saturação desta foto para todas as fotos da lâmina aberta")
 
-        btn_copiar_alb = ttk.Button(linha_lote_ed, text="📋 Aplicar no Álbum", style="Compacto.TButton",
+        btn_copiar_alb = ttk.Button(linha_lote_ed, text="📋 Copiar p/ Álbum", style="Compacto.TButton",
                                     command=lambda: self.copiar_ajustes_para_lote("album"))
-        btn_copiar_alb.pack(side="left", fill="x", expand=True, padx=2)
+        btn_copiar_alb.pack(side="left", fill="x", expand=True, padx=(2, 0))
         tema.dica(btn_copiar_alb, "Copia os ajustes atuais de Luz, Cor e Saturação para todas as fotos do álbum")
 
-        btn_janela_lote = ttk.Button(linha_lote_ed, text="⚡ Lote Inteligente...", style="Compacto.TButton",
-                                     command=self._abrir_janela_lote)
-        btn_janela_lote.pack(side="left", fill="x", expand=True, padx=(2, 0))
-        tema.dica(btn_janela_lote, "Abre o painel de edição em lote inteligente (Leve, Médio, Pesado + gravação nas originais)")
+        btn_janela_lote = ttk.Button(
+            auto_box,
+            text="🎛 Abrir Painel Completo de Edição em Lote (Luz, Cor, Ps/Lr)...",
+            style="PrimarioCompacto.TButton",
+            command=self._abrir_janela_lote,
+        )
+        btn_janela_lote.pack(fill="x", pady=(5, 0))
+        tema.dica(btn_janela_lote, "Abre o painel completo de edição em lote com seleção de fotos, Photoshop, Lightroom e gravação nas originais")
 
         # Grupos estilo Lightroom / Camera Raw: Luz, Cor e Efeitos
         quadros_lr = {}
@@ -278,12 +327,19 @@ class EditorFoto(tk.Toplevel):
         self._chave_transformada = None
         if not self.espaco or not self.espaco.get("foto"):
             self._fonte = None
-            self.rotulo_nome.configure(text="Espaço vazio")
-            self.rotulo_lugar.configure(text=descricao or "")
+            self.rotulo_nome.configure(text="Nenhuma foto selecionada no espaço")
+            self.rotulo_lugar.configure(text=descricao or "Use os botões de Edição em Lote abaixo ou selecione uma foto na lâmina")
             self.canvas.delete("all")
             self.previa.delete("all")
-            self.canvas.create_text(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2,
-                                    text="Arraste uma foto para este espaço", fill=tema.TEXTO_FRACO)
+            self.canvas.create_text(
+                max(180, self.canvas.winfo_width() // 2),
+                max(120, self.canvas.winfo_height() // 2),
+                text="Selecione ou arraste uma foto na lâmina para enquadrar,\nou use os controles de 1-Clique e Edição em Lote ao lado.",
+                fill=tema.TEXTO_FRACO,
+                justify="center",
+            )
+            self.deiconify()
+            self.lift()
             return
         self.espaco.setdefault("edicao", {})
         self.rotulo_nome.configure(text=Path(self.espaco["foto"]).name)
