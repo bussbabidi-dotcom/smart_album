@@ -55,10 +55,13 @@ import fundos
 import janela_exportar
 import janela_tratamento
 from composicao import (
-    DIRECOES_DEGRADE, MODOS_FUNDO, acabar_fundo, aplicar_moldura, compor_fundo_completo,
-    criar_dados_fundo_gerado, degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos,
-    fundo_imagem_padrao, fundo_posicionado, gerar_galeria_fundos_procedurais,
-    gerar_mascara_degrade, materializar_fundo_gerado_em_arquivo, rosto_de, tem_degrade_ativo,
+    CATALOGO_TEMAS, DIRECOES_DEGRADE, ESTILOS_MOLDURA, MAPA_TEMAS, MODOS_FUNDO,
+    NOMES_ESTILOS_MOLDURA, PRESETS_SOMBRA_PROJETADA, acabar_fundo, aplicar_moldura,
+    aplicar_sombra_projetada, compor_fundo_completo, criar_dados_fundo_gerado,
+    degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos, fundo_imagem_padrao,
+    fundo_posicionado, gerar_fundo_de_tema, gerar_galeria_fundos_procedurais,
+    gerar_mascara_degrade, materializar_fundo_gerado_em_arquivo, rosto_de,
+    sombra_padrao, tem_degrade_ativo,
 )
 from editor_foto import EditorFoto
 from observador import Observador
@@ -118,7 +121,7 @@ DEFINICOES_ATALHOS = (
     ("abrir_tratamento", "Photoshop / Lightroom", "T"),
     ("abrir_capa", "Programa de capas", "K"),
 )
-VERSAO_ARRANJO = 5
+VERSAO_ARRANJO = 6
 ARRANJO_PADRAO = {
     "versao": VERSAO_ARRANJO,
     "geometria": "1280x760+30+20",
@@ -127,15 +130,17 @@ ARRANJO_PADRAO = {
     "mostrar_fotos": True,
     "mostrar_lateral": True,
     "timeline": "baixo",
+    "fotos": "baixo",
     "lateral": "direita",
     "largura_timeline": 360,
     "altura_timeline": 114,
     "altura_fotos": 118,
+    "largura_fotos": 290,
     "largura_lateral": 310,
 }
 LADOS_TIMELINE = ("esquerda", "direita", "cima", "baixo")
-CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline", "altura_fotos", "largura_lateral")
-MINIMOS = {"timeline": 76, "timeline_vertical": 110, "fotos": 84, "lateral": 265, "centro": 280, "meio": 220}
+CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline", "altura_fotos", "largura_fotos", "largura_lateral")
+MINIMOS = {"timeline": 76, "timeline_vertical": 110, "fotos": 84, "fotos_vertical": 210, "lateral": 265, "centro": 280, "meio": 220}
 ALCA = 4
 RAIO_ALCA = 7
 IMA_PX = 5
@@ -420,13 +425,6 @@ class Aplicativo:
 
         tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
 
-        barra_opcoes = ttk.Frame(self.root, style="Barra.TFrame", padding=(8, 3))
-        barra_opcoes.pack(side="top", fill="x")
-        self.barra_opcoes = barra_opcoes
-        self._montar_barra_opcoes(barra_opcoes)
-
-        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
-
         status = ttk.Frame(self.root, padding=(10, 3))
         status.pack(side="bottom", fill="x")
         tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="bottom", fill="x")
@@ -499,6 +497,16 @@ class Aplicativo:
             pass
 
     def _montar_topo(self, topo):
+        a = self.arranjo
+        self.var_mostrar = {
+            chave: tk.BooleanVar(value=a["mostrar_" + chave]) for chave in ("timeline", "fotos", "lateral")
+        }
+        self.var_lado_timeline = tk.StringVar(value=a.get("timeline", "baixo"))
+        self.var_lado_fotos = tk.StringVar(value=a.get("fotos", "baixo"))
+        self.var_lado_lateral = tk.StringVar(value=a.get("lateral", "direita"))
+        for var_cfg in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
+            var_cfg.trace_add("write", lambda *args: self.agendar("config", 160, self._mudou_config))
+
         selo = tk.Label(
             topo,
             text="DI",
@@ -547,7 +555,9 @@ class Aplicativo:
 
         ttk.Frame(topo, width=6).pack(side="left")
         self.rotulo_nome = ttk.Label(topo, text="", style="Titulo.TLabel")
-        self.rotulo_nome.pack(side="left", padx=(0, 4))
+        self.rotulo_nome.pack(side="left", padx=(0, 6))
+        self.rotulo_lamina = ttk.Label(topo, text="", style="Fraco.TLabel")
+        self.rotulo_lamina.pack(side="left", padx=(4, 4))
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
                                           "Exportar álbum (JPG, PSD ou PDF)", "Compacto.TButton")
@@ -561,60 +571,51 @@ class Aplicativo:
                     "Guia rápido passo a passo e dicas de uso", "Compacto.TButton").pack(side="right", padx=1)
         self._botao(topo, "↷", self.refazer, "Refazer (Ctrl+Y)", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(topo, "↶", self.desfazer, "Desfazer (Ctrl+Z)", "Icone.TButton", width=3).pack(side="right", padx=1)
+
         ttk.Frame(topo, width=4).pack(side="right")
         self._botao(topo, "✦ Diagramar", self.abrir_diagramacao,
-                    "Diagramação automática (F5)", "PrimarioCompacto.TButton").pack(side="right", padx=1)
+                    "Diagramação automática (F5)", "PrimarioCompacto.TButton").pack(side="right", padx=(2, 2))
 
-    def _montar_barra_opcoes(self, barra):
-        """Barra de opções enxuta: apenas Tamanho do Álbum, Mostrar/Ocultar Linhas e botão de Configurações."""
-        a = self.arranjo
-        self.var_mostrar = {
-            chave: tk.BooleanVar(value=a["mostrar_" + chave]) for chave in ("timeline", "fotos", "lateral")
-        }
-        self.var_lado_timeline = tk.StringVar(value=a["timeline"])
-        self.var_lado_lateral = tk.StringVar(value=a["lateral"])
-        for var_cfg in (self.margem_var, self.espacamento_var, self.fotos_lamina_var, self.auto_salvar_var):
-            var_cfg.trace_add("write", lambda *args: self.agendar("config", 160, self._mudou_config))
+        # Botões sem texto (apenas ícone + explicativo no tooltip) e seleção de Tamanho ao lado do Diagramar
+        bt_cfg = self._botao(
+            topo,
+            "⚙",
+            self.abrir_janela_configuracoes,
+            "Configurações de Margem, Espaçamento, Fotos por Lâmina, Regras e Posição dos Painéis",
+            "Icone.TButton",
+            width=3,
+        )
+        bt_cfg.pack(side="right", padx=1)
 
-        rot_alb = ttk.Label(barra, text="Álbum:", style="Fraco.TLabel")
-        rot_alb.pack(side="left", padx=(2, 4))
+        guias = ttk.Checkbutton(
+            topo,
+            text="⌗",
+            variable=self.guias,
+            command=self.desenhar_lamina,
+            style="Alternar.Toolbutton",
+            width=3,
+        )
+        guias.pack(side="right", padx=1)
+        tema.dica(guias, "Mostrar ou ocultar as linhas guias de corte, sangria e dobra central (Tecla H)")
+
+        self.rotulo_produto = ttk.Label(topo, text="", style="Fraco.TLabel")
+        self.rotulo_produto.pack(side="right", padx=(2, 4))
+        self.dica_produto = tema.Dica(self.rotulo_produto, "")
+
         self.produto_var = tk.StringVar(value=self.produto["nome"] if self.produto else "")
         self.combo_produto = ttk.Combobox(
-            barra,
+            topo,
             textvariable=self.produto_var,
             state="readonly",
             width=9,
             values=[p["nome"] for p in self.produtos],
         )
-        self.combo_produto.pack(side="left", padx=(0, 4))
+        self.combo_produto.pack(side="right", padx=(0, 3))
         self.combo_produto.bind("<<ComboboxSelected>>", self._trocou_produto)
-        self.rotulo_produto = ttk.Label(barra, text="", style="Fraco.TLabel")
-        self.rotulo_produto.pack(side="left", padx=(0, 8))
-        self.dica_produto = tema.Dica(self.rotulo_produto, "")
+        tema.dica(self.combo_produto, "Selecionar o tamanho e formato do álbum")
 
-        tk.Frame(barra, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=6, pady=2)
-
-        guias = ttk.Checkbutton(
-            barra,
-            text="⌗ Mostrar Linhas",
-            variable=self.guias,
-            command=self.desenhar_lamina,
-            style="Alternar.Toolbutton",
-        )
-        guias.pack(side="left", padx=2)
-        tema.dica(guias, "Mostrar ou ocultar as linhas guias de corte, sangria e dobra central (Tecla H)")
-
-        bt_cfg = self._botao(
-            barra,
-            "⚙ Configurações",
-            self.abrir_janela_configuracoes,
-            "Abrir configurações de Margem, Espaçamento, Fotos por Lâmina, Proteção de Rostos, Pastas e Exibir Painéis",
-            "Compacto.TButton",
-        )
-        bt_cfg.pack(side="left", padx=(6, 2))
-
-        self.rotulo_lamina = ttk.Label(barra, text="", style="Fraco.TLabel", anchor="e")
-        self.rotulo_lamina.pack(side="right", padx=(8, 4))
+        rot_alb = ttk.Label(topo, text="Álbum:", style="Fraco.TLabel")
+        rot_alb.pack(side="right", padx=(4, 3))
 
     def abrir_janela_configuracoes(self):
         """Janela redimensionável que reúne Margem, Espaçamento, Regras e opções do antigo menu Exibir."""
@@ -704,7 +705,26 @@ class Aplicativo:
             ).pack(anchor="w", pady=2)
 
         ttk.Separator(sec_exibir, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(sec_exibir, text="Posição da Linha do Tempo (Lâminas):", style="Fraco.TLabel").pack(anchor="w", pady=(0, 3))
+        ttk.Label(sec_exibir, text="Posição do Painel de Fotos:", style="Fraco.TLabel").pack(anchor="w", pady=(0, 3))
+        grade_ft = ttk.Frame(sec_exibir)
+        grade_ft.pack(fill="x", pady=(0, 4))
+        for idx_f, (valor_f, texto_f) in enumerate((
+            ("baixo", "Embaixo (Faixa)"),
+            ("direita", "À direita (Vertical)"),
+            ("esquerda", "À esquerda (Vertical)"),
+        )):
+            rb_ft = ttk.Radiobutton(
+                grade_ft,
+                text=texto_f,
+                value=valor_f,
+                variable=self.var_lado_fotos,
+                style="Filtro.TRadiobutton",
+                command=self._mudou_exibir,
+            )
+            rb_ft.grid(row=0, column=idx_f, sticky="ew", padx=1)
+            grade_ft.columnconfigure(idx_f, weight=1)
+
+        ttk.Label(sec_exibir, text="Posição da Linha do Tempo (Lâminas):", style="Fraco.TLabel").pack(anchor="w", pady=(4, 3))
         grade_tl = ttk.Frame(sec_exibir)
         grade_tl.pack(fill="x", pady=(0, 4))
         for idx_l, (valor, texto) in enumerate((
@@ -757,7 +777,7 @@ class Aplicativo:
             pai=self.root,
             chave="janela_configuracoes",
             largura=460,
-            altura=540,
+            altura=560,
             min_largura=360,
             min_altura=380,
         )
@@ -793,29 +813,25 @@ class Aplicativo:
         tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=2, pady=6)
 
         self.botoes_abas_esquerda = {}
+        self.vars_abas_esquerda = {}
         definicoes_abas = (
-            ("Layouts", "⊞", "Aba Layouts (Sugestões, Páginas e Editar) — Abrir/Fechar"),
-            ("Fundo", "🖼", "Aba Fundo (Cores, Gerador pelas Fotos e Pasta) — Abrir/Fechar"),
-            ("Degradê", "◐", "Aba Degradê (Máscara de Opacidade) — Abrir/Fechar"),
-            ("Moldura", "▭", "Aba Moldura (Traçado e Borda nas Fotos) — Abrir/Fechar"),
-            ("⌨ Atalhos", "⌨", "Aba Atalhos de Teclado — Abrir/Fechar"),
+            ("Layouts", "⊞", "Janela Layouts (Sugestões, Páginas e Editar) — Abrir/Fechar"),
+            ("Fundo", "🖼", "Janela Fundo (Cores, Gerador pelas Fotos e Pasta) — Abrir/Fechar"),
+            ("Degradê", "◐", "Janela Degradê (Máscara de Opacidade) — Abrir/Fechar"),
+            ("Moldura", "▭", "Janela Moldura (12 Estilos: Royal, Degradê e Bordas) — Abrir/Fechar"),
+            ("Sombra", "❒", "Janela Sombra Projetada (Sincronizada com Molduras) — Abrir/Fechar"),
+            ("Temas", "🎨", "Janela Temas da Lâmina (Natal, Páscoa, Casamento, Formatura...) — Abrir/Fechar"),
+            ("⌨ Atalhos", "⌨", "Janela Atalhos de Teclado — Abrir/Fechar"),
         )
         for chave_aba, icone_aba, dica_aba in definicoes_abas:
-            bt_aba = tk.Button(
+            var_aba = tk.BooleanVar(value=(chave_aba == "Layouts"))
+            self.vars_abas_esquerda[chave_aba] = var_aba
+            bt_aba = ttk.Checkbutton(
                 barra,
                 text=icone_aba,
+                variable=var_aba,
+                style="Alternar.Toolbutton",
                 width=3,
-                bg=tema.PAINEL_2,
-                fg=tema.TEXTO,
-                activebackground=tema.DESTAQUE,
-                activeforeground="#ffffff",
-                font=tema.FONTE_ICONE,
-                relief="flat",
-                bd=1,
-                highlightthickness=1,
-                highlightbackground=tema.BORDA,
-                pady=3,
-                cursor="hand2",
                 command=lambda c=chave_aba: self.alternar_aba_lateral(c),
             )
             bt_aba.pack(pady=1)
@@ -841,11 +857,21 @@ class Aplicativo:
             self.botao_filtro_fotos.configure(text=mapa_txt.get(self.filtro.get(), "▾ Filtro: Todas"))
         self.atualizar_fotos()
 
+    def alternar_posicao_fotos(self):
+        atual_pos = self.var_lado_fotos.get() if hasattr(self, "var_lado_fotos") else self.arranjo.get("fotos", "baixo")
+        nova_pos = "direita" if atual_pos == "baixo" else "baixo"
+        if hasattr(self, "var_lado_fotos"):
+            self.var_lado_fotos.set(nova_pos)
+        self.arranjo["fotos"] = nova_pos
+        self._mudou_exibir()
+
     def _montar_fotos(self, pai):
         caixa = ttk.Frame(pai, padding=(8, 4, 8, 0))
         caixa.pack(fill="both", expand=True)
+        self.caixa_fotos = caixa
         cabeca = ttk.Frame(caixa)
         cabeca.pack(side="top", fill="x")
+        self.cabeca_fotos = cabeca
         self.rotulo_fotos = ttk.Label(cabeca, text="Fotos", style="Titulo.TLabel")
         self.rotulo_fotos.pack(side="left")
 
@@ -863,47 +889,61 @@ class Aplicativo:
                 command=self._mudou_filtro_fotos_menu,
             )
         self.botao_filtro_fotos["menu"] = menu_filtro
-        self.botao_filtro_fotos.pack(side="left", padx=(8, 2))
+        self.botao_filtro_fotos.pack(side="left", padx=(6, 2))
         tema.dica(self.botao_filtro_fotos, "Escolher filtro de exibição de fotos (Todas, Não usadas ou Usadas)")
 
-        ttk.Label(cabeca, text="📂", style="Fraco.TLabel").pack(side="left", padx=(6, 2))
-        self.combo_pasta_filtro = ttk.Combobox(cabeca, state="readonly", width=15,
+        ttk.Label(cabeca, text="📂", style="Fraco.TLabel").pack(side="left", padx=(4, 2))
+        self.combo_pasta_filtro = ttk.Combobox(cabeca, state="readonly", width=13,
                                                values=["Todas as pastas"])
         self.combo_pasta = self.combo_pasta_filtro
         self.combo_pasta_filtro.set("Todas as pastas")
-        self.combo_pasta_filtro.pack(side="left", padx=(0, 4))
+        self.combo_pasta_filtro.pack(side="left", padx=(0, 3))
         self.combo_pasta_filtro.bind("<<ComboboxSelected>>", self._mudou_filtro_pasta)
-        tema.dica(self.combo_pasta_filtro, "Filtrar visualização por pasta carregada (as pastas ficam separadas sem se misturar)")
+        tema.dica(self.combo_pasta_filtro, "Filtrar visualização por pasta carregada")
 
         self.ordem_var = tk.StringVar(value="grupos")
         combo = ttk.Combobox(cabeca, textvariable=self.ordem_var, state="readonly", width=7,
                              values=["grupos", "nome", "data"])
-        combo.pack(side="left", padx=(4, 0))
+        combo.pack(side="left", padx=(3, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.ordenar_fotos())
         tema.dica(combo, "Ordenar fotos por grupos numerados/ordem manual, nome ou data (sem renomear arquivos)")
         self._botao(cabeca, "🗂 Ordem / Grupos", self.abrir_ordem_grupos,
                     "Organizar fotos em grupos numerados (Grupo 1, Grupo 2...) e escolher qual foto vem primeiro sem alterar arquivos",
-                    "Compacto.TButton").pack(side="left", padx=(6, 0))
-        self._botao(cabeca, "📁 Separar Lâminas", self.separar_laminas_por_pasta,
-                    "Separar pastas carregadas em lâminas exclusivas (nunca mistura fotos de pastas diferentes na mesma lâmina)",
-                    "Compacto.TButton").pack(side="left", padx=(4, 0))
+                    "Compacto.TButton").pack(side="left", padx=(5, 0))
+
         self._botao(cabeca, "🗑", self.remover_fotos_selecionadas,
-                    "Remover fotos selecionadas do projeto", "Icone.TButton", width=3).pack(side="right", padx=(4, 1))
+                    "Remover fotos selecionadas do projeto", "Icone.TButton", width=3).pack(side="right", padx=(2, 1))
         self._botao(cabeca, "⇉", self.distribuir_nao_usadas,
-                    "Distribuir fotos livres em novas lâminas", "Icone.TButton", width=3).pack(side="right", padx=3)
-        barra = ttk.Scrollbar(caixa, orient="horizontal", command=self._rolar_fotos)
-        barra.pack(side="bottom", fill="x")
-        self.canvas_fotos = tk.Canvas(caixa, height=82, bg=tema.PAINEL, highlightthickness=0)
+                    "Distribuir fotos livres em novas lâminas", "Icone.TButton", width=3).pack(side="right", padx=2)
+        self.botao_pos_fotos = self._botao(
+            cabeca,
+            "◨",
+            self.alternar_posicao_fotos,
+            "Alternar posição do Painel de Fotos entre À Direita (Vertical) e Embaixo (Horizontal)",
+            "Icone.TButton",
+            width=3,
+        )
+        self.botao_pos_fotos.pack(side="right", padx=2)
+
+        self.barra_fotos_h = ttk.Scrollbar(caixa, orient="horizontal", command=self._rolar_fotos_h)
+        self.barra_fotos_v = ttk.Scrollbar(caixa, orient="vertical", command=self._rolar_fotos_v)
+        self.barra_fotos_h.pack(side="bottom", fill="x")
+        self.canvas_fotos = tk.Canvas(caixa, height=82, width=240, bg=tema.PAINEL, highlightthickness=0)
         self.canvas_fotos.pack(side="top", fill="both", expand=True, pady=(3, 0))
-        self.canvas_fotos.configure(xscrollcommand=lambda a, b: (barra.set(a, b), self.agendar("fotos", 15, self._desenhar_fotos_visiveis)))
+        self.canvas_fotos.configure(
+            xscrollcommand=lambda a, b: (self.barra_fotos_h.set(a, b), self.agendar("fotos", 15, self._desenhar_fotos_visiveis)),
+            yscrollcommand=lambda a, b: (self.barra_fotos_v.set(a, b), self.agendar("fotos", 15, self._desenhar_fotos_visiveis)),
+            xscrollincrement=20,
+            yscrollincrement=20,
+        )
+        self._fotos_vert_ativo = False
         self.canvas_fotos.bind("<Configure>", self._mudou_tamanho_fotos)
-        self.canvas_fotos.bind("<MouseWheel>", lambda e: self.canvas_fotos.xview_scroll(-int(e.delta / 40), "units"))
+        self.canvas_fotos.bind("<MouseWheel>", self._fotos_roda)
         self.canvas_fotos.bind("<ButtonPress-1>", self._fotos_pressionou)
         self.canvas_fotos.bind("<B1-Motion>", self._mover_arrasto)
         self.canvas_fotos.bind("<ButtonRelease-1>", self._soltar_arrasto)
         self.canvas_fotos.bind("<Double-Button-1>", self._fotos_duplo)
         self.canvas_fotos.bind("<Button-3>", self._fotos_menu)
-        self.canvas_fotos.configure(xscrollincrement=20)
 
     def _montar_timeline(self, pai):
         caixa = ttk.Frame(pai, padding=(6, 4, 6, 2))
@@ -952,17 +992,46 @@ class Aplicativo:
     # ---------------- arranjo dos painéis ----------------
 
     def _timeline_vertical(self):
-        return self.arranjo["timeline"] in ("esquerda", "direita")
+        return self.arranjo.get("timeline", "baixo") in ("esquerda", "direita")
+
+    def _fotos_vertical(self):
+        return self.arranjo.get("fotos", "baixo") in ("esquerda", "direita")
+
+    def _orientar_fotos(self, vertical):
+        if vertical == getattr(self, "_fotos_vert_ativo", None):
+            return
+        self._fotos_vert_ativo = vertical
+        self.barra_fotos_h.pack_forget()
+        self.barra_fotos_v.pack_forget()
+        self.canvas_fotos.pack_forget()
+        if vertical:
+            self.barra_fotos_v.pack(side="right", fill="y", pady=(3, 0))
+            if hasattr(self, "botao_pos_fotos"):
+                self.botao_pos_fotos.configure(text="⬓")
+        else:
+            self.barra_fotos_h.pack(side="bottom", fill="x")
+            if hasattr(self, "botao_pos_fotos"):
+                self.botao_pos_fotos.configure(text="◨")
+        self.canvas_fotos.pack(side="top", fill="both", expand=True, pady=(3, 0))
+        self.canvas_fotos.xview_moveto(0)
+        self.canvas_fotos.yview_moveto(0)
+        self._celula = self._medidas_fotos()
+        self._construir_itens_painel_fotos()
+        self._area_fotos()
+        self.agendar("fotos", 25, self._desenhar_fotos_visiveis)
 
     def _ler_tamanhos(self):
         """Passa para o arranjo o tamanho atual dos painéis (o usuário pode ter arrastado as divisórias)."""
+        fotos_vert = self._fotos_vertical()
         em_baixo_junto = (self.arranjo.get("timeline") == "baixo"
+                          and not fotos_vert
                           and self.arranjo.get("mostrar_timeline")
                           and self.arranjo.get("mostrar_fotos"))
         usa_largura_tl = self._tl_vertical or em_baixo_junto
         chave_tl = "largura_timeline" if usa_largura_tl else "altura_timeline"
+        chave_ft = "largura_fotos" if fotos_vert else "altura_fotos"
         for chave, widget, altura in ((chave_tl, self.quadro_timeline, not usa_largura_tl),
-                                      ("altura_fotos", self.quadro_fotos, True),
+                                      (chave_ft, self.quadro_fotos, not fotos_vert),
                                       ("largura_lateral", self.quadro_lateral, False)):
             if widget.winfo_ismapped():
                 valor = widget.winfo_height() if altura else widget.winfo_width()
@@ -975,39 +1044,52 @@ class Aplicativo:
         for painel in (v, h, b):
             for nome in painel.panes():
                 painel.forget(nome)
-        vertical = self._timeline_vertical()
-        self._orientar_timeline(vertical)
+        vertical_tl = self._timeline_vertical()
+        vertical_ft = self._fotos_vertical()
+        self._orientar_timeline(vertical_tl)
+        self._orientar_fotos(vertical_ft)
         _wx, _wy, sw, sh = tema.area_util_tela(self.root)
-        # Limita proporcionalmente a altura/largura dos painéis periféricos em telas compactas (ex: 1440x900, 1366x768)
-        larg_lat = min(int(a["largura_lateral"]), max(MINIMOS["lateral"], int(sw * 0.25)))
+        # Limita proporcionalmente a altura/largura dos painéis periféricos em telas compactas
+        larg_lat = min(int(a.get("largura_lateral", 310)), max(MINIMOS["lateral"], int(sw * 0.25)))
         larg_tl = min(int(a.get("largura_timeline", 360)), max(220, int(sw * 0.30)))
-        alt_tl = min(int(a["altura_timeline"]), max(MINIMOS["timeline"], int(sh * 0.16)))
-        alt_fotos = min(int(a["altura_fotos"]), max(MINIMOS["fotos"], int(sh * 0.17)))
+        larg_ft = min(int(a.get("largura_fotos", 290)), max(MINIMOS["fotos_vertical"], int(sw * 0.28)))
+        alt_tl = min(int(a.get("altura_timeline", 114)), max(MINIMOS["timeline"], int(sh * 0.16)))
+        alt_fotos = min(int(a.get("altura_fotos", 118)), max(MINIMOS["fotos"], int(sh * 0.17)))
 
         lateral = dict(width=larg_lat, minsize=MINIMOS["lateral"], stretch="never")
         tl_lado = dict(width=larg_tl, minsize=MINIMOS["timeline_vertical"], stretch="never")
-        mostrar_tl, mostrar_lat = a["mostrar_timeline"], a["mostrar_lateral"]
-        if mostrar_lat and a["lateral"] == "esquerda":
+        ft_lado = dict(width=larg_ft, minsize=MINIMOS["fotos_vertical"], stretch="never")
+        mostrar_tl = a.get("mostrar_timeline", True)
+        mostrar_lat = a.get("mostrar_lateral", True)
+        mostrar_ft = a.get("mostrar_fotos", True)
+        pos_fotos = a.get("fotos", "baixo")
+
+        if mostrar_lat and a.get("lateral") == "esquerda":
             h.add(self.quadro_lateral, **lateral)
-        if mostrar_tl and a["timeline"] == "esquerda":
+        if mostrar_tl and a.get("timeline") == "esquerda":
             h.add(self.quadro_timeline, **tl_lado)
+        if mostrar_ft and pos_fotos == "esquerda":
+            h.add(self.quadro_fotos, **ft_lado)
         h.add(self.quadro_centro, minsize=MINIMOS["centro"], stretch="always")
-        if mostrar_tl and a["timeline"] == "direita":
+        if mostrar_tl and a.get("timeline") == "direita":
             h.add(self.quadro_timeline, **tl_lado)
-        if mostrar_lat and a["lateral"] == "direita":
+        if mostrar_lat and a.get("lateral") == "direita":
             h.add(self.quadro_lateral, **lateral)
+        if mostrar_ft and pos_fotos == "direita":
+            h.add(self.quadro_fotos, **ft_lado)
+
         tl_faixa = dict(height=alt_tl, minsize=MINIMOS["timeline"], stretch="never")
-        if mostrar_tl and a["timeline"] == "cima":
+        if mostrar_tl and a.get("timeline") == "cima":
             v.add(self.quadro_timeline, **tl_faixa)
         v.add(h, minsize=MINIMOS["meio"], stretch="always")
-        if mostrar_tl and a["timeline"] == "baixo" and a["mostrar_fotos"]:
+        if mostrar_tl and a.get("timeline") == "baixo" and mostrar_ft and pos_fotos == "baixo":
             b.add(self.quadro_timeline, width=max(220, larg_tl), minsize=200, stretch="never")
             b.add(self.quadro_fotos, minsize=240, stretch="always")
             v.add(b, height=alt_fotos, minsize=MINIMOS["fotos"], stretch="never")
         else:
-            if a["mostrar_fotos"]:
+            if mostrar_ft and pos_fotos == "baixo":
                 v.add(self.quadro_fotos, height=alt_fotos, minsize=MINIMOS["fotos"], stretch="never")
-            if mostrar_tl and a["timeline"] == "baixo":
+            if mostrar_tl and a.get("timeline") == "baixo":
                 v.add(self.quadro_timeline, **tl_faixa)
 
     def _orientar_timeline(self, vertical):
@@ -1040,6 +1122,8 @@ class Aplicativo:
         for chave, var in self.var_mostrar.items():
             self.arranjo["mostrar_" + chave] = bool(var.get())
         self.arranjo["timeline"] = self.var_lado_timeline.get()
+        if hasattr(self, "var_lado_fotos"):
+            self.arranjo["fotos"] = self.var_lado_fotos.get()
         self.arranjo["lateral"] = self.var_lado_lateral.get()
         self._aplicar_arranjo()
         self.agendar("gravar_arranjo", 300, self.gravar_arranjo)
@@ -1049,7 +1133,12 @@ class Aplicativo:
         self._mudou_exibir()
 
     def posicionar_painel(self, chave, lado):
-        (self.var_lado_timeline if chave == "timeline" else self.var_lado_lateral).set(lado)
+        if chave == "timeline":
+            self.var_lado_timeline.set(lado)
+        elif chave == "fotos" and hasattr(self, "var_lado_fotos"):
+            self.var_lado_fotos.set(lado)
+        else:
+            self.var_lado_lateral.set(lado)
         self._mudou_exibir()
 
     def mudar_tamanho_painel(self, chave, diferenca):
@@ -1059,9 +1148,11 @@ class Aplicativo:
             campo = "largura_lateral"
         elif chave == "timeline" and self._tl_vertical:
             campo, minimo = "largura_timeline", MINIMOS["timeline_vertical"]
+        elif chave == "fotos" and self._fotos_vertical():
+            campo, minimo = "largura_fotos", MINIMOS["fotos_vertical"]
         else:
             campo = "altura_" + chave
-        self.arranjo[campo] = max(minimo, int(self.arranjo[campo]) + diferenca)
+        self.arranjo[campo] = max(minimo, int(self.arranjo.get(campo, minimo)) + diferenca)
         self.var_mostrar[chave].set(True)
         self._mudou_exibir()
 
@@ -1072,6 +1163,8 @@ class Aplicativo:
         for chave, var in self.var_mostrar.items():
             var.set(self.arranjo["mostrar_" + chave])
         self.var_lado_timeline.set(self.arranjo["timeline"])
+        if hasattr(self, "var_lado_fotos"):
+            self.var_lado_fotos.set(self.arranjo.get("fotos", "baixo"))
         self.var_lado_lateral.set(self.arranjo["lateral"])
         self._aplicar_arranjo()
         self.agendar("gravar_arranjo", 300, self.gravar_arranjo)
@@ -1100,6 +1193,8 @@ class Aplicativo:
             "Fundo": (self._aba_fundo, True, "🖼 Fundo"),
             "Degradê": (self._aba_degrade, True, "◐ Degradê"),
             "Moldura": (self._aba_moldura, True, "▭ Moldura"),
+            "Sombra": (self._aba_sombra, True, "❒ Sombra Projetada"),
+            "Temas": (self._aba_temas, True, "🎨 Temas da Lâmina"),
             "⌨ Atalhos": (self._aba_atalhos, False, "⌨ Atalhos"),
         }
 
@@ -1156,16 +1251,13 @@ class Aplicativo:
         return quadro
 
     def _atualizar_botoes_abas_esquerda(self):
-        if not hasattr(self, "botoes_abas_esquerda"):
+        if not hasattr(self, "vars_abas_esquerda"):
             return
         lat_visivel = bool(self.var_mostrar["lateral"].get()) and bool(self.aba_fixada_ativa)
-        for titulo, bt in self.botoes_abas_esquerda.items():
+        for titulo, var_aba in self.vars_abas_esquerda.items():
             em_janela = titulo in self.janelas_abas_flutuantes
             ativa_fixa = lat_visivel and self.aba_fixada_ativa == titulo
-            if ativa_fixa or em_janela:
-                bt.configure(bg=tema.DESTAQUE_ESCURO, fg="#ffffff", highlightbackground=tema.DESTAQUE)
-            else:
-                bt.configure(bg=tema.PAINEL_2, fg=tema.TEXTO, highlightbackground=tema.BORDA)
+            var_aba.set(bool(ativa_fixa or em_janela))
 
     def _exibir_aba_fixada(self, titulo):
         self.aba_fixada_ativa = titulo
@@ -1195,6 +1287,7 @@ class Aplicativo:
                     jan.deiconify()
                     jan.lift()
                     jan.focus_force()
+                    self._atualizar_botoes_abas_esquerda()
                     return
                 self.fechar_janela_aba(titulo)
                 return
@@ -1314,6 +1407,14 @@ class Aplicativo:
         self.alternar_aba_lateral("Degradê", forcar_abrir=True)
         self._atualizar_degrade_ui()
 
+    def abrir_aba_sombra(self):
+        self.alternar_aba_lateral("Sombra", forcar_abrir=True)
+        self._atualizar_sombra_ui()
+
+    def abrir_aba_temas(self):
+        self.alternar_aba_lateral("Temas", forcar_abrir=True)
+        self._atualizar_temas_ui()
+
     def abrir_aba_atalhos(self):
         self.alternar_aba_lateral("⌨ Atalhos", forcar_abrir=True)
 
@@ -1329,6 +1430,10 @@ class Aplicativo:
             self._atualizar_degrade_ui()
         elif selecionada == "Moldura":
             self._atualizar_moldura_ui()
+        elif selecionada == "Sombra":
+            self._atualizar_sombra_ui()
+        elif selecionada == "Temas":
+            self._atualizar_temas_ui()
 
     def _aba_layouts(self, quadro):
         """Sugestões, biblioteca de modelos e edição do layout na mesma aba, uma parte de cada vez."""
@@ -1951,61 +2056,123 @@ class Aplicativo:
         self.galeria_fundos.canvas.bind("<ButtonRelease-1>", self._soltar_arrasto)
 
     def _aba_moldura(self, quadro):
-        ttk.Label(quadro, text="Moldura da foto", style="Titulo.TLabel").pack(anchor="w")
-        ttk.Label(quadro, text="Traçado ao redor das fotos selecionadas.", style="Fraco.TLabel",
-                  wraplength=280).pack(anchor="w", pady=(2, 10))
+        ttk.Label(quadro, text="Molduras Especiais (12 Estilos)", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(quadro, text="Traçado e ornamentos ao redor das fotos selecionadas (Royal, Degradê, Metálica e mais).",
+                  style="Fraco.TLabel", wraplength=290).pack(anchor="w", pady=(2, 6))
         self.moldura_ativa = tk.BooleanVar(value=False)
         self.moldura_cor = tk.StringVar(value="#ffffff")
-        self.moldura_espessura = tk.DoubleVar(value=0.5)
+        self.moldura_cor_secundaria = tk.StringVar(value="#d4af37")
+        self.moldura_espessura = tk.DoubleVar(value=0.6)
         self.moldura_estilo = tk.StringVar(value="simples")
+        self.moldura_sinc_sombra = tk.BooleanVar(value=True)
         self._carregando_moldura = False
         self._moldura_alvo = None
 
-        self.check_moldura = ttk.Checkbutton(quadro, text="Ativar traçado", variable=self.moldura_ativa,
+        linha_topo_m = ttk.Frame(quadro)
+        linha_topo_m.pack(fill="x", pady=(0, 6))
+        self.check_moldura = ttk.Checkbutton(linha_topo_m, text="Ativar moldura", variable=self.moldura_ativa,
                                              command=lambda: self._alterar_moldura(marcar=True))
-        self.check_moldura.pack(anchor="w", pady=(0, 8))
+        self.check_moldura.pack(side="left")
+        self._botao(
+            linha_topo_m,
+            "❒ Sombra Projetada...",
+            self.abrir_aba_sombra,
+            "Abrir janela de opções da Sombra Projetada sincronizada com as molduras",
+            "Compacto.TButton",
+        ).pack(side="right")
+
         linha = ttk.Frame(quadro)
-        linha.pack(fill="x", pady=3)
-        ttk.Label(linha, text="Estilo").pack(side="left")
-        self.combo_moldura = ttk.Combobox(linha, textvariable=self.moldura_estilo, state="readonly", width=14,
-                                          values=("simples", "dupla", "pontilhada"))
+        linha.pack(fill="x", pady=2)
+        ttk.Label(linha, text="Estilo (12)").pack(side="left")
+        self.combo_moldura = ttk.Combobox(
+            linha,
+            textvariable=self.moldura_estilo,
+            state="readonly",
+            width=18,
+            values=[ch for ch, _nm in ESTILOS_MOLDURA],
+        )
         self.combo_moldura.pack(side="right")
         self.combo_moldura.bind("<<ComboboxSelected>>", self._moldura_estilo_mudou)
 
-        linha = ttk.Frame(quadro)
-        linha.pack(fill="x", pady=3)
-        ttk.Label(linha, text="Cor").pack(side="left")
-        self.amostra_moldura = tk.Label(linha, width=4, bg=self.moldura_cor.get(), relief="solid", bd=1)
+        grade_est = ttk.LabelFrame(quadro, text="Catálogo Rápido (12 Molduras)", padding=4)
+        grade_est.pack(fill="x", pady=(4, 6))
+        atalhos_estilos = (
+            ("Simples", "simples"),
+            ("Dupla", "dupla"),
+            ("Pontilhada", "pontilhada"),
+            ("♛ Royal", "royal"),
+            ("◐ Degradê", "degrade"),
+            ("✦ Metálica", "degrade_real"),
+            ("⌜ Cantoneira", "cantoneira"),
+            ("◈ Chanfrada", "chanfrada"),
+            ("▣ Galeria", "passepartout"),
+            ("≡ Tripla", "tripla"),
+            ("╬ Cruzada", "cruzada"),
+            ("◎ Halo", "halo"),
+        )
+        for idx_e, (rot_e, val_e) in enumerate(atalhos_estilos):
+            bt_e = ttk.Button(
+                grade_est,
+                text=rot_e,
+                style="Compacto.TButton",
+                command=lambda v=val_e: self._escolher_estilo_moldura_rapido(v),
+            )
+            bt_e.grid(row=idx_e // 3, column=idx_e % 3, sticky="ew", padx=1, pady=1)
+            tema.dica(bt_e, NOMES_ESTILOS_MOLDURA.get(val_e, rot_e))
+            grade_est.columnconfigure(idx_e % 3, weight=1)
+
+        linha_c1 = ttk.Frame(quadro)
+        linha_c1.pack(fill="x", pady=2)
+        ttk.Label(linha_c1, text="Cor principal").pack(side="left")
+        self.amostra_moldura = tk.Label(linha_c1, width=4, bg=self.moldura_cor.get(), relief="solid", bd=1)
         self.amostra_moldura.pack(side="right", padx=(4, 0))
-        self.botao_cor_moldura = ttk.Button(linha, text="Escolher cor...", command=self._escolher_cor_moldura)
+        self.botao_cor_moldura = ttk.Button(linha_c1, text="Cor 1...", style="Compacto.TButton", command=self._escolher_cor_moldura)
         self.botao_cor_moldura.pack(side="right")
 
-        linha = ttk.Frame(quadro)
-        linha.pack(fill="x", pady=(8, 2))
-        self.rotulo_espessura_moldura = ttk.Label(linha, text="Espessura: 0,5 mm")
+        linha_c2 = ttk.Frame(quadro)
+        linha_c2.pack(fill="x", pady=2)
+        ttk.Label(linha_c2, text="Cor 2 (Royal / Degradê)").pack(side="left")
+        self.amostra_moldura_sec = tk.Label(linha_c2, width=4, bg=self.moldura_cor_secundaria.get(), relief="solid", bd=1)
+        self.amostra_moldura_sec.pack(side="right", padx=(4, 0))
+        self.botao_cor_moldura_sec = ttk.Button(
+            linha_c2, text="Cor 2...", style="Compacto.TButton", command=self._escolher_cor_secundaria_moldura
+        )
+        self.botao_cor_moldura_sec.pack(side="right")
+
+        linha_esp = ttk.Frame(quadro)
+        linha_esp.pack(fill="x", pady=(6, 2))
+        self.rotulo_espessura_moldura = ttk.Label(linha_esp, text="Espessura: 0,6 mm")
         self.rotulo_espessura_moldura.pack(side="left")
         self.escala_moldura = ttk.Scale(quadro, from_=0.1, to=3.0, variable=self.moldura_espessura,
                                         command=self._moldura_escala_mudou)
-        self.escala_moldura.pack(fill="x", pady=(0, 6))
+        self.escala_moldura.pack(fill="x", pady=(0, 4))
         self.escala_moldura.bind("<ButtonPress-1>", lambda _e: self._inicio_ajuste_moldura())
         self.escala_moldura.bind("<ButtonRelease-1>", self._fim_ajuste_moldura)
 
-        ttk.Label(quadro, text="A espessura é fixa em milímetros: todas as fotos recebem exatamente o mesmo traçado.",
-                  style="Fraco.TLabel", wraplength=280, justify="left").pack(anchor="w", pady=(0, 10))
         presets = ttk.Frame(quadro)
         presets.pack(fill="x", pady=2)
-        for texto, valor in (("Fina", 0.25), ("Média", 0.5), ("Grossa", 1.0)):
-            ttk.Button(presets, text=texto, command=lambda v=valor: self._preset_moldura(v)).pack(
+        for texto, valor in (("Fina 0,3", 0.3), ("Média 0,6", 0.6), ("Forte 1,1", 1.1), ("Larga 1,8", 1.8)):
+            ttk.Button(presets, text=texto, style="Compacto.TButton", command=lambda v=valor: self._preset_moldura(v)).pack(
                 side="left", fill="x", expand=True, padx=1)
-        ttk.Button(quadro, text="Aplicar às fotos selecionadas",
-                   command=self._moldura_em_todas).pack(fill="x", pady=(10, 4))
-        ttk.Button(quadro, text="Remover moldura", command=self._remover_moldura).pack(fill="x")
+
+        ttk.Checkbutton(
+            quadro,
+            text="❒ Identificar e aplicar Sombra Projetada junto com a moldura",
+            variable=self.moldura_sinc_sombra,
+        ).pack(anchor="w", pady=(6, 4))
+
+        linha_ac_m = ttk.Frame(quadro)
+        linha_ac_m.pack(fill="x", pady=(4, 2))
+        ttk.Button(linha_ac_m, text="Aplicar às selecionadas", style="PrimarioCompacto.TButton",
+                   command=self._moldura_em_todas).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(linha_ac_m, text="Remover moldura", style="Compacto.TButton",
+                   command=self._remover_moldura).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
         auto_m = ttk.LabelFrame(quadro, text="Função 3: Molduras Automáticas (Regras)", padding=6)
-        auto_m.pack(fill="x", pady=(12, 0))
+        auto_m.pack(fill="x", pady=(8, 0))
         ttk.Label(
             auto_m,
-            text="Aplica moldura automaticamente nas fotos em grade/margem (nunca em fotos sangradas ou com degradê).",
+            text="Aplica a moldura selecionada acima nas fotos em grade/margem (nunca em fotos sangradas 100% ou com degradê).",
             style="Fraco.TLabel",
             wraplength=280,
             justify="left",
@@ -2027,8 +2194,20 @@ class Aplicativo:
             "Compacto.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        self._controles_moldura = [self.check_moldura, self.combo_moldura, self.botao_cor_moldura,
-                                   self.escala_moldura]
+        self._controles_moldura = [
+            self.check_moldura, self.combo_moldura, self.botao_cor_moldura,
+            self.botao_cor_moldura_sec, self.escala_moldura,
+        ]
+
+    def _escolher_estilo_moldura_rapido(self, estilo):
+        self.moldura_estilo.set(estilo)
+        if estilo in ("royal", "degrade_real") and self.moldura_cor.get().lower() == "#ffffff":
+            self.moldura_cor.set("#d4af37")
+            self.moldura_cor_secundaria.set("#fef08a")
+            self.amostra_moldura.configure(bg="#d4af37")
+            self.amostra_moldura_sec.configure(bg="#fef08a")
+        self.moldura_ativa.set(True)
+        self._alterar_moldura(marcar=True)
 
     def _moldura_selecionada(self):
         lamina = self._lamina()
@@ -2068,9 +2247,12 @@ class Aplicativo:
         self._moldura_alvo = (self.atual, self.espaco_sel) if espaco else None
         self.moldura_ativa.set(bool(dados))
         self.moldura_cor.set(dados.get("cor", "#ffffff"))
-        self.moldura_espessura.set(float(dados.get("espessura_mm", 0.5)))
+        self.moldura_cor_secundaria.set(dados.get("cor_secundaria", "#d4af37"))
+        self.moldura_espessura.set(float(dados.get("espessura_mm", 0.6)))
         self.moldura_estilo.set(dados.get("estilo", "simples"))
         self.amostra_moldura.configure(bg=self.moldura_cor.get())
+        if hasattr(self, "amostra_moldura_sec"):
+            self.amostra_moldura_sec.configure(bg=self.moldura_cor_secundaria.get())
         self.rotulo_espessura_moldura.configure(text="Espessura: %.2g mm" % self.moldura_espessura.get())
         estado = "normal" if espacos else "disabled"
         for controle in self._controles_moldura:
@@ -2097,8 +2279,12 @@ class Aplicativo:
         self.agendar("moldura_timeline", 120, self.desenhar_timeline)
 
     def _moldura_atual_dos_controles(self):
-        return {"cor": self.moldura_cor.get(), "espessura_mm": float(self.moldura_espessura.get()),
-                "estilo": self.moldura_estilo.get()}
+        return {
+            "cor": self.moldura_cor.get(),
+            "cor_secundaria": self.moldura_cor_secundaria.get(),
+            "espessura_mm": float(self.moldura_espessura.get()),
+            "estilo": self.moldura_estilo.get(),
+        }
 
     def _alterar_moldura(self, marcar=True):
         if self._carregando_moldura:
@@ -2108,21 +2294,36 @@ class Aplicativo:
             return
         if marcar:
             self.marcar_historico()
+        sinc_sombra = bool(getattr(self, "moldura_sinc_sombra", None) and self.moldura_sinc_sombra.get())
         for espaco in espacos:
             edicao = espaco.setdefault("edicao", {})
             if self.moldura_ativa.get():
                 edicao["moldura"] = self._moldura_atual_dos_controles()
+                if sinc_sombra and not edicao.get("sombra"):
+                    edicao["sombra"] = self._sombra_atual_dos_controles() if hasattr(self, "sombra_ativa") else sombra_padrao()
+                    edicao["sombra"]["ativa"] = True
             else:
                 edicao.pop("moldura", None)
+                if sinc_sombra and (edicao.get("sombra") or {}).get("sincronizar_moldura", True):
+                    edicao.pop("sombra", None)
         self._atualizar_depois_da_moldura()
 
     def _escolher_cor_moldura(self):
-        cor = tema.escolher_cor_photoshop(self.root, cor_inicial=self.moldura_cor.get(), titulo="Cor da Moldura · Photoshop")
+        cor = tema.escolher_cor_photoshop(self.root, cor_inicial=self.moldura_cor.get(), titulo="Cor Principal da Moldura · Photoshop")
         if cor:
             if not self.moldura_ativa.get():
                 self.moldura_ativa.set(True)
             self.moldura_cor.set(cor)
             self.amostra_moldura.configure(bg=cor)
+            self._alterar_moldura(marcar=True)
+
+    def _escolher_cor_secundaria_moldura(self):
+        cor = tema.escolher_cor_photoshop(self.root, cor_inicial=self.moldura_cor_secundaria.get(), titulo="Cor 2 (Royal / Degradê) · Photoshop")
+        if cor:
+            if not self.moldura_ativa.get():
+                self.moldura_ativa.set(True)
+            self.moldura_cor_secundaria.set(cor)
+            self.amostra_moldura_sec.configure(bg=cor)
             self._alterar_moldura(marcar=True)
 
     def _preset_moldura(self, espessura):
@@ -2137,9 +2338,14 @@ class Aplicativo:
             return
         self.moldura_ativa.set(True)
         dados = self._moldura_atual_dos_controles()
+        sinc_sombra = bool(getattr(self, "moldura_sinc_sombra", None) and self.moldura_sinc_sombra.get())
         self.marcar_historico()
         for espaco in espacos:
-            espaco.setdefault("edicao", {})["moldura"] = dict(dados)
+            ed = espaco.setdefault("edicao", {})
+            ed["moldura"] = dict(dados)
+            if sinc_sombra and not ed.get("sombra"):
+                ed["sombra"] = self._sombra_atual_dos_controles() if hasattr(self, "sombra_ativa") else sombra_padrao()
+                ed["sombra"]["ativa"] = True
         self._atualizar_depois_da_moldura()
 
     def _remover_moldura(self):
@@ -2147,6 +2353,463 @@ class Aplicativo:
             return
         self.moldura_ativa.set(False)
         self._alterar_moldura(marcar=True)
+
+    # ---------------- Sombra Projetada (Sincronizada com Molduras) ----------------
+
+    def _aba_sombra(self, quadro):
+        ttk.Label(quadro, text="Sombra Projetada (Drop Shadow)", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(
+            quadro,
+            text="Projeta sombra realista sob as fotos e molduras, identificando automaticamente bordas e ignorando fotos 100% sangradas ou com degradê.",
+            style="Fraco.TLabel",
+            wraplength=290,
+        ).pack(anchor="w", pady=(2, 6))
+
+        self.sombra_ativa = tk.BooleanVar(value=False)
+        self.sombra_sinc_moldura = tk.BooleanVar(value=True)
+        self.sombra_cor = tk.StringVar(value="#000000")
+        self.sombra_opacidade = tk.DoubleVar(value=50.0)
+        self.sombra_desfoque = tk.DoubleVar(value=2.6)
+        self.sombra_offset_x = tk.DoubleVar(value=1.4)
+        self.sombra_offset_y = tk.DoubleVar(value=1.8)
+        self._carregando_sombra = False
+
+        ttk.Checkbutton(
+            quadro,
+            text="Ativar Sombra Projetada na(s) foto(s)",
+            variable=self.sombra_ativa,
+            command=lambda: self._alterar_sombra(marcar=True),
+        ).pack(anchor="w", pady=(0, 3))
+
+        ttk.Checkbutton(
+            quadro,
+            text="Identificar com as molduras (ignorar fotos sangradas/degradê)",
+            variable=self.sombra_sinc_moldura,
+            command=lambda: self._alterar_sombra(marcar=True),
+        ).pack(anchor="w", pady=(0, 6))
+
+        box_pre = ttk.LabelFrame(quadro, text="Estilos Rápidos de Sombra Projetada", padding=5)
+        box_pre.pack(fill="x", pady=(0, 6))
+        grade_ps = ttk.Frame(box_pre)
+        grade_ps.pack(fill="x")
+        for idx_p, (id_p, nome_p, cfg_p) in enumerate(PRESETS_SOMBRA_PROJETADA):
+            bt_ps = ttk.Button(
+                grade_ps,
+                text=nome_p,
+                style="Compacto.TButton",
+                command=lambda c=cfg_p: self._aplicar_preset_sombra(c),
+            )
+            bt_ps.grid(row=idx_p // 2, column=idx_p % 2, sticky="ew", padx=1, pady=1)
+            grade_ps.columnconfigure(idx_p % 2, weight=1)
+
+        box_aj = ttk.LabelFrame(quadro, text="Ajustes Finos da Sombra", padding=6)
+        box_aj.pack(fill="x", pady=(0, 6))
+
+        linha_cs = ttk.Frame(box_aj)
+        linha_cs.pack(fill="x", pady=(0, 4))
+        ttk.Label(linha_cs, text="Cor da sombra").pack(side="left")
+        self.amostra_sombra = tk.Label(linha_cs, width=4, bg=self.sombra_cor.get(), relief="solid", bd=1)
+        self.amostra_sombra.pack(side="right", padx=(4, 0))
+        ttk.Button(linha_cs, text="Escolher cor...", style="Compacto.TButton", command=self._escolher_cor_sombra).pack(side="right")
+
+        self._rotulos_sombra = {}
+        for chave_s, rot_s, var_s, de_s, ate_s, fmt_s in (
+            ("opacidade", "Opacidade", self.sombra_opacidade, 5.0, 95.0, "%d%%"),
+            ("desfoque", "Suavidade (Blur)", self.sombra_desfoque, 0.2, 8.0, "%.1f mm"),
+            ("ox", "Deslocamento X", self.sombra_offset_x, -5.0, 5.0, "%+.1f mm"),
+            ("oy", "Deslocamento Y", self.sombra_offset_y, -5.0, 5.0, "%+.1f mm"),
+        ):
+            linha_s = ttk.Frame(box_aj)
+            linha_s.pack(fill="x", pady=2)
+            ttk.Label(linha_s, text=rot_s, width=15).pack(side="left")
+            lbl_v = ttk.Label(linha_s, text=fmt_s % var_s.get(), style="Fraco.TLabel", width=8, anchor="e")
+            lbl_v.pack(side="right")
+            self._rotulos_sombra[chave_s] = (lbl_v, var_s, fmt_s)
+
+            def _ao_mover_sombra(_v):
+                self._atualizar_rotulos_sombra()
+                if not self._carregando_sombra:
+                    self.sombra_ativa.set(True)
+                    self._alterar_sombra(marcar=False)
+
+            esc_s = ttk.Scale(linha_s, from_=de_s, to=ate_s, variable=var_s, command=_ao_mover_sombra)
+            esc_s.pack(side="right", fill="x", expand=True, padx=4)
+            esc_s.bind("<ButtonPress-1>", lambda _e: self.marcar_historico())
+            esc_s.bind("<ButtonRelease-1>", lambda _e: self._atualizar_depois_da_moldura())
+
+        linha_bt_s = ttk.Frame(quadro)
+        linha_bt_s.pack(fill="x", pady=(2, 4))
+        ttk.Button(
+            linha_bt_s,
+            text="Aplicar às selecionadas",
+            style="PrimarioCompacto.TButton",
+            command=lambda: (self.sombra_ativa.set(True), self._alterar_sombra(marcar=True)),
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ttk.Button(
+            linha_bt_s,
+            text="Remover sombra",
+            style="Compacto.TButton",
+            command=self._remover_sombra,
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        auto_s = ttk.LabelFrame(quadro, text="Aplicar Sombra Identificando Molduras", padding=6)
+        auto_s.pack(fill="x", pady=(4, 0))
+        ttk.Label(
+            auto_s,
+            text="Aplica automaticamente nas fotos com moldura ou em grade/margem da lâmina ou do álbum:",
+            style="Fraco.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(0, 4))
+        linha_as1 = ttk.Frame(auto_s)
+        linha_as1.pack(fill="x", pady=1)
+        self._botao(
+            linha_as1,
+            "✨ Fotos c/ Moldura (Lâmina)",
+            lambda: self.executar_auto_sombra(apenas_atual=True, apenas_com_moldura=True),
+            "Aplica sombra projetada em todas as fotos que possuem moldura na lâmina atual",
+            "PrimarioCompacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_as1,
+            "✨ Fotos c/ Moldura (Álbum)",
+            lambda: self.executar_auto_sombra(apenas_atual=False, apenas_com_moldura=True),
+            "Aplica sombra projetada em todas as fotos que possuem moldura no álbum inteiro",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        linha_as2 = ttk.Frame(auto_s)
+        linha_as2.pack(fill="x", pady=(3, 0))
+        self._botao(
+            linha_as2,
+            "✨ Todas em Margem (Lâmina)",
+            lambda: self.executar_auto_sombra(apenas_atual=True, apenas_com_moldura=False),
+            "Aplica sombra projetada em todas as fotos em grade/margem da lâmina atual",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_as2,
+            "✨ Todas em Margem (Álbum)",
+            lambda: self.executar_auto_sombra(apenas_atual=False, apenas_com_moldura=False),
+            "Aplica sombra projetada em todas as fotos em grade/margem do álbum inteiro",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+    def _atualizar_rotulos_sombra(self):
+        for _ch, (lbl, var, fmt) in getattr(self, "_rotulos_sombra", {}).items():
+            try:
+                lbl.configure(text=fmt % float(var.get()))
+            except tk.TclError:
+                pass
+
+    def _sombra_atual_dos_controles(self):
+        return {
+            "ativa": bool(self.sombra_ativa.get()),
+            "cor": self.sombra_cor.get() or "#000000",
+            "opacidade": int(round(float(self.sombra_opacidade.get()))),
+            "desfoque_mm": round(float(self.sombra_desfoque.get()), 2),
+            "offset_x_mm": round(float(self.sombra_offset_x.get()), 2),
+            "offset_y_mm": round(float(self.sombra_offset_y.get()), 2),
+            "sincronizar_moldura": bool(self.sombra_sinc_moldura.get()),
+        }
+
+    def _atualizar_sombra_ui(self):
+        if not hasattr(self, "sombra_ativa"):
+            return
+        espacos = self._espacos_moldura_alvo()
+        espaco = self._moldura_selecionada() or (espacos[0] if espacos else None)
+        dados = ((espaco.get("edicao") or {}).get("sombra") or {}) if espaco else {}
+        self._carregando_sombra = True
+        self.sombra_ativa.set(bool(dados and dados.get("ativa", True)))
+        self.sombra_sinc_moldura.set(bool(dados.get("sincronizar_moldura", True)))
+        self.sombra_cor.set(dados.get("cor", "#000000"))
+        self.sombra_opacidade.set(float(dados.get("opacidade", 50.0)))
+        self.sombra_desfoque.set(float(dados.get("desfoque_mm", 2.6)))
+        self.sombra_offset_x.set(float(dados.get("offset_x_mm", 1.4)))
+        self.sombra_offset_y.set(float(dados.get("offset_y_mm", 1.8)))
+        if hasattr(self, "amostra_sombra"):
+            self.amostra_sombra.configure(bg=self.sombra_cor.get())
+        self._atualizar_rotulos_sombra()
+        self._carregando_sombra = False
+
+    def _aplicar_preset_sombra(self, cfg_p):
+        self._carregando_sombra = True
+        self.sombra_ativa.set(True)
+        self.sombra_cor.set(cfg_p.get("cor", "#000000"))
+        self.sombra_opacidade.set(float(cfg_p.get("opacidade", 50)))
+        self.sombra_desfoque.set(float(cfg_p.get("desfoque_mm", 2.6)))
+        self.sombra_offset_x.set(float(cfg_p.get("offset_x_mm", 1.4)))
+        self.sombra_offset_y.set(float(cfg_p.get("offset_y_mm", 1.8)))
+        if hasattr(self, "amostra_sombra"):
+            self.amostra_sombra.configure(bg=self.sombra_cor.get())
+        self._atualizar_rotulos_sombra()
+        self._carregando_sombra = False
+        self._alterar_sombra(marcar=True)
+
+    def _escolher_cor_sombra(self):
+        cor = tema.escolher_cor_photoshop(self.root, cor_inicial=self.sombra_cor.get(), titulo="Cor da Sombra Projetada · Photoshop")
+        if cor:
+            self.sombra_ativa.set(True)
+            self.sombra_cor.set(cor)
+            self.amostra_sombra.configure(bg=cor)
+            self._alterar_sombra(marcar=True)
+
+    def _alterar_sombra(self, marcar=True):
+        if getattr(self, "_carregando_sombra", False):
+            return
+        espacos = self._espacos_moldura_alvo()
+        if not espacos:
+            return
+        if marcar:
+            self.marcar_historico()
+        dados_s = self._sombra_atual_dos_controles()
+        for espaco in espacos:
+            ed = espaco.setdefault("edicao", {})
+            if self.sombra_ativa.get():
+                ed["sombra"] = dict(dados_s)
+            else:
+                ed.pop("sombra", None)
+        self._atualizar_depois_da_moldura()
+
+    def _remover_sombra(self):
+        if not self._espacos_moldura_alvo():
+            return
+        self.sombra_ativa.set(False)
+        self._alterar_sombra(marcar=True)
+
+    def executar_auto_sombra(self, apenas_atual=True, apenas_com_moldura=False):
+        laminas = [self._lamina()] if apenas_atual else (self.projeto.get("laminas") or [])
+        laminas = [l for l in laminas if isinstance(l, dict)]
+        if not laminas:
+            return
+        self.marcar_historico()
+        cfg_s = self._sombra_atual_dos_controles() if hasattr(self, "sombra_ativa") else sombra_padrao()
+        cfg_s["ativa"] = True
+        diagramar.aplicar_sombra_automatica(laminas, cfg_sombra=cfg_s, apenas_com_moldura=apenas_com_moldura)
+        self._atualizar_sombra_ui()
+        self._atualizar_depois_da_moldura()
+        self.registrar("Sombra projetada aplicada automaticamente.")
+
+    # ---------------- Temas da Lâmina (Natal, Páscoa, Casamento, Formatura...) ----------------
+
+    def _aba_temas(self, quadro):
+        ttk.Label(quadro, text="Temas Completos de Lâmina", style="Titulo.TLabel").pack(anchor="w")
+        ttk.Label(
+            quadro,
+            text="Estiliza uma lâmina inteira ou várias lâminas selecionadas com Fundo (editável na pasta temp), Moldura + Sombra e Edição de Foto.",
+            style="Fraco.TLabel",
+            wraplength=290,
+        ).pack(anchor="w", pady=(2, 6))
+
+        self.tema_selecionado_var = tk.StringVar(value="colacao_grau")
+        self.tema_aplicar_fundo = tk.BooleanVar(value=True)
+        self.tema_aplicar_moldura = tk.BooleanVar(value=True)
+        self.tema_aplicar_sombra = tk.BooleanVar(value=True)
+        self.tema_aplicar_edicao = tk.BooleanVar(value=True)
+        self.tema_intervalo_laminas = tk.StringVar(value="")
+
+        box_op = ttk.LabelFrame(quadro, text="1. O que aplicar do Tema", padding=6)
+        box_op.pack(fill="x", pady=(0, 6))
+        ttk.Checkbutton(
+            box_op,
+            text="🖼 Fundo Temático (salvo em pasta temp para editar)",
+            variable=self.tema_aplicar_fundo,
+        ).pack(anchor="w", pady=1)
+        ttk.Checkbutton(
+            box_op,
+            text="▭ Moldura Especial do Tema (Royal / Degradê / Galeria)",
+            variable=self.tema_aplicar_moldura,
+        ).pack(anchor="w", pady=1)
+        ttk.Checkbutton(
+            box_op,
+            text="❒ Sombra Projetada Coordenada",
+            variable=self.tema_aplicar_sombra,
+        ).pack(anchor="w", pady=1)
+        ttk.Checkbutton(
+            box_op,
+            text="✨ Edição e Tom das Fotos (Color Grading do Tema)",
+            variable=self.tema_aplicar_edicao,
+        ).pack(anchor="w", pady=1)
+
+        box_cat = ttk.LabelFrame(quadro, text="2. Escolha o Tema (Ocasião)", padding=6)
+        box_cat.pack(fill="x", pady=(0, 6))
+        grade_t = ttk.Frame(box_cat)
+        grade_t.pack(fill="x")
+        for idx_t, t_info in enumerate(CATALOGO_TEMAS):
+            rb_t = ttk.Radiobutton(
+                grade_t,
+                text=t_info["nome"],
+                value=t_info["id"],
+                variable=self.tema_selecionado_var,
+                style="Filtro.TRadiobutton",
+                command=self._atualizar_temas_ui,
+            )
+            rb_t.grid(row=idx_t // 2, column=idx_t % 2, sticky="ew", padx=1, pady=1)
+            tema.dica(rb_t, t_info["descricao"])
+            grade_t.columnconfigure(idx_t % 2, weight=1)
+
+        self.rotulo_resumo_tema = ttk.Label(
+            box_cat,
+            text="",
+            style="Fraco.TLabel",
+            wraplength=280,
+            justify="left",
+        )
+        self.rotulo_resumo_tema.pack(anchor="w", pady=(5, 2))
+
+        box_alvo = ttk.LabelFrame(quadro, text="3. Onde Aplicar (Atual ou Seleção de Várias)", padding=6)
+        box_alvo.pack(fill="x", pady=(0, 6))
+
+        self._botao(
+            box_alvo,
+            "🎨 Aplicar Tema na Lâmina Atual",
+            lambda: self.executar_tema_laminas(modo="atual"),
+            "Aplica os itens marcados do tema imediatamente na lâmina aberta",
+            "PrimarioCompacto.TButton",
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Label(
+            box_alvo,
+            text="Seleção de várias lâminas (ex.: 1-4, 6 ou selecione na Linha do Tempo):",
+            style="Fraco.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(2, 2))
+
+        linha_sel_t = ttk.Frame(box_alvo)
+        linha_sel_t.pack(fill="x", pady=(0, 4))
+        self.entry_intervalo_tema = ttk.Entry(linha_sel_t, textvariable=self.tema_intervalo_laminas, width=14)
+        self.entry_intervalo_tema.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tema.dica(self.entry_intervalo_tema, "Digite números ou intervalos de lâminas (ex.: 1-3, 5, 8). Vazio = usa as lâminas selecionadas na Linha do Tempo.")
+        self._botao(
+            linha_sel_t,
+            "Usar Timeline",
+            self._preencher_intervalo_da_timeline,
+            "Preenche com as lâminas atualmente selecionadas na Linha do Tempo",
+            "Compacto.TButton",
+        ).pack(side="right")
+
+        linha_bt_t = ttk.Frame(box_alvo)
+        linha_bt_t.pack(fill="x", pady=1)
+        self._botao(
+            linha_bt_t,
+            "✨ Nas Lâminas Selecionadas",
+            lambda: self.executar_tema_laminas(modo="selecao"),
+            "Aplica o tema em todas as lâminas do intervalo digitado ou selecionadas na Linha do Tempo",
+            "PrimarioCompacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_bt_t,
+            "✨ No Álbum Inteiro",
+            lambda: self.executar_tema_laminas(modo="todas"),
+            "Aplica o tema em todas as lâminas do álbum",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        self._botao(
+            box_alvo,
+            "↺ Remover Tema / Restaurar Padrão nas Selecionadas",
+            self.remover_tema_laminas,
+            "Remove fundo de tema, moldura, sombra e edição de tema das lâminas selecionadas",
+            "Compacto.TButton",
+        ).pack(fill="x", pady=(6, 0))
+
+        self._atualizar_temas_ui()
+
+    def _preencher_intervalo_da_timeline(self):
+        sel = sorted(getattr(self, "laminas_sel", set()) or ({self.atual} if isinstance(self.atual, int) else set()))
+        nums = [str(i + 1) for i in sel if isinstance(i, int) and i >= 0]
+        self.tema_intervalo_laminas.set(", ".join(nums) if nums else "1")
+
+    def _resolver_laminas_alvo_tema(self, modo="atual"):
+        todas = self.projeto.get("laminas") or []
+        if not todas:
+            return []
+        if modo == "todas":
+            return list(todas)
+        if modo == "atual":
+            lam = self._lamina()
+            return [lam] if lam is not None else []
+        texto = (self.tema_intervalo_laminas.get() or "").strip()
+        indices = set()
+        if texto:
+            for parte in texto.replace(";", ",").split(","):
+                parte = parte.strip()
+                if not parte:
+                    continue
+                if "-" in parte:
+                    p0, p1 = parte.split("-", 1)
+                    if p0.strip().isdigit() and p1.strip().isdigit():
+                        a, b = sorted((int(p0.strip()), int(p1.strip())))
+                        for n in range(a, b + 1):
+                            if 1 <= n <= len(todas):
+                                indices.add(n - 1)
+                elif parte.isdigit():
+                    n = int(parte)
+                    if 1 <= n <= len(todas):
+                        indices.add(n - 1)
+        if not indices:
+            sel_tl = getattr(self, "laminas_sel", set())
+            for i in sel_tl:
+                if isinstance(i, int) and 0 <= i < len(todas):
+                    indices.add(i)
+        if not indices and isinstance(self.atual, int) and 0 <= self.atual < len(todas):
+            indices.add(self.atual)
+        return [todas[i] for i in sorted(indices)]
+
+    def _atualizar_temas_ui(self):
+        if not hasattr(self, "tema_selecionado_var"):
+            return
+        id_t = self.tema_selecionado_var.get()
+        t_cfg = MAPA_TEMAS.get(id_t) or CATALOGO_TEMAS[0]
+        if hasattr(self, "rotulo_resumo_tema"):
+            mold_nome = NOMES_ESTILOS_MOLDURA.get((t_cfg.get("moldura") or {}).get("estilo", "royal"), "Royal")
+            self.rotulo_resumo_tema.configure(
+                text="%s\n• Moldura padrão: %s · Fundo editável em Pasta Temp" % (t_cfg["descricao"], mold_nome)
+            )
+
+    def executar_tema_laminas(self, modo="atual"):
+        laminas_alvo = self._resolver_laminas_alvo_tema(modo=modo)
+        if not laminas_alvo:
+            return
+        id_t = self.tema_selecionado_var.get() or "colacao_grau"
+        t_cfg = MAPA_TEMAS.get(id_t) or CATALOGO_TEMAS[0]
+        self.marcar_historico()
+        qtd = diagramar.aplicar_tema_em_laminas(
+            laminas_alvo,
+            id_t,
+            info=self.info,
+            aplicar_fundo=bool(self.tema_aplicar_fundo.get()),
+            aplicar_moldura=bool(self.tema_aplicar_moldura.get()),
+            aplicar_sombra=bool(self.tema_aplicar_sombra.get()),
+            aplicar_edicao=bool(self.tema_aplicar_edicao.get()),
+        )
+        self._atualizar_fundo_ui()
+        self._atualizar_moldura_ui()
+        self._atualizar_sombra_ui()
+        self.atualizar_fundos_gerados(manter_seed=True)
+        self._atualizar_depois_da_moldura()
+        self.registrar("Tema '%s' aplicado em %d lâmina(s)." % (t_cfg["nome"], qtd))
+
+    def remover_tema_laminas(self):
+        laminas_alvo = self._resolver_laminas_alvo_tema(modo="selecao")
+        if not laminas_alvo:
+            return
+        self.marcar_historico()
+        for lam in laminas_alvo:
+            lam["fundo"] = "#ffffff"
+            lam.pop("fundo_imagem", None)
+            lam.pop("tema_aplicado", None)
+            for esp in lam.get("espacos") or []:
+                ed = esp.get("edicao")
+                if isinstance(ed, dict):
+                    ed.pop("moldura", None)
+                    ed.pop("sombra", None)
+                    for ch_ed in ("brilho", "contraste", "saturacao", "matiz", "colorir_cor", "colorir_int"):
+                        ed.pop(ch_ed, None)
+        self._atualizar_fundo_ui()
+        self._atualizar_moldura_ui()
+        self._atualizar_sombra_ui()
+        self._atualizar_depois_da_moldura()
+        self.registrar("Tema removido das lâminas selecionadas.")
 
     # ---------------- Degradê de Opacidade (Estilo Photoshop) ----------------
 
@@ -7987,6 +8650,7 @@ class Aplicativo:
         self._atualizar_numeros()
         self._atualizar_enquadramento_inline()
         self._atualizar_moldura_ui()
+        self._atualizar_sombra_ui()
         self._atualizar_degrade_ui()
 
     def _desenhar_remendo(self):
@@ -10099,10 +10763,10 @@ class Aplicativo:
     def _construir_itens_painel_fotos(self):
         """
         Monta a sequência visual da tira de fotos separando cada pasta com um divisor clicável
-        (para nunca misturar pastas carregadas).
+        (para nunca misturar pastas carregadas). Suporta layout horizontal (embaixo) e vertical (à direita/esquerda).
         """
-        cw, _ch, _lado = self._celula
-        larg_div = 54
+        cw, ch, _lado = self._celula
+        vertical = self._fotos_vertical()
         pastas_projeto = proj.listar_pastas_projeto(self.projeto)
         mostrar_divisores = len(pastas_projeto) >= 1 and self.pasta_filtro.get() == "todas"
 
@@ -10113,6 +10777,59 @@ class Aplicativo:
             grupos.setdefault(ch_p, (nome_p, []))[1].append((idx_f, foto, usos))
 
         itens = []
+        if vertical:
+            c = self.canvas_fotos
+            larg_painel = c.winfo_width() if c.winfo_ismapped() and c.winfo_width() > 40 else max(180, int(self.arranjo.get("largura_fotos", 290)))
+            colunas = max(1, (larg_painel - 8) // max(1, cw))
+            alt_div = 30
+            y_cursor = 4
+            for ch_p, (nome_p, fotos_p) in grupos.items():
+                recolhida = ch_p in self.pastas_recolhidas
+                usadas_p = sum(1 for _i, _f, u in fotos_p if u)
+                if mostrar_divisores:
+                    itens.append({
+                        "tipo": "pasta",
+                        "pasta": ch_p,
+                        "nome": nome_p,
+                        "qtd": len(fotos_p),
+                        "usadas": usadas_p,
+                        "recolhida": recolhida,
+                        "x0": 4,
+                        "x1": max(cw + 4, larg_painel - 4),
+                        "y0": y_cursor,
+                        "y1": y_cursor + alt_div,
+                    })
+                    y_cursor += alt_div + 4
+                if not recolhida:
+                    col = 0
+                    for idx_f, foto, usos in fotos_p:
+                        ix0 = 4 + col * cw
+                        iy0 = y_cursor
+                        itens.append({
+                            "tipo": "foto",
+                            "indice": idx_f,
+                            "foto": foto,
+                            "usos": usos,
+                            "pasta": ch_p,
+                            "nome_pasta": nome_p,
+                            "x0": ix0,
+                            "x1": ix0 + cw,
+                            "y0": iy0,
+                            "y1": iy0 + ch,
+                        })
+                        col += 1
+                        if col >= colunas:
+                            col = 0
+                            y_cursor += ch
+                    if col > 0:
+                        y_cursor += ch
+            self._itens_painel_fotos = itens
+            self._xs_painel_fotos = []
+            self._largura_total_fotos = max(1, larg_painel)
+            self._altura_total_fotos = max(1, y_cursor + 8)
+            return
+
+        larg_div = 54
         x_cursor = 0
         for ch_p, (nome_p, fotos_p) in grupos.items():
             recolhida = ch_p in self.pastas_recolhidas
@@ -10127,6 +10844,8 @@ class Aplicativo:
                     "recolhida": recolhida,
                     "x0": x_cursor,
                     "x1": x_cursor + larg_div,
+                    "y0": 0,
+                    "y1": ch,
                 })
                 x_cursor += larg_div
             if not recolhida:
@@ -10140,11 +10859,14 @@ class Aplicativo:
                         "nome_pasta": nome_p,
                         "x0": x_cursor,
                         "x1": x_cursor + cw,
+                        "y0": 0,
+                        "y1": ch,
                     })
                     x_cursor += cw
         self._itens_painel_fotos = itens
         self._xs_painel_fotos = [it["x0"] for it in itens]
         self._largura_total_fotos = max(1, x_cursor)
+        self._altura_total_fotos = max(1, ch)
 
     def atualizar_fotos(self):
         self._atualizar_combo_pastas()
@@ -10165,20 +10887,36 @@ class Aplicativo:
         self._desenhar_fotos_visiveis()
 
     def _medidas_fotos(self):
-        """(largura da célula, altura, lado da miniatura): as miniaturas crescem com o painel."""
+        """(largura da célula, altura, lado da miniatura): adapta-se ao painel embaixo ou à direita."""
         c = self.canvas_fotos
+        if self._fotos_vertical():
+            largura = c.winfo_width() if c.winfo_ismapped() and c.winfo_width() > 40 else max(180, int(self.arranjo.get("largura_fotos", 290)))
+            colunas = 2 if largura >= 210 else 1
+            cel_w = max(86, (largura - 12) // colunas)
+            lado = max(56, min(140, cel_w - 14))
+            cel_h = lado + 24
+            return cel_w, cel_h, lado
         altura = c.winfo_height() if c.winfo_ismapped() and c.winfo_height() > 10 else int(c.cget("height"))
         lado = max(40, min(LADO_FOTO_MAXIMO, altura - 12))
         return lado + 16, altura, lado
 
     def _area_fotos(self):
-        largura = getattr(self, "_largura_total_fotos", max(1, len(getattr(self, "_lista_fotos", [])) * self._celula[0]))
-        area = "0 0 %d %d" % (largura, self._celula[1])
+        if self._fotos_vertical():
+            largura = getattr(self, "_largura_total_fotos", 240)
+            altura = getattr(self, "_altura_total_fotos", 240)
+            area = "0 0 %d %d" % (largura, altura)
+        else:
+            largura = getattr(self, "_largura_total_fotos", max(1, len(getattr(self, "_lista_fotos", [])) * self._celula[0]))
+            area = "0 0 %d %d" % (largura, self._celula[1])
         if self.canvas_fotos.cget("scrollregion") != area:
             self.canvas_fotos.configure(scrollregion=area)
 
     def _mudou_tamanho_fotos(self, evento):
-        if evento.height != self._celula[1]:
+        if self._fotos_vertical():
+            self._celula = self._medidas_fotos()
+            self._construir_itens_painel_fotos()
+            self._area_fotos()
+        elif evento.height != self._celula[1]:
             self._celula = self._medidas_fotos()
             self._construir_itens_painel_fotos()
             self._area_fotos()
@@ -10189,7 +10927,28 @@ class Aplicativo:
         return [(f, contagem.get(normalizar_caminho(f["caminho"]), 0)) for f in self.projeto["fotos"]]
 
     def _rolar_fotos(self, *args):
+        if self._fotos_vertical():
+            self.canvas_fotos.yview(*args)
+        else:
+            self.canvas_fotos.xview(*args)
+
+    def _rolar_fotos_h(self, *args):
         self.canvas_fotos.xview(*args)
+        self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
+
+    def _rolar_fotos_v(self, *args):
+        self.canvas_fotos.yview(*args)
+        self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
+
+    def _fotos_roda(self, evento):
+        if not evento.delta:
+            return
+        passo = -int(evento.delta / 40)
+        if self._fotos_vertical():
+            self.canvas_fotos.yview_scroll(passo, "units")
+        else:
+            self.canvas_fotos.xview_scroll(passo, "units")
+        self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
 
     def _miniatura_pil(self, caminho, lado, usada=False):
         """Miniatura do painel de fotos; a já usada no álbum fica meio cinza e meio transparente."""
@@ -10210,8 +10969,6 @@ class Aplicativo:
             return guardada
         if norm not in self.info:
             return None
-        # Se a miniatura base já estiver em RAM no cache do módulo analise, gera rápido;
-        # caso contrário, agenda em segundo plano via Pintor para não travar a rolagem em álbuns grandes
         ja_em_ram = False
         try:
             ja_em_ram = analise._memoria_miniatura.pegar((norm, analise.LADO_MINIATURA)) is not None
@@ -10261,44 +11018,70 @@ class Aplicativo:
         itens = getattr(self, "_itens_painel_fotos", [])
         xs = getattr(self, "_xs_painel_fotos", [])
         cw, ch, lado = self._celula
+        vertical = self._fotos_vertical()
         if not itens:
-            c.create_text(12, ch // 2, anchor="w", fill=tema.TEXTO_FRACO,
-                          text="Sem fotos aqui. Arraste fotos ou várias pastas do Explorer (elas não se misturam).")
+            c.create_text(12, max(24, ch // 2), anchor="w", fill=tema.TEXTO_FRACO,
+                          text="Sem fotos aqui. Arraste fotos ou pastas do Explorer.",
+                          width=max(160, c.winfo_width() - 24) if vertical else 0)
             return
-        x0 = c.canvasx(0)
-        larg_visivel = max(200, c.winfo_width())
-        x1 = x0 + larg_visivel
         letras = max(10, (cw - 6) // 6)
-        # Virtualização via busca binária O(log N): percorre apenas a janela visível + overscan de 3 células
-        margem_overscan = max(cw * 3, 180)
-        idx_ini = max(0, bisect.bisect_right(xs, x0 - margem_overscan) - 1) if xs else 0
-        idx_fim = min(len(itens), bisect.bisect_right(xs, x1 + margem_overscan) + 1) if xs else len(itens)
-        for idx_it in range(idx_ini, idx_fim):
+        if vertical:
+            y0_vis = c.canvasy(0)
+            alt_vis = max(200, c.winfo_height())
+            y1_vis = y0_vis + alt_vis
+            margem_overscan = max(ch * 2, 160)
+            indices_iter = range(len(itens))
+        else:
+            x0 = c.canvasx(0)
+            larg_visivel = max(200, c.winfo_width())
+            x1 = x0 + larg_visivel
+            margem_overscan = max(cw * 3, 180)
+            idx_ini = max(0, bisect.bisect_right(xs, x0 - margem_overscan) - 1) if xs else 0
+            idx_fim = min(len(itens), bisect.bisect_right(xs, x1 + margem_overscan) + 1) if xs else len(itens)
+            indices_iter = range(idx_ini, idx_fim)
+
+        for idx_it in indices_iter:
             item = itens[idx_it]
-            if item["x1"] < x0 - margem_overscan or item["x0"] > x1 + margem_overscan:
-                continue
+            iy0 = item.get("y0", 0)
+            iy1 = item.get("y1", ch)
+            if vertical:
+                if iy1 < y0_vis - margem_overscan or iy0 > y1_vis + margem_overscan:
+                    continue
+            else:
+                if item["x1"] < x0 - margem_overscan or item["x0"] > x1 + margem_overscan:
+                    continue
             if item["tipo"] == "pasta":
                 ix0, ix1 = item["x0"], item["x1"]
-                cx = (ix0 + ix1) // 2
                 recolhida = item["recolhida"]
-                c.create_rectangle(ix0 + 3, 4, ix1 - 3, ch - 4,
-                                   fill=tema.PAINEL_2 if not recolhida else tema.DESTAQUE_ESCURO,
-                                   outline=tema.DESTAQUE if not recolhida else tema.BORDA, width=1)
                 seta = "▶" if recolhida else "▼"
-                c.create_text(cx, 15, text="📁 %s" % seta, fill=tema.ALERTA, font=tema.FONTE_FORTE)
-                nome_p = item["nome"]
-                curto_p = nome_p if len(nome_p) <= 12 else nome_p[:10] + "…"
-                c.create_text(cx, ch // 2 - 2, text=curto_p, fill=tema.TEXTO, font=tema.FONTE_PEQUENA, width=ix1 - ix0 - 8)
                 usadas_p = item.get("usadas", 0)
-                c.create_text(cx, ch - 14, text="%d/%d" % (usadas_p, item["qtd"]), fill=tema.VERDE if usadas_p == item["qtd"] else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+                if vertical:
+                    c.create_rectangle(ix0, iy0, ix1, iy1,
+                                       fill=tema.PAINEL_2 if not recolhida else tema.DESTAQUE_ESCURO,
+                                       outline=tema.DESTAQUE if not recolhida else tema.BORDA, width=1)
+                    ym = (iy0 + iy1) // 2
+                    c.create_text(ix0 + 8, ym, anchor="w", text="📁 %s %s" % (seta, item["nome"]),
+                                  fill=tema.TEXTO, font=tema.FONTE_FORTE)
+                    c.create_text(ix1 - 8, ym, anchor="e", text="%d/%d" % (usadas_p, item["qtd"]),
+                                  fill=tema.VERDE if usadas_p == item["qtd"] else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
+                else:
+                    cx = (ix0 + ix1) // 2
+                    c.create_rectangle(ix0 + 3, 4, ix1 - 3, ch - 4,
+                                       fill=tema.PAINEL_2 if not recolhida else tema.DESTAQUE_ESCURO,
+                                       outline=tema.DESTAQUE if not recolhida else tema.BORDA, width=1)
+                    c.create_text(cx, 15, text="📁 %s" % seta, fill=tema.ALERTA, font=tema.FONTE_FORTE)
+                    nome_p = item["nome"]
+                    curto_p = nome_p if len(nome_p) <= 12 else nome_p[:10] + "…"
+                    c.create_text(cx, ch // 2 - 2, text=curto_p, fill=tema.TEXTO, font=tema.FONTE_PEQUENA, width=ix1 - ix0 - 8)
+                    c.create_text(cx, ch - 14, text="%d/%d" % (usadas_p, item["qtd"]), fill=tema.VERDE if usadas_p == item["qtd"] else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
                 continue
 
             foto, usos = item["foto"], item["usos"]
             cx = (item["x0"] + item["x1"]) // 2
-            cy = ch // 2 - 4
+            cy = iy0 + ch // 2 - 4
             selecionada = normalizar_caminho(foto["caminho"]) in self.fotos_sel
             if selecionada:
-                c.create_rectangle(cx - cw // 2 + 3, 2, cx + cw // 2 - 3, ch - 2, fill=tema.DESTAQUE_ESCURO, outline="")
+                c.create_rectangle(cx - cw // 2 + 3, iy0 + 2, cx + cw // 2 - 3, iy1 - 2, fill=tema.DESTAQUE_ESCURO, outline="")
             imagem = self._miniatura_tk(foto["caminho"], usada=bool(usos))
             if imagem is not None:
                 c.create_image(cx, cy, image=imagem)
@@ -10312,16 +11095,16 @@ class Aplicativo:
                 c.create_text(cx, cy, text="...", fill=tema.TEXTO_FRACO)
             direita = cx + lado // 2
             if usos:
-                c.create_oval(direita - 16, 4, direita + 2, 22, fill=tema.VERDE, outline="")
-                c.create_text(direita - 7, 13, text=str(usos), fill="#0b2a1c", font=tema.FONTE_FORTE)
+                c.create_oval(direita - 16, iy0 + 4, direita + 2, iy0 + 22, fill=tema.VERDE, outline="")
+                c.create_text(direita - 7, iy0 + 13, text=str(usos), fill="#0b2a1c", font=tema.FONTE_FORTE)
             if foto.get("destaque"):
-                c.create_text(cx - lado // 2 + 6, 12, text="★", fill=tema.ALERTA, font=("Segoe UI", 12))
+                c.create_text(cx - lado // 2 + 6, iy0 + 12, text="★", fill=tema.ALERTA, font=("Segoe UI", 12))
             if foto.get("grupo_ordem"):
                 num_g = max(1, int(foto.get("grupo_ordem") or 1))
                 gx0 = cx - lado // 2 + 2
-                gy0 = 4
+                gy0 = iy0 + 4
                 gx1 = gx0 + (22 if num_g < 10 else 28)
-                gy1 = 18
+                gy1 = iy0 + 18
                 c.create_rectangle(gx0, gy0, gx1, gy1, fill="#1e3a8a", outline="#60a5fa", width=1)
                 c.create_text((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0, text="G%d" % num_g, fill="#ffffff", font=("Segoe UI", 7, "bold"))
             # Selo com a quantidade de rostos / classificação Individual vs. Grupo (ex.: 👤 1 ou 👥 5)
@@ -10334,7 +11117,7 @@ class Aplicativo:
                 icone_r = "👥" if em_g else "👤"
                 etq_r = ("%d*" % qtd_r) if tp_f in ("individual", "grupo") else ("%d" % qtd_r)
                 bx0 = cx - lado // 2 + 2
-                by1 = ch - 18
+                by1 = iy1 - 18
                 by0 = by1 - 14
                 bx1 = bx0 + (26 if len(etq_r) <= 2 else 32)
                 c.create_rectangle(
@@ -10354,14 +11137,20 @@ class Aplicativo:
                     font=("Segoe UI", 7, "bold"),
                 )
             nome = Path(foto["caminho"]).name
-            c.create_text(cx, ch - 9, text=nome if len(nome) <= letras else nome[:letras - 2] + "…",
+            c.create_text(cx, iy1 - 9, text=nome if len(nome) <= letras else nome[:letras - 2] + "…",
                           fill=tema.TEXTO if selecionada else tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA)
 
     def _item_painel_fotos_em(self, evento):
         x = self.canvas_fotos.canvasx(evento.x)
+        y = self.canvas_fotos.canvasy(evento.y)
         itens = getattr(self, "_itens_painel_fotos", [])
         xs = getattr(self, "_xs_painel_fotos", [])
         if not itens:
+            return None
+        if self._fotos_vertical():
+            for item in itens:
+                if item["x0"] <= x < item["x1"] and item.get("y0", 0) <= y < item.get("y1", 999999):
+                    return item
             return None
         if xs:
             idx = bisect.bisect_right(xs, x) - 1
@@ -11706,8 +12495,14 @@ class Aplicativo:
             cfg["espessura_auto_molduras_mm"] = float(self.moldura_espessura.get() or 0.5)
         if hasattr(self, "moldura_estilo"):
             cfg["estilo_auto_molduras"] = str(self.moldura_estilo.get() or "simples")
+        if hasattr(self, "moldura_cor_secundaria"):
+            cfg["cor_secundaria_moldura"] = str(self.moldura_cor_secundaria or "#111111")
+        if hasattr(self, "moldura_sinc_sombra") and self.moldura_sinc_sombra.get():
+            cfg["auto_sombra_molduras"] = True
+            cfg["cfg_sombra_molduras"] = self._ler_cfg_sombra_ui()
         diagramar.aplicar_molduras_automaticas(laminas, self.info, cfg)
         self._atualizar_moldura_ui()
+        self._atualizar_sombra_ui()
         self.atualizar_tudo()
         self.registrar(
             "Função 3 (Molduras Automáticas) aplicada %s."

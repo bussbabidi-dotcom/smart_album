@@ -1139,6 +1139,16 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
             pronta = foto_no_espaco(foto, ed, rosto_de(info, foto), (w, h), cor, rapido, dobra_x=dobra_x)
             aplicar_moldura(pronta, ed.get("moldura"), px_por_mm)
             mascara = gerar_mascara_degrade((w, h), ed.get("degrade"), ed.get("opacidade", 100))
+            sombra_cfg = ed.get("sombra")
+            if sombra_cfg and sombra_cfg.get("ativa", True) and not tem_degrade_ativo(ed.get("degrade")):
+                eh_sangrada_100 = (
+                    float(espaco.get("x", 0.0)) <= 0.008
+                    and float(espaco.get("y", 0.0)) <= 0.008
+                    and float(espaco.get("w", 0.0)) >= 0.984
+                    and float(espaco.get("h", 0.0)) >= 0.984
+                )
+                if not (sombra_cfg.get("sincronizar_moldura", True) and eh_sangrada_100):
+                    aplicar_sombra_projetada(base, (x, y, w, h), sombra_cfg, ed.get("moldura"), px_por_mm=px_por_mm, rapido=rapido)
             if mascara is not None:
                 base.paste(pronta, (x, y), mascara)
             else:
@@ -1152,40 +1162,475 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
     return base if fundo is None else base.convert("RGB")
 
 
+ESTILOS_MOLDURA = (
+    ("simples", "Simples Clássica"),
+    ("dupla", "Dupla Clássica"),
+    ("pontilhada", "Pontilhada Geométrica"),
+    ("royal", "Royal Imperial (Cantos Nobres)"),
+    ("degrade", "Degradê Linear Bicolor"),
+    ("degrade_real", "Degradê Metálico Ouro/Prata"),
+    ("cantoneira", "Cantoneira Clássica em L"),
+    ("chanfrada", "Chanfrada 3D (Bisel)"),
+    ("passepartout", "Passe-partout Galeria"),
+    ("tripla", "Filete Triplo Editorial"),
+    ("cruzada", "Cruzada Vintage nos Cantos"),
+    ("halo", "Halo Suave Interno"),
+)
+
+NOMES_ESTILOS_MOLDURA = dict(ESTILOS_MOLDURA)
+
+PRESETS_SOMBRA_PROJETADA = (
+    ("suave", "Suave Editorial", {"opacidade": 38, "desfoque_mm": 1.8, "offset_x_mm": 0.8, "offset_y_mm": 1.1, "cor": "#000000"}),
+    ("flutuante", "Flutuante 3D", {"opacidade": 50, "desfoque_mm": 2.6, "offset_x_mm": 1.4, "offset_y_mm": 1.8, "cor": "#000000"}),
+    ("profunda", "Profunda Estúdio", {"opacidade": 68, "desfoque_mm": 3.8, "offset_x_mm": 2.0, "offset_y_mm": 2.6, "cor": "#000000"}),
+    ("deslocada", "Deslocada Clássica", {"opacidade": 55, "desfoque_mm": 1.0, "offset_x_mm": 2.2, "offset_y_mm": 2.2, "cor": "#111827"}),
+    ("halo_escuro", "Halo Difuso (Central)", {"opacidade": 52, "desfoque_mm": 3.2, "offset_x_mm": 0.0, "offset_y_mm": 0.0, "cor": "#000000"}),
+)
+
+
+def sombra_padrao():
+    return {
+        "ativa": True,
+        "preset": "flutuante",
+        "cor": "#000000",
+        "opacidade": 50,
+        "desfoque_mm": 2.6,
+        "offset_x_mm": 1.4,
+        "offset_y_mm": 1.8,
+        "sincronizar_moldura": True,
+    }
+
+
+def aplicar_sombra_projetada(base, caixa_foto, sombra, moldura=None, px_por_mm=None, rapido=False):
+    """
+    Desenha sombra projetada realista (Gaussian blur RGBA) na lâmina `base`
+    logo abaixo da foto `(x, y, w, h)`, identificando e acompanhando as molduras.
+    """
+    if not sombra or not sombra.get("ativa", True):
+        return base
+    x, y, w, h = caixa_foto
+    if w <= 2 or h <= 2:
+        return base
+    opacidade = max(0, min(100, int(round(float(sombra.get("opacidade", 50))))))
+    if opacidade <= 0:
+        return base
+
+    escala_mm = float(px_por_mm) if (px_por_mm and px_por_mm > 0) else max(1.0, min(base.size) / 300.0)
+    desfoque_mm = max(0.0, min(12.0, float(sombra.get("desfoque_mm", 2.6))))
+    ox_mm = max(-10.0, min(10.0, float(sombra.get("offset_x_mm", 1.4))))
+    oy_mm = max(-10.0, min(10.0, float(sombra.get("offset_y_mm", 1.8))))
+
+    raio_px = max(1.0, desfoque_mm * escala_mm)
+    ox_px = int(round(ox_mm * escala_mm))
+    oy_px = int(round(oy_mm * escala_mm))
+
+    cor_s = cor_rgb(sombra.get("cor", "#000000"))
+    alfa_max = int(round((opacidade / 100.0) * 235))
+    margem = max(4, int(math.ceil(raio_px * 2.6)) + max(abs(ox_px), abs(oy_px)) + 2)
+
+    x0_patch = max(0, x - margem)
+    y0_patch = max(0, y - margem)
+    x1_patch = min(base.width, x + w + margem)
+    y1_patch = min(base.height, y + h + margem)
+    pw = x1_patch - x0_patch
+    ph = y1_patch - y0_patch
+    if pw <= 2 or ph <= 2:
+        return base
+
+    mascara_s = Image.new("L", (pw, ph), 0)
+    des_s = ImageDraw.Draw(mascara_s)
+    rx0 = (x - x0_patch) + ox_px
+    ry0 = (y - y0_patch) + oy_px
+    rx1 = rx0 + w - 1
+    ry1 = ry0 + h - 1
+    des_s.rectangle((rx0, ry0, rx1, ry1), fill=alfa_max)
+
+    if raio_px >= 0.6:
+        if rapido and raio_px >= 2.5 and pw > 80 and ph > 80:
+            metade = mascara_s.resize((max(1, pw // 2), max(1, ph // 2)), Image.BILINEAR)
+            mascara_s = metade.filter(ImageFilter.GaussianBlur(raio_px * 0.5)).resize((pw, ph), Image.BILINEAR)
+        else:
+            mascara_s = mascara_s.filter(ImageFilter.GaussianBlur(raio_px))
+
+    camada_s = Image.new("RGBA", (pw, ph), cor_s + (0,))
+    camada_s.putalpha(mascara_s)
+    if base.mode != "RGBA":
+        base_rgba = base.convert("RGBA")
+        base_rgba.alpha_composite(camada_s, (x0_patch, y0_patch))
+        base.paste(base_rgba.convert(base.mode))
+    else:
+        base.alpha_composite(camada_s, (x0_patch, y0_patch))
+    return base
+
+
+def _cor_secundaria_moldura_rgb(moldura, cor_principal_rgb):
+    sec_hex = moldura.get("cor_secundaria")
+    if sec_hex:
+        return cor_rgb(sec_hex)
+    r, g, b = cor_principal_rgb
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    if lum > 0.65:
+        return (max(0, int(r * 0.68)), max(0, int(g * 0.64)), max(0, int(b * 0.54)))
+    return (min(255, int(r + (255 - r) * 0.55)), min(255, int(g + (245 - g) * 0.52)), min(255, int(b + (210 - b) * 0.42)))
+
+
 def aplicar_moldura(imagem, moldura, px_por_mm=None):
-    """Desenha um traçado com espessura fixa em milímetros na prévia e na exportação."""
+    """
+    Desenha um dos 12 estilos de moldura com espessura fixa em milímetros na prévia e na exportação:
+    simples, dupla, pontilhada, royal, degrade, degrade_real, cantoneira, chanfrada,
+    passepartout, tripla, cruzada, halo.
+    """
     if not moldura:
         return imagem
     from PIL import ImageDraw
+
+    W, H = imagem.width, imagem.height
+    if W <= 4 or H <= 4:
+        return imagem
 
     if moldura.get("espessura_mm") is not None and px_por_mm:
         largura = max(1, round(float(moldura["espessura_mm"]) * px_por_mm))
     else:
         espessura = max(0.1, min(12.0, float(moldura.get("espessura", 1.5))))
-        largura = max(1, round(min(imagem.size) * espessura / 100.0))
-    cor = cor_rgb(moldura.get("cor", "#ffffff"))
-    estilo = moldura.get("estilo", "simples")
+        largura = max(1, round(min(W, H) * espessura / 100.0))
+
+    cor1 = cor_rgb(moldura.get("cor", "#ffffff"))
+    cor2 = _cor_secundaria_moldura_rgb(moldura, cor1)
+    estilo = str(moldura.get("estilo", "simples") or "simples").strip().lower()
     desenho = ImageDraw.Draw(imagem)
-    caixa = (0, 0, imagem.width - 1, imagem.height - 1)
-    if estilo != "pontilhada":
-        desenho.rectangle(caixa, outline=cor, width=largura)
-    if estilo == "dupla":
-        recuo = largura * 3
-        if imagem.width > recuo * 2 and imagem.height > recuo * 2:
-            desenho.rectangle((recuo, recuo, imagem.width - 1 - recuo, imagem.height - 1 - recuo),
-                              outline=cor, width=largura)
+    caixa = (0, 0, W - 1, H - 1)
+
+    if estilo == "simples":
+        desenho.rectangle(caixa, outline=cor1, width=largura)
+
+    elif estilo == "dupla":
+        desenho.rectangle(caixa, outline=cor1, width=largura)
+        recuo = max(largura + 2, largura * 3)
+        if W > recuo * 2 and H > recuo * 2:
+            desenho.rectangle((recuo, recuo, W - 1 - recuo, H - 1 - recuo), outline=cor1, width=max(1, round(largura * 0.75)))
+
     elif estilo == "pontilhada":
-        passo = max(3, largura * 3)
-        segmento = max(1, largura)
-        for x in range(0, imagem.width, passo):
-            desenho.line((x, 0, min(x + segmento, imagem.width - 1), 0), fill=cor, width=largura)
-            desenho.line((x, imagem.height - 1, min(x + segmento, imagem.width - 1), imagem.height - 1),
-                         fill=cor, width=largura)
-        for y in range(0, imagem.height, passo):
-            desenho.line((0, y, 0, min(y + segmento, imagem.height - 1)), fill=cor, width=largura)
-            desenho.line((imagem.width - 1, y, imagem.width - 1, min(y + segmento, imagem.height - 1)),
-                         fill=cor, width=largura)
+        passo = max(4, largura * 3)
+        segmento = max(2, round(largura * 1.3))
+        for x in range(0, W, passo):
+            desenho.line((x, 0, min(x + segmento, W - 1), 0), fill=cor1, width=largura)
+            desenho.line((x, H - 1, min(x + segmento, W - 1), H - 1), fill=cor1, width=largura)
+        for y in range(0, H, passo):
+            desenho.line((0, y, 0, min(y + segmento, H - 1)), fill=cor1, width=largura)
+            desenho.line((W - 1, y, W - 1, min(y + segmento, H - 1)), fill=cor1, width=largura)
+
+    elif estilo == "royal":
+        # Borda externa nobre + filete interno + cantoneiras imperiais com losango/diamante nos 4 cantos
+        desenho.rectangle(caixa, outline=cor1, width=largura)
+        recuo = max(largura + 3, round(largura * 3.2))
+        esp_int = max(1, round(largura * 0.65))
+        if W > recuo * 3 and H > recuo * 3:
+            desenho.rectangle((recuo, recuo, W - 1 - recuo, H - 1 - recuo), outline=cor2, width=esp_int)
+            tam_c = max(recuo + 6, min(W, H) // 10)
+            for cx_sinal, cy_sinal in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+                vx = recuo if cx_sinal > 0 else (W - 1 - recuo)
+                vy = recuo if cy_sinal > 0 else (H - 1 - recuo)
+                # Braços reforçados Royal nos vértices internos
+                desenho.line((vx, vy, vx + cx_sinal * tam_c, vy), fill=cor1, width=max(1, largura))
+                desenho.line((vx, vy, vx, vy + cy_sinal * tam_c), fill=cor1, width=max(1, largura))
+                # Pequeno quadrado/diamante imperial no canto
+                q = max(3, round(recuo * 0.85))
+                qx0 = min(vx, vx + cx_sinal * q)
+                qy0 = min(vy, vy + cy_sinal * q)
+                qx1 = max(vx, vx + cx_sinal * q)
+                qy1 = max(vy, vy + cy_sinal * q)
+                desenho.rectangle((qx0, qy0, qx1, qy1), outline=cor1, width=esp_int)
+
+    elif estilo in ("degrade", "degrade_real"):
+        # Desenha borda com gradiente contínuo (linear bicolor ou reflexo metálico 5 paradas)
+        esp_b = max(2, round(largura * 1.35))
+        n_faixas = 32
+        for i in range(n_faixas):
+            t = i / float(max(1, n_faixas - 1))
+            if estilo == "degrade_real":
+                # Reflexo especular metálico
+                onda = 0.5 + 0.5 * math.sin(t * math.pi * 2.0)
+                c_faixa = (
+                    int(round(cor1[0] + (cor2[0] - cor1[0]) * onda)),
+                    int(round(cor1[1] + (cor2[1] - cor1[1]) * onda)),
+                    int(round(cor1[2] + (cor2[2] - cor1[2]) * onda)),
+                )
+            else:
+                c_faixa = (
+                    int(round(cor1[0] + (cor2[0] - cor1[0]) * t)),
+                    int(round(cor1[1] + (cor2[1] - cor1[1]) * t)),
+                    int(round(cor1[2] + (cor2[2] - cor1[2]) * t)),
+                )
+            xa = int(round((W * i) / float(n_faixas)))
+            xb = int(round((W * (i + 1)) / float(n_faixas)))
+            ya = int(round((H * i) / float(n_faixas)))
+            yb = int(round((H * (i + 1)) / float(n_faixas)))
+            desenho.rectangle((xa, 0, min(W - 1, xb), min(H - 1, esp_b - 1)), fill=c_faixa)
+            desenho.rectangle((xa, max(0, H - esp_b), min(W - 1, xb), H - 1), fill=c_faixa)
+            desenho.rectangle((0, ya, min(W - 1, esp_b - 1), min(H - 1, yb)), fill=c_faixa)
+            desenho.rectangle((max(0, W - esp_b), ya, W - 1, min(H - 1, yb)), fill=c_faixa)
+        if estilo == "degrade_real":
+            recuo_m = esp_b + max(2, largura)
+            if W > recuo_m * 2 and H > recuo_m * 2:
+                desenho.rectangle((recuo_m, recuo_m, W - 1 - recuo_m, H - 1 - recuo_m), outline=cor2, width=max(1, largura // 2))
+
+    elif estilo == "cantoneira":
+        esp_fina = max(1, largura // 2)
+        desenho.rectangle(caixa, outline=cor2, width=esp_fina)
+        esp_c = max(2, round(largura * 1.6))
+        comp = max(12, min(W, H) // 6)
+        rec = max(2, largura)
+        # 4 Cantoneiras em L
+        for x_c, y_c, dx, dy in (
+            (rec, rec, 1, 1),
+            (W - 1 - rec, rec, -1, 1),
+            (rec, H - 1 - rec, 1, -1),
+            (W - 1 - rec, H - 1 - rec, -1, -1),
+        ):
+            desenho.line((x_c, y_c, x_c + dx * comp, y_c), fill=cor1, width=esp_c)
+            desenho.line((x_c, y_c, x_c, y_c + dy * comp), fill=cor1, width=esp_c)
+
+    elif estilo == "chanfrada":
+        esp_ch = max(2, round(largura * 1.6))
+        clara = (min(255, cor1[0] + 45), min(255, cor1[1] + 45), min(255, cor1[2] + 45))
+        escura = (max(0, cor1[0] - 55), max(0, cor1[1] - 55), max(0, cor1[2] - 55))
+        for i in range(esp_ch):
+            # Topo e Esquerda iluminados
+            desenho.line((i, i, W - 1 - i, i), fill=clara, width=1)
+            desenho.line((i, i, i, H - 1 - i), fill=clara, width=1)
+            # Base e Direita sombreados
+            desenho.line((i, H - 1 - i, W - 1 - i, H - 1 - i), fill=escura, width=1)
+            desenho.line((W - 1 - i, i, W - 1 - i, H - 1 - i), fill=escura, width=1)
+
+    elif estilo == "passepartout":
+        esp_galeria = max(4, round(largura * 3.6))
+        if W > esp_galeria * 3 and H > esp_galeria * 3:
+            desenho.rectangle(caixa, outline=cor1, width=esp_galeria)
+            rec_in = esp_galeria + max(1, largura // 2)
+            desenho.rectangle((rec_in, rec_in, W - 1 - rec_in, H - 1 - rec_in), outline=cor2, width=max(1, round(largura * 0.6)))
+        else:
+            desenho.rectangle(caixa, outline=cor1, width=largura)
+
+    elif estilo == "tripla":
+        esp_f = max(1, round(largura * 0.55))
+        esp_c = max(1, largura)
+        desenho.rectangle(caixa, outline=cor2, width=esp_f)
+        r1 = esp_f + max(2, round(largura * 1.4))
+        r2 = r1 + esp_c + max(2, round(largura * 1.4))
+        if W > r2 * 2 and H > r2 * 2:
+            desenho.rectangle((r1, r1, W - 1 - r1, H - 1 - r1), outline=cor1, width=esp_c)
+            desenho.rectangle((r2, r2, W - 1 - r2, H - 1 - r2), outline=cor2, width=esp_f)
+
+    elif estilo == "cruzada":
+        rec = max(3, round(largura * 2.5))
+        ext = max(6, round(largura * 5.0))
+        if W > (rec + ext) * 2 and H > (rec + ext) * 2:
+            desenho.line((rec - ext, rec, W - 1 - rec + ext, rec), fill=cor1, width=largura)
+            desenho.line((rec - ext, H - 1 - rec, W - 1 - rec + ext, H - 1 - rec), fill=cor1, width=largura)
+            desenho.line((rec, rec - ext, rec, H - 1 - rec + ext), fill=cor1, width=largura)
+            desenho.line((W - 1 - rec, rec - ext, W - 1 - rec, H - 1 - rec + ext), fill=cor1, width=largura)
+        else:
+            desenho.rectangle(caixa, outline=cor1, width=largura)
+
+    elif estilo == "halo":
+        esp_halo = max(3, round(largura * 2.8))
+        camada_h = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        dh = ImageDraw.Draw(camada_h)
+        for i in range(esp_halo):
+            alfa = int(round(190 * ((1.0 - (i / float(esp_halo))) ** 1.6)))
+            dh.rectangle((i, i, W - 1 - i, H - 1 - i), outline=cor1 + (alfa,), width=1)
+        if imagem.mode == "RGBA":
+            imagem.alpha_composite(camada_h)
+        else:
+            comp_h = Image.alpha_composite(imagem.convert("RGBA"), camada_h)
+            imagem.paste(comp_h.convert(imagem.mode))
+    else:
+        desenho.rectangle(caixa, outline=cor1, width=largura)
+
     return imagem
+
+
+CATALOGO_TEMAS = (
+    {
+        "id": "natal",
+        "nome": "🎄 Natal Imperial",
+        "curto": "Natal",
+        "descricao": "Fundo carmim e pinho profundo com bokeh dourado, moldura Royal Ouro e tom quente aconchegante.",
+        "cor_base": "#180a0d",
+        "fundo_espec": {
+            "id": "tema_natal",
+            "titulo": "Tema Natal · Carmim & Ouro",
+            "categoria": "abstrato",
+            "subtipo": "bokeh_suave",
+            "padrao_cor": "preto",
+            "cores": ["#180a0d", "#3b0d14", "#10281e", "#d4af37"],
+            "seed": 1225,
+        },
+        "moldura": {"estilo": "royal", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.65},
+        "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 55, "desfoque_mm": 2.8, "offset_x_mm": 1.4, "offset_y_mm": 1.8, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.03, "contraste": 1.06, "saturacao": 1.08, "matiz": 0.0, "colorir_cor": "#f59e0b", "colorir_int": 6.0},
+    },
+    {
+        "id": "pascoa",
+        "nome": "🐣 Páscoa Delicada",
+        "curto": "Páscoa",
+        "descricao": "Aquarela pastel suave em tons creme, lavanda e menta, moldura Passe-partout e luz suave.",
+        "cor_base": "#fcfbf7",
+        "fundo_espec": {
+            "id": "tema_pascoa",
+            "titulo": "Tema Páscoa · Aquarela Pastel",
+            "categoria": "abstrato",
+            "subtipo": "aquarela_organica",
+            "padrao_cor": "branco",
+            "cores": ["#fcfbf7", "#f3e8ff", "#e0f2fe", "#fef3c7"],
+            "seed": 412,
+        },
+        "moldura": {"estilo": "passepartout", "cor": "#fffdf9", "cor_secundaria": "#d6c7b2", "espessura_mm": 0.7},
+        "sombra": {"ativa": True, "preset": "suave", "cor": "#1e293b", "opacidade": 34, "desfoque_mm": 2.0, "offset_x_mm": 0.8, "offset_y_mm": 1.2, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.05, "contraste": 0.98, "saturacao": 1.04, "matiz": 0.0, "colorir_cor": "#fde68a", "colorir_int": 4.0},
+    },
+    {
+        "id": "casamento",
+        "nome": "💍 Casamento Clássico",
+        "curto": "Casamento",
+        "descricao": "Seda branca pérola e champanhe editorial, moldura Royal Champanhe e edição Fine-Art.",
+        "cor_base": "#faf8f5",
+        "fundo_espec": {
+            "id": "tema_casamento",
+            "titulo": "Tema Casamento · Pérola & Champanhe",
+            "categoria": "abstrato",
+            "subtipo": "feixes_luz",
+            "padrao_cor": "branco",
+            "cores": ["#faf8f5", "#f3ede2", "#e7dac6", "#d4af37"],
+            "seed": 707,
+        },
+        "moldura": {"estilo": "royal", "cor": "#c5a880", "cor_secundaria": "#ffffff", "espessura_mm": 0.55},
+        "sombra": {"ativa": True, "preset": "suave", "cor": "#0f172a", "opacidade": 38, "desfoque_mm": 2.2, "offset_x_mm": 1.0, "offset_y_mm": 1.4, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.02, "contraste": 1.03, "saturacao": 0.97, "matiz": 0.0, "colorir_cor": "#fde68a", "colorir_int": 4.0},
+    },
+    {
+        "id": "aniversario",
+        "nome": "🎂 Aniversário Festivo",
+        "curto": "Aniversário",
+        "descricao": "Bokeh luminoso celebrativo com ondas sutis, moldura em Degradê Bicolor e cores vibrantes.",
+        "cor_base": "#11131a",
+        "fundo_espec": {
+            "id": "tema_aniversario",
+            "titulo": "Tema Aniversário · Bokeh Festivo",
+            "categoria": "abstrato",
+            "subtipo": "bokeh_suave",
+            "padrao_cor": "preto",
+            "cores": ["#11131a", "#261838", "#3b1d2e", "#f59e0b"],
+            "seed": 909,
+        },
+        "moldura": {"estilo": "degrade", "cor": "#f59e0b", "cor_secundaria": "#ec4899", "espessura_mm": 0.65},
+        "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 54, "desfoque_mm": 2.6, "offset_x_mm": 1.4, "offset_y_mm": 1.8, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.03, "contraste": 1.06, "saturacao": 1.10, "matiz": 0.0, "colorir_cor": "#f43f5e", "colorir_int": 3.0},
+    },
+    {
+        "id": "colacao_grau",
+        "nome": "🎓 Colação de Grau (Formatura)",
+        "curto": "Colação de Grau",
+        "descricao": "Gala obsidiana com feixes esmeralda/azul-real/ouro, moldura Degradê Metálico Ouro e contraste de beca.",
+        "cor_base": "#0b0d13",
+        "fundo_espec": {
+            "id": "tema_colacao_grau",
+            "titulo": "Tema Colação de Grau · Gala Imperial",
+            "categoria": "abstrato",
+            "subtipo": "feixes_luz",
+            "padrao_cor": "preto",
+            "cores": ["#0b0d13", "#121a2d", "#0f2922", "#d4af37"],
+            "seed": 2026,
+        },
+        "moldura": {"estilo": "degrade_real", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.7},
+        "sombra": {"ativa": True, "preset": "profunda", "cor": "#000000", "opacidade": 66, "desfoque_mm": 3.4, "offset_x_mm": 1.8, "offset_y_mm": 2.2, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.01, "contraste": 1.08, "saturacao": 1.05, "matiz": 0.0, "colorir_cor": "#fbbf24", "colorir_int": 5.0},
+    },
+    {
+        "id": "debutante_15",
+        "nome": "👑 15 Anos / Debutante",
+        "curto": "15 Anos",
+        "descricao": "Ondas noturnas em rosé gold e ametista suave, moldura Cantoneira Rosé e pele acetinada.",
+        "cor_base": "#140f18",
+        "fundo_espec": {
+            "id": "tema_debutante_15",
+            "titulo": "Tema 15 Anos · Noite Rosé Gold",
+            "categoria": "abstrato",
+            "subtipo": "ondas_fluidas",
+            "padrao_cor": "preto",
+            "cores": ["#140f18", "#2a1829", "#38202c", "#f4c2c2"],
+            "seed": 1515,
+        },
+        "moldura": {"estilo": "cantoneira", "cor": "#f4c2c2", "cor_secundaria": "#fff1f2", "espessura_mm": 0.6},
+        "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 52, "desfoque_mm": 2.6, "offset_x_mm": 1.3, "offset_y_mm": 1.7, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.03, "contraste": 1.04, "saturacao": 1.04, "matiz": 0.0, "colorir_cor": "#fda4af", "colorir_int": 5.0},
+    },
+    {
+        "id": "bodas",
+        "nome": "🥂 Bodas de Ouro & Prata",
+        "curto": "Bodas",
+        "descricao": "Degradê diagonal em marfim e ouro velho, moldura Filete Triplo Editorial e tom clássico.",
+        "cor_base": "#f8f5ee",
+        "fundo_espec": {
+            "id": "tema_bodas",
+            "titulo": "Tema Bodas · Marfim & Ouro Velho",
+            "categoria": "degrade",
+            "subtipo": "linear_diagonal",
+            "padrao_cor": "branco",
+            "cores": ["#f8f5ee", "#efe7d6", "#e2d4b7", "#c5a059"],
+            "angulo": 38,
+            "seed": 5050,
+        },
+        "moldura": {"estilo": "tripla", "cor": "#c5a059", "cor_secundaria": "#faf0ca", "espessura_mm": 0.6},
+        "sombra": {"ativa": True, "preset": "deslocada", "cor": "#1e293b", "opacidade": 42, "desfoque_mm": 1.8, "offset_x_mm": 1.5, "offset_y_mm": 1.5, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.02, "contraste": 1.04, "saturacao": 0.96, "matiz": 0.0, "colorir_cor": "#d97706", "colorir_int": 6.0},
+    },
+    {
+        "id": "batizado",
+        "nome": "🕊️ Batizado & Infantil",
+        "curto": "Batizado",
+        "descricao": "Nuvens suaves em branco algodão e azul-celeste sutil, moldura Dupla Branca e luz pura.",
+        "cor_base": "#fafcff",
+        "fundo_espec": {
+            "id": "tema_batizado",
+            "titulo": "Tema Batizado · Algodão & Celeste",
+            "categoria": "abstrato",
+            "subtipo": "ondas_fluidas",
+            "padrao_cor": "branco",
+            "cores": ["#fafcff", "#f0f7ff", "#e6f2ff", "#ffffff"],
+            "seed": 303,
+        },
+        "moldura": {"estilo": "dupla", "cor": "#ffffff", "cor_secundaria": "#cbd5e1", "espessura_mm": 0.55},
+        "sombra": {"ativa": True, "preset": "suave", "cor": "#334155", "opacidade": 32, "desfoque_mm": 2.0, "offset_x_mm": 0.8, "offset_y_mm": 1.1, "sincronizar_moldura": True},
+        "edicao_foto": {"brilho": 1.05, "contraste": 0.97, "saturacao": 0.99, "matiz": 0.0, "colorir_cor": "#bae6fd", "colorir_int": 4.0},
+    },
+)
+
+MAPA_TEMAS = {t["id"]: t for t in CATALOGO_TEMAS}
+
+
+def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0):
+    """
+    Gera o fundo `.png` editável na pasta temporária para o tema escolhido,
+    combinando a atmosfera do tema com um toque sutil das fotos da lâmina quando disponível.
+    """
+    tema_cfg = MAPA_TEMAS.get(id_tema) or CATALOGO_TEMAS[0]
+    espec = dict(tema_cfg["fundo_espec"])
+    cores = list(espec.get("cores") or ["#121318", "#1e222d", "#282c3a"])
+    if fotos_lamina:
+        try:
+            pal = extrair_paleta_fotos(fotos_lamina, info=info)
+            acento_foto = (pal.get("acentos_vivos") or pal.get("cores_principais") or [None])[0]
+            if acento_foto and len(cores) >= 3:
+                rgb_tema = cor_rgb(cores[1])
+                rgb_foto = cor_rgb(acento_foto)
+                cores[1] = _misturar_rgb_hex(rgb_tema, rgb_foto, 0.18)
+        except Exception:
+            pass
+    espec["cores"] = cores
+    espec["seed"] = int(espec.get("seed", 100)) + int(seed_extra)
+    espec["id"] = f"{espec.get('id', 'tema')}_{espec['seed']}"
+    return criar_dados_fundo_gerado(espec, materializar=True)
 
 
 def desenhar_guias(img, linhas_sangria, linhas_seguranca, linhas_dobra):
@@ -1201,3 +1646,4 @@ def desenhar_guias(img, linhas_sangria, linhas_seguranca, linhas_dobra):
     for x in linhas_dobra:
         desenho.line([(x, 0), (x, img.height)], fill=(0, 205, 240), width=1)
     return img
+

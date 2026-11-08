@@ -2777,13 +2777,16 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
 
     regra = str(cfg.get("regra_auto_molduras", "grades_com_margem") or "grades_com_margem").strip().lower()
     estilo = str(cfg.get("estilo_auto_molduras", "simples") or "simples").strip().lower()
-    if estilo not in ("simples", "dupla", "pontilhada"):
+    from composicao import NOMES_ESTILOS_MOLDURA, sombra_padrao
+    if estilo not in NOMES_ESTILOS_MOLDURA:
         estilo = "simples"
     cor_modo = str(cfg.get("cor_auto_molduras", "contraste_automatico") or "contraste_automatico").strip().lower()
+    cor_sec = str(cfg.get("cor_secundaria_moldura") or "").strip()
+    incluir_sombra = bool(cfg.get("auto_sombra_molduras", False))
     try:
-        espessura_mm = max(0.3, min(3.0, float(cfg.get("espessura_auto_molduras_mm", 1.2) or 1.2)))
+        espessura_mm = max(0.2, min(3.0, float(cfg.get("espessura_auto_molduras_mm", 0.6) or 0.6)))
     except (TypeError, ValueError):
-        espessura_mm = 1.2
+        espessura_mm = 0.6
 
     espacos = [e for e in (lamina.get("espacos") or []) if e.get("foto")]
     if not espacos:
@@ -2795,6 +2798,8 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
     def _cor_moldura_para_espaco(esp):
         if cor_modo == "branca":
             return "#ffffff"
+        if cor_modo == "dourada":
+            return "#d4af37"
         if cor_modo == "paleta":
             return (paleta.get("tons_medios") or ["#d4c5b4"])[0]
         # Contraste automático com o fundo da página onde a foto está posicionada
@@ -2806,7 +2811,6 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         )
         r, g, b = cor_rgb(cor_fundo_hex)
         lum_fundo = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        # Se o fundo gerado for escuro/noturno, usa moldura clara marfim/branca
         dados_img = (
             (lamina.get("fundo_imagem_esquerda") if centro_x < 0.5 else lamina.get("fundo_imagem_direita"))
             or lamina.get("fundo_imagem")
@@ -2850,23 +2854,146 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         qtd_na_pagina = qtd_esq if centro_x < 0.5 else qtd_dir
 
         elegivel = False
-        if regra == "todas_com_margem":
+        if regra in ("todas_com_margem", "grades_e_margem"):
             elegivel = True
         elif regra == "secundarias":
             elegivel = len(espacos) >= 2 and area_e < maior_area * 0.85
         else:
-            # "grades_com_margem" (padrão): quadros em grade (2+ fotos na página) ou quadros com margem ampla
             elegivel = (qtd_na_pagina >= 2) or (len(espacos) >= 2) or (area_e <= 0.36)
 
         if not elegivel:
             continue
 
-        ed["moldura"] = {
+        cor_escolhida = _cor_moldura_para_espaco(esp)
+        dados_m = {
             "estilo": estilo,
             "espessura_mm": round(espessura_mm, 2),
-            "cor": _cor_moldura_para_espaco(esp),
+            "cor": cor_escolhida,
         }
+        if cor_sec:
+            dados_m["cor_secundaria"] = cor_sec
+        ed["moldura"] = dados_m
+        if incluir_sombra:
+            s_cfg = dict(cfg.get("sombra_padrao_cfg") or sombra_padrao())
+            s_cfg["ativa"] = True
+            s_cfg["sincronizar_moldura"] = True
+            ed["sombra"] = s_cfg
         alterou = True
 
     return alterou
+
+
+def aplicar_sombra_automatica(lamina, cfg_sombra=None, apenas_com_moldura=False):
+    """
+    Aplica Sombra Projetada identificando automaticamente as fotos com moldura
+    ou as fotos em grade/margem elegíveis para moldura (nunca em fotos sangradas 100% ou com degradê).
+    Aceita tanto uma lâmina (`dict`) quanto uma lista de lâminas (`list`).
+    """
+    from composicao import sombra_padrao, tem_degrade_ativo
+
+    if isinstance(lamina, list):
+        alterou_alguma = False
+        for lam in lamina:
+            if aplicar_sombra_automatica(lam, cfg_sombra=cfg_sombra, apenas_com_moldura=apenas_com_moldura):
+                alterou_alguma = True
+        return alterou_alguma
+
+    s_base = sombra_padrao()
+    if isinstance(cfg_sombra, dict):
+        s_base.update(cfg_sombra)
+    s_base["ativa"] = True
+
+    alterou = False
+    for esp in lamina.get("espacos") or []:
+        if not esp.get("foto"):
+            continue
+        ed = esp.setdefault("edicao", {})
+        if tem_degrade_ativo(ed.get("degrade")):
+            continue
+        ex = float(esp.get("x", 0.0))
+        ey = float(esp.get("y", 0.0))
+        ew = float(esp.get("w", 0.0))
+        eh = float(esp.get("h", 0.0))
+        sangrada_borda = (
+            ex <= 0.008
+            or ey <= 0.008
+            or (ex + ew) >= 0.992
+            or (ey + eh) >= 0.992
+            or (ew >= 0.485 and eh >= 0.95)
+        )
+        if sangrada_borda:
+            continue
+        if apenas_com_moldura and not ed.get("moldura"):
+            continue
+        ed["sombra"] = dict(s_base)
+        alterou = True
+    return alterou
+
+
+def aplicar_tema_em_laminas(
+    laminas_alvo,
+    id_tema,
+    info=None,
+    aplicar_fundo=True,
+    aplicar_moldura=True,
+    aplicar_sombra=True,
+    aplicar_edicao=True,
+):
+    """
+    Aplica um preset completo de Tema (Natal, Páscoa, Casamento, Aniversário, Colação de Grau,
+    15 Anos, Bodas ou Batizado) em uma lâmina ou lista de lâminas, gerando fundos `.png`
+    editáveis na pasta temporária e coordenando moldura, sombra projetada e edição de cor.
+    """
+    from composicao import CATALOGO_TEMAS, MAPA_TEMAS, gerar_fundo_de_tema, tem_degrade_ativo
+
+    if isinstance(laminas_alvo, dict):
+        laminas_alvo = [laminas_alvo]
+    tema_cfg = MAPA_TEMAS.get(id_tema) or CATALOGO_TEMAS[0]
+    alteradas = 0
+
+    for idx_l, lam in enumerate(laminas_alvo or []):
+        if not isinstance(lam, dict):
+            continue
+        espacos = [e for e in (lam.get("espacos") or []) if e.get("foto")]
+        fotos_caminhos = [str(e["foto"]) for e in espacos if e.get("foto")]
+
+        if aplicar_fundo:
+            dados_fundo = gerar_fundo_de_tema(tema_cfg["id"], fotos_lamina=fotos_caminhos, info=info, seed_extra=idx_l * 37)
+            lam["fundo"] = str(tema_cfg.get("cor_base") or "#14161c")
+            lam["fundo_imagem"] = dados_fundo
+            lam.pop("fundo_esquerda", None)
+            lam.pop("fundo_direita", None)
+            lam.pop("fundo_imagem_esquerda", None)
+            lam.pop("fundo_imagem_direita", None)
+
+        for esp in espacos:
+            ed = esp.setdefault("edicao", {})
+            ex = float(esp.get("x", 0.0))
+            ey = float(esp.get("y", 0.0))
+            ew = float(esp.get("w", 0.0))
+            eh = float(esp.get("h", 0.0))
+            sangrada_borda = (
+                ex <= 0.008
+                or ey <= 0.008
+                or (ex + ew) >= 0.992
+                or (ey + eh) >= 0.992
+                or (ew >= 0.485 and eh >= 0.95)
+            )
+            tem_deg = tem_degrade_ativo(ed.get("degrade"))
+
+            if aplicar_moldura and not sangrada_borda and not tem_deg:
+                ed["moldura"] = dict(tema_cfg.get("moldura") or {"estilo": "royal", "cor": "#d4af37", "espessura_mm": 0.6})
+
+            if aplicar_sombra and not sangrada_borda and not tem_deg:
+                ed["sombra"] = dict(tema_cfg.get("sombra") or {"ativa": True, "opacidade": 50, "desfoque_mm": 2.5, "offset_x_mm": 1.3, "offset_y_mm": 1.7, "sincronizar_moldura": True})
+
+            if aplicar_edicao and isinstance(tema_cfg.get("edicao_foto"), dict):
+                for ch_ed, val_ed in tema_cfg["edicao_foto"].items():
+                    ed[ch_ed] = val_ed
+
+        lam["tema_aplicado"] = tema_cfg["id"]
+        alteradas += 1
+
+    return alteradas
+
 
