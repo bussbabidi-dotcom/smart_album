@@ -7,15 +7,18 @@ Diagramar e exportar sem abrir a janela.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 import analise
 import diagramar
 import exportar
 import projeto as proj
-from modelos_lamina import listar_modelos
-from produtos import adivinhar_produto, carregar_produto
+from produtos import adivinhar_produto, carregar_produto, listar_modelos
 
 
 def main(argv=None):

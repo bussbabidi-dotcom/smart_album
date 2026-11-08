@@ -30,16 +30,18 @@ from collections import OrderedDict
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PIL import Image, ImageEnhance, ImageTk
 
 import analise
-import atalho_capa
+import capa as atalho_capa
 import diagramar
 import entrada
 import exportar
-import modelos_lamina
+import produtos as modelos_lamina
 import photoshop
 import projeto as proj
 import recorte

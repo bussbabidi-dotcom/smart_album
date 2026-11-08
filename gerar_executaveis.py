@@ -11,8 +11,12 @@ import base64
 import json
 import os
 import struct
+import sys
 import zlib
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 PASTA_RAIZ = Path(__file__).resolve().parent
 
@@ -20,12 +24,10 @@ ORDEM_MODULOS = [
     "comum",
     "tema",
     "produtos",
-    "modelos_lamina",
     "analise",
     "recorte",
     "composicao",
     "capa",
-    "atalho_capa",
     "fundos",
     "projeto",
     "diagramar",
@@ -90,7 +92,7 @@ def _construir_codeobj_py314_exec(codigo_fonte_ascii: str) -> bytes:
 
 
 def gerar_script_bootstrap_embutido() -> str:
-    """Empacota todos os 23 arquivos .py/.pyw e produtos/*.json em um bootstrap Python."""
+    """Empacota todos os arquivos .py/.pyw e produtos/*.json em um bootstrap Python limpo (sem gravar na pasta do projeto)."""
     arquivos_py = {}
     for mod in ORDEM_MODULOS:
         arq = PASTA_RAIZ / (mod + ".py")
@@ -121,6 +123,9 @@ import traceback
 import types
 import zlib
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 _PAYLOAD_B64 = "{b64_payload}"
 _PACOTE = json.loads(zlib.decompress(base64.b64decode(_PAYLOAD_B64)).decode("utf-8"))
@@ -200,33 +205,8 @@ except Exception:
     except Exception:
         pass
 
-# 3. Garante produtos/*.json ao lado do executavel e sincroniza .py/.pyw na raiz se existir
 try:
-    _dir_prod = _exe_dir / "produtos"
-    _dir_prod.mkdir(parents=True, exist_ok=True)
-    for _np, _cp in _PRODUTOS_JSON.items():
-        _ap = _dir_prod / _np
-        if not _ap.is_file():
-            _ap.write_text(_cp, encoding="utf-8")
-except Exception:
-    pass
-
-try:
-    for _cand_sync in _pastas_busca:
-        if (_cand_sync / "app.pyw").is_file() and (_cand_sync / "tema.py").is_file():
-            for _nome_s, _cod_s in _ARQUIVOS_PY.items():
-                _dest_s = _cand_sync / _nome_s
-                try:
-                    if not _dest_s.is_file() or _dest_s.read_text(encoding="utf-8") != _cod_s:
-                        _dest_s.write_text(_cod_s, encoding="utf-8")
-                except Exception:
-                    pass
-            break
-except Exception:
-    pass
-
-try:
-    # 4. Carrega todos os modulos atualizados em sys.modules (sobrepondo versoes antigas do PYZ.pyz)
+    # 3. Carrega todos os modulos em sys.modules sem gravar caches nem arquivos na pasta do projeto
     for _mod_nome in _ORDEM:
         _nome_arq = _mod_nome + ".py"
         _codigo = _ARQUIVOS_PY[_nome_arq]
@@ -235,6 +215,10 @@ try:
             _arq_disco = _cand / _nome_arq
             if _arq_disco.is_file():
                 _caminho_arq = _arq_disco
+                try:
+                    _codigo = _arq_disco.read_text(encoding="utf-8")
+                except Exception:
+                    pass
                 break
         _mod = types.ModuleType(_mod_nome)
         _mod.__file__ = str(_caminho_arq)
@@ -242,11 +226,21 @@ try:
         sys.modules[_mod_nome] = _mod
         exec(compile(_codigo, str(_caminho_arq), "exec"), _mod.__dict__)
 
+    if "produtos" in sys.modules:
+        sys.modules["modelos_lamina"] = sys.modules["produtos"]
+    if "capa" in sys.modules:
+        sys.modules["atalho_capa"] = sys.modules["capa"]
+
     _codigo_app = _ARQUIVOS_PY["app.pyw"]
     _caminho_app = _exe_dir / "app.pyw"
     for _cand in _pastas_busca:
-        if (_cand / "app.pyw").is_file():
-            _caminho_app = _cand / "app.pyw"
+        _app_disco = _cand / "app.pyw"
+        if _app_disco.is_file():
+            _caminho_app = _app_disco
+            try:
+                _codigo_app = _app_disco.read_text(encoding="utf-8")
+            except Exception:
+                pass
             break
 
     __file__ = str(_caminho_app)
@@ -255,7 +249,10 @@ try:
 except Exception:
     _tb_txt = traceback.format_exc()
     try:
-        (_exe_dir / "erro_inicializacao.log").write_text(_tb_txt, encoding="utf-8")
+        _base_appdata = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home())
+        _pasta_log = _base_appdata / "smart_album"
+        _pasta_log.mkdir(parents=True, exist_ok=True)
+        (_pasta_log / "erro_inicializacao.log").write_text(_tb_txt, encoding="utf-8")
     except Exception:
         pass
     try:
@@ -440,10 +437,10 @@ def gerar_lancador_nativo_smartalbum_exe(caminho_saida: Path, caminho_orig_exe: 
     RVA_STR_INICIAR_BAT = 0x2248
     put_rva(RVA_STR_INICIAR_BAT, u16z("iniciar.bat"))
 
-    # Prefixo "-3 \"app.pyw\" ": os primeiros 3 WCHARs (6 bytes) são "-3 ",
-    # então paramBuf + 6 aponta exatamente para "\"app.pyw\" <args>"!
+    # Prefixo "-3 -B \"app.pyw\" ": os primeiros 3 WCHARs (6 bytes) são "-3 ",
+    # então paramBuf + 6 aponta exatamente para "-B \"app.pyw\" <args>"!
     RVA_STR_PYW_PREFIX = 0x2268
-    put_rva(RVA_STR_PYW_PREFIX, u16z('-3 "app.pyw" '))
+    put_rva(RVA_STR_PYW_PREFIX, u16z('-3 -B "app.pyw" '))
 
     # Buffers em .data:
     RVA_EXE_DIR_BUF = 0x3000   # 4096 bytes (2048 WCHARs)
@@ -751,12 +748,17 @@ def main():
     tam_smart = gerar_lancador_nativo_smartalbum_exe(caminho_smart_exe)
     print(f"SmartAlbum.exe gerado com sucesso ({tam_smart} bytes): {caminho_smart_exe}")
 
-    # 2. Se /tmp/Album_orig.exe estiver disponível, reconstrói o Album.exe com o CArchive atualizado
-    orig_exe = Path("/tmp/Album_orig.exe")
-    if orig_exe.is_file():
-        caminho_album_exe = PASTA_RAIZ / "dist" / "Album" / "Album.exe"
-        tam_album = atualizar_album_exe_pyinstaller(orig_exe, caminho_album_exe)
-        print(f"dist/Album/Album.exe reconstruído com sucesso ({tam_album} bytes): {caminho_album_exe}")
+    # 2. Reconstrói o Album.exe com o CArchive atualizado a partir da base PyInstaller disponível
+    caminho_album_exe = PASTA_RAIZ / "dist" / "Album" / "Album.exe"
+    for cand_orig in (
+        Path("/tmp/Album_orig.exe"),
+        caminho_album_exe,
+        Path("/tmp/smart_album/dist/Album/Album.exe"),
+    ):
+        if cand_orig.is_file():
+            tam_album = atualizar_album_exe_pyinstaller(cand_orig, caminho_album_exe)
+            print(f"dist/Album/Album.exe reconstruído com sucesso ({tam_album} bytes): {caminho_album_exe}")
+            break
 
 
 if __name__ == "__main__":

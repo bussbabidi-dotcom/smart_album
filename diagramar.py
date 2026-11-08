@@ -18,8 +18,7 @@ import itertools
 import math
 import uuid
 
-from modelos_lamina import espacos_do_modelo
-from produtos import area_pagina_mm, area_util_pagina_mm, lamina_mm, normalizar_mm
+from produtos import area_pagina_mm, area_util_pagina_mm, espacos_do_modelo, lamina_mm, normalizar_mm
 
 CORTE_MAXIMO = 1.22
 MAX_POR_PAGINA = 8

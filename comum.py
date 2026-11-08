@@ -13,6 +13,9 @@ import threading
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
 try:
     from PIL import Image as _PIL_Img_Compat
     for _enum_c in (getattr(_PIL_Img_Compat, "Resampling", None), getattr(_PIL_Img_Compat, "Transpose", None)):
@@ -39,31 +42,25 @@ def pasta_programa():
 
 def pasta_recurso(nome):
     """
-    Pasta de recursos (produtos, modelos, plugin) ao lado do programa. No exe,
-    procura ao lado do exe, na raiz do projeto (quando o exe está em dist/Album)
-    e em _internal/_MEIPASS, copiando na primeira execução para que novos itens fiquem salvos.
+    Pasta de recursos (produtos, recursos, lightroom_plugin) somente para leitura.
+    NUNCA copia nem cria pastas duplicadas dentro do projeto ou de dist/Album.
     """
     base_prog = pasta_programa()
     ao_lado = base_prog / nome
     if ao_lado.is_dir():
         return ao_lado
     interno = getattr(sys, "_MEIPASS", None)
-    candidatos = []
-    if interno:
-        candidatos.append(Path(interno) / nome)
-    candidatos.extend([
-        base_prog / "_internal" / nome,
-        base_prog / "dist" / "Album" / "_internal" / nome,
+    candidatos = [
         base_prog.parent / nome,
         base_prog.parent.parent / nome,
-    ])
+        base_prog / "_internal" / nome,
+        base_prog / "dist" / "Album" / "_internal" / nome,
+    ]
+    if interno:
+        candidatos.insert(0, Path(interno) / nome)
     for cand in candidatos:
         if cand.is_dir():
-            try:
-                shutil.copytree(cand, ao_lado)
-                return ao_lado
-            except OSError:
-                return cand
+            return cand
     return ao_lado
 
 

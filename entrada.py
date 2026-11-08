@@ -10,6 +10,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
 import analise
 import projeto as proj
 from comum import EXTENSOES, chave_natural, gravar_json, ler_json, normalizar_caminho, pasta_dados, pasta_programa

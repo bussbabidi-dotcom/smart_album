@@ -1,0 +1,16 @@
+# Caches do Python (nunca versionar para evitar conflitos no Git)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pastas e arquivos temporários / builds locais
+build/
+modelos/
+dist/Album/produtos/
+dist/Album/recursos/
+dist/Album/lightroom_plugin/
+*.log
+*.tmp
+*.parcial
+*.psd_tmp
+*.patch
