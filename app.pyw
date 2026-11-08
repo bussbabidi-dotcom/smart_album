@@ -6414,16 +6414,63 @@ class Aplicativo:
                 canvas_g.create_rectangle(
                     margem_x + 38,
                     y0 + 6,
-                    margem_x + 118,
+                    margem_x + 112,
                     y0 + 30,
                     fill=cor_g,
                     outline="",
                 )
                 canvas_g.create_text(
-                    margem_x + 78,
+                    margem_x + 75,
                     y0 + 18,
-                    text="GRUPO %d" % (idx_g + 1),
+                    text="%dº GRUPO" % (idx_g + 1),
                     fill="#ffffff",
+                    font=tema.FONTE_FORTE,
+                )
+
+                # Botões diretos de Ordem [▲] e [▼] no cabeçalho deste grupo
+                up_x0, up_x1 = margem_x + 116, margem_x + 140
+                dn_x0, dn_x1 = margem_x + 143, margem_x + 167
+                canvas_g.create_rectangle(
+                    up_x0, y0 + 6, up_x1, y0 + 30,
+                    fill=tema.PAINEL_3 if idx_g > 0 else tema.PAINEL,
+                    outline=tema.BORDA_CLARA,
+                    width=1,
+                )
+                canvas_g.create_text(
+                    (up_x0 + up_x1) // 2, y0 + 18,
+                    text="▲",
+                    fill="#ffffff" if idx_g > 0 else tema.TEXTO_FRACO,
+                    font=tema.FONTE_PEQUENA,
+                )
+                canvas_g.create_rectangle(
+                    dn_x0, y0 + 6, dn_x1, y0 + 30,
+                    fill=tema.PAINEL_3 if idx_g < (len(estado_grupos) - 1) else tema.PAINEL,
+                    outline=tema.BORDA_CLARA,
+                    width=1,
+                )
+                canvas_g.create_text(
+                    (dn_x0 + dn_x1) // 2, y0 + 18,
+                    text="▼",
+                    fill="#ffffff" if idx_g < (len(estado_grupos) - 1) else tema.TEXTO_FRACO,
+                    font=tema.FONTE_PEQUENA,
+                )
+
+                # Botão clicável [🎓 Opções de Evento ▾] exclusivo para este grupo
+                ev_x0, ev_x1 = margem_x + 172, margem_x + 318
+                canvas_g.create_rectangle(
+                    ev_x0,
+                    y0 + 5,
+                    ev_x1,
+                    y0 + 31,
+                    fill="#2b2416",
+                    outline="#f5a623",
+                    width=1,
+                )
+                canvas_g.create_text(
+                    (ev_x0 + ev_x1) // 2,
+                    y0 + 18,
+                    text="🎓 Opções de Evento ▾",
+                    fill="#fde047",
                     font=tema.FONTE_FORTE,
                 )
 
@@ -6438,7 +6485,7 @@ class Aplicativo:
                     resumo_g += "  ·  [Aba fechada — solte fotos aqui ou clique p/ abrir]"
 
                 canvas_g.create_text(
-                    margem_x + 128,
+                    margem_x + 328,
                     y0 + 18,
                     anchor="w",
                     text=resumo_g,
@@ -6465,6 +6512,12 @@ class Aplicativo:
                     "cab_y1": y0 + alt_cab,
                     "x0": margem_x,
                     "x1": larg - margem_x,
+                    "up_x0": up_x0,
+                    "up_x1": up_x1,
+                    "dn_x0": dn_x0,
+                    "dn_x1": dn_x1,
+                    "ev_x0": ev_x0,
+                    "ev_x1": ev_x1,
                 })
 
                 if recolhido:
@@ -6655,6 +6708,71 @@ class Aplicativo:
                             f.pop("tipo_pessoas", None)
             _redesenhar_canvas()
 
+        OPCOES_EVENTO_MENU = (
+            ("🎓 Colação 1 (Estúdio / Beca)", "Colação 1"),
+            ("🎓 Colação 2 (Solenidade / Palco)", "Colação 2"),
+            ("🎓 Colação 3 (Cerimônia / Canudo)", "Colação 3"),
+            ("🥼 Cerimônia do Jaleco", "Cerimônia do Jaleco"),
+            ("🌿 Fotos Externas / Parque", "Fotos Externas"),
+            ("✨ Baile de Gala / Festa", "Baile de Gala"),
+            ("🕊️ Culto Ecumênico / Missa", "Culto Ecumênico"),
+            ("📸 Ensaio Fotográfico", "Ensaio Fotográfico"),
+            ("🥂 Jantar / Recepção", "Jantar / Recepção"),
+            ("👨‍👩‍👧 Homenagens / Família", "Homenagens / Família"),
+        )
+
+        def _definir_nome_evento_grupo(idx_alvo, novo_nome):
+            if 0 <= idx_alvo < len(estado_grupos):
+                estado_grupos[idx_alvo]["nome"] = str(novo_nome).strip()
+                grupo_ativo_idx[0] = idx_alvo
+                _redesenhar_canvas()
+
+        def _mover_grupo_indice(idx_origem, idx_destino):
+            if not (0 <= idx_origem < len(estado_grupos)) or not (0 <= idx_destino < len(estado_grupos)):
+                return
+            if idx_origem == idx_destino:
+                return
+            item = estado_grupos.pop(idx_origem)
+            estado_grupos.insert(idx_destino, item)
+            grupo_ativo_idx[0] = idx_destino
+            _redesenhar_canvas()
+
+        def _abrir_menu_opcoes_evento_grupo(idx_alvo, x_root, y_root):
+            if not (0 <= idx_alvo < len(estado_grupos)):
+                return
+            grupo_ativo_idx[0] = idx_alvo
+            atual_nome = estado_grupos[idx_alvo]["nome"]
+            menu_ev = tk.Menu(janela, tearoff=0)
+            menu_ev.add_command(
+                label="Opções de Evento para o %dº Grupo (%s):" % (idx_alvo + 1, atual_nome),
+                state="disabled",
+            )
+            menu_ev.add_separator()
+            for rotulo_op, valor_op in OPCOES_EVENTO_MENU:
+                prefixo = "✓ " if atual_nome.strip().lower() == valor_op.lower() else "   "
+                menu_ev.add_command(
+                    label=prefixo + rotulo_op,
+                    command=lambda v=valor_op: _definir_nome_evento_grupo(idx_alvo, v),
+                )
+            menu_ev.add_separator()
+            menu_ev.add_command(
+                label="📁 Evento %d (Neutro)" % (idx_alvo + 1),
+                command=lambda: _definir_nome_evento_grupo(idx_alvo, "Evento %d" % (idx_alvo + 1)),
+            )
+            menu_ev.add_command(
+                label="✎ Digitar nome personalizado...",
+                command=lambda: _renomear_grupo_ativo(),
+            )
+            if len(estado_grupos) > 1:
+                menu_ev.add_separator()
+                for pos_i in range(len(estado_grupos)):
+                    if pos_i != idx_alvo:
+                        menu_ev.add_command(
+                            label="↕ Mover este grupo para %dº lugar" % (pos_i + 1),
+                            command=lambda dest=pos_i: _mover_grupo_indice(idx_alvo, dest),
+                        )
+            menu_ev.tk_popup(x_root, y_root)
+
         def _ao_clicar_canvas(evento):
             canvas_g.focus_set()
             x_c = canvas_g.canvasx(evento.x)
@@ -6664,8 +6782,20 @@ class Aplicativo:
             rg_idx = rg["idx_g"] if rg is not None else _achar_grupo_em(y_c)
             grupo_ativo_idx[0] = rg_idx
 
-            # Verifica se clicou no cabeçalho do grupo para recolher/expandir a aba
+            # Verifica se clicou no cabeçalho do grupo
             if rf is None and rg is not None and rg["cab_y0"] <= y_c <= rg["cab_y1"]:
+                # Clicou no botão [▲] Subir Grupo
+                if rg.get("up_x0", -1) <= x_c <= rg.get("up_x1", -1):
+                    _mover_grupo_indice(rg_idx, rg_idx - 1)
+                    return
+                # Clicou no botão [▼] Descer Grupo
+                if rg.get("dn_x0", -1) <= x_c <= rg.get("dn_x1", -1):
+                    _mover_grupo_indice(rg_idx, rg_idx + 1)
+                    return
+                # Clicou no botão [🎓 Opções de Evento ▾] deste grupo
+                if rg.get("ev_x0", -1) <= x_c <= rg.get("ev_x1", -1):
+                    _abrir_menu_opcoes_evento_grupo(rg_idx, evento.x_root, evento.y_root)
+                    return
                 # Clicar no botão ▼/▶ (esquerda), no texto "Fechar/Abrir aba" (direita) ou em um grupo já recolhido alterna a aba
                 clicou_toggle = (x_c <= rg["x0"] + 40) or (x_c >= rg["x1"] - 115) or bool(estado_grupos[rg_idx].get("recolhido"))
                 if clicou_toggle:
@@ -6718,6 +6848,10 @@ class Aplicativo:
             x_c = canvas_g.canvasx(evento.x)
             y_c = canvas_g.canvasy(evento.y)
             rf = _achar_foto_em(x_c, y_c)
+            rg = _achar_regiao_grupo_em(y_c)
+            if rf is None and rg is not None and rg["cab_y0"] <= y_c <= rg["cab_y1"]:
+                _abrir_menu_opcoes_evento_grupo(rg["idx_g"], evento.x_root, evento.y_root)
+                return
             if rf is not None:
                 ch = rf["chave"]
                 if ch not in fotos_sel_chaves:
