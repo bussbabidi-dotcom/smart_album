@@ -224,12 +224,21 @@ def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha, cor
             for i in range(k):
                 larguras[i] = larguras_nat[i] if i in travadas else larguras_nat[i] * fator_clamped
             if abs(fator_livres - fator_clamped) <= 1e-4:
+                soma_p = sum(larguras)
+                if soma_p > largura_util + 1e-4:
+                    red = largura_util / soma_p
+                    larguras = [w * red for w in larguras]
                 return larguras, True
 
     # Se todas precisarem de ajuste no mesmo sentido (ex.: linha inteira muito alta ou baixa),
-    # expande/contrai até o limite seguro corte_max ou mantém proporção padrão
+    # expande/contrai até o limite seguro corte_max sem jamais ultrapassar largura_util
     fator_seguro = min(corte_max, max(1.0 / max(1.0, corte_max), escala))
-    return [w * fator_seguro for w in larguras_nat], True
+    larguras_finais = [w * fator_seguro for w in larguras_nat]
+    soma_final = sum(larguras_finais)
+    if soma_final > largura_util + 1e-4:
+        red = largura_util / soma_final
+        larguras_finais = [w * red for w in larguras_finais]
+    return larguras_finais, True
 
 
 def _layout_linhas(proporcoes, area, espaco, linhas, corte_max=CORTE_MAXIMO):
@@ -398,13 +407,20 @@ def _layouts_assimetricos(proporcoes, area, espaco, corte_max=CORTE_MAXIMO):
                 w_pilha = w_disp - w_hero
                 corte_pilha = max((w_pilha / max(1e-6, w_pilha_nat)), (w_pilha_nat / max(1e-6, w_pilha)))
                 if corte_pilha > corte_max:
-                    w_pilha = w_pilha_nat * (corte_max if w_pilha > w_pilha_nat else 1.0 / max(1.0, corte_max))
+                    w_pilha = min(
+                        w_disp * 0.72,
+                        w_pilha_nat * (corte_max if w_pilha > w_pilha_nat else 1.0 / max(1.0, corte_max)),
+                    )
                     w_hero = min(w_disp - w_pilha, w_hero_nat * corte_max)
+                if w_hero + w_pilha > w_disp + 1e-4:
+                    red_w = w_disp / (w_hero + w_pilha)
+                    w_hero *= red_w
+                    w_pilha *= red_w
                 h_hero = min(H, w_hero / p_hero) if abs(w_hero - w_hero_nat) < 1e-3 else H
 
             for lado_hero in ("esq", "dir"):
-                total_w = w_hero + espaco + w_pilha
-                inicio_x = x0 + (W - total_w) / 2.0
+                total_w = min(W, w_hero + espaco + w_pilha)
+                inicio_x = x0 + max(0.0, (W - total_w) / 2.0)
                 if lado_hero == "esq":
                     x_hero = inicio_x
                     x_pilha = inicio_x + w_hero + espaco
@@ -422,8 +438,12 @@ def _layouts_assimetricos(proporcoes, area, espaco, corte_max=CORTE_MAXIMO):
                 fator_hp = h_pilha_disp / max(1e-6, soma_hp)
                 fator_hp_seguro = min(corte_max, max(1.0 / max(1.0, corte_max), fator_hp))
                 alturas_p = [h * fator_hp_seguro for h in alturas_p_nat]
+                soma_alturas_p = sum(alturas_p)
+                if soma_alturas_p > h_pilha_disp + 1e-4:
+                    red_hp = h_pilha_disp / soma_alturas_p
+                    alturas_p = [h * red_hp for h in alturas_p]
                 total_hp = sum(alturas_p) + espaco * (k - 1)
-                yp = y0 + (H - total_hp) / 2.0
+                yp = y0 + max(0.0, (H - total_hp) / 2.0)
 
                 quadros_mapa = {idx_hero: q_hero}
                 for i_outro, p_o, hp in zip(outros, p_outros, alturas_p):
@@ -462,13 +482,20 @@ def _layouts_assimetricos(proporcoes, area, espaco, corte_max=CORTE_MAXIMO):
                 h_linha = h_disp - h_hero
                 corte_linha = max((h_linha / max(1e-6, h_linha_nat)), (h_linha_nat / max(1e-6, h_linha)))
                 if corte_linha > corte_max:
-                    h_linha = h_linha_nat * (corte_max if h_linha > h_linha_nat else 1.0 / max(1.0, corte_max))
+                    h_linha = min(
+                        h_disp * 0.72,
+                        h_linha_nat * (corte_max if h_linha > h_linha_nat else 1.0 / max(1.0, corte_max)),
+                    )
                     h_hero = min(h_disp - h_linha, h_hero_nat * corte_max)
+                if h_hero + h_linha > h_disp + 1e-4:
+                    red_h = h_disp / (h_hero + h_linha)
+                    h_hero *= red_h
+                    h_linha *= red_h
                 w_hero = min(W, h_hero * p_hero) if abs(h_hero - h_hero_nat) < 1e-3 else W
 
             for pos_hero in ("topo", "base"):
-                total_h = h_hero + espaco + h_linha
-                inicio_y = y0 + (H - total_h) / 2.0
+                total_h = min(H, h_hero + espaco + h_linha)
+                inicio_y = y0 + max(0.0, (H - total_h) / 2.0)
                 if pos_hero == "topo":
                     y_hero = inicio_y
                     y_linha = inicio_y + h_hero + espaco
@@ -481,8 +508,8 @@ def _layouts_assimetricos(proporcoes, area, espaco, corte_max=CORTE_MAXIMO):
                     q_hero = caixa_proporcao_padrao(p_hero, (x0, y_hero, W, h_hero))
 
                 larguras_l, _padrao = _distribuir_larguras_linha(p_outros, w_linha_disp, h_linha, corte_max=corte_max)
-                total_wl = sum(larguras_l) + espaco * (k - 1)
-                xl = x0 + (W - total_wl) / 2.0
+                total_wl = min(W, sum(larguras_l) + espaco * (k - 1))
+                xl = x0 + max(0.0, (W - total_wl) / 2.0)
 
                 quadros_mapa = {idx_hero: q_hero}
                 for i_outro, p_o, wl in zip(outros, p_outros, larguras_l):
@@ -798,9 +825,11 @@ def _layouts_transpasse_central(fotos, produto, cfg):
                 usado = sum(q[2] * q[3] for q in quadros)
                 vazio = max(0.0, 1.0 - usado / max(1.0, area_w * area_h))
                 pen_rosto, _dobra_h = _custo_rosto_na_dobra(fotos[idx_hero], q_hero, W)
+                bonus_t = -0.18 if (fotos[idx_hero].get("destaque") or p_hero >= 1.85) else 0.16
 
                 custo = (
-                    0.22
+                    0.28
+                    + bonus_t
                     + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n
                     + PESO_VAZIO * 0.45 * vazio
                     + pen_rosto
@@ -926,41 +955,11 @@ def _layouts_meio_termo(fotos, produto, cfg):
                 pen_hero = PESO_CORTE * (math.log(max(1.0, min(corte_h, corte_sangria))) ** 2) * 0.45
                 if corte_h > corte_sangria:
                     pen_hero += 6.0 * ((corte_h - corte_sangria) ** 2)
-                bonus = -0.25 if fotos[idx_hero].get("destaque") or n == 3 else -0.08
-                custo = max(0.05, 0.18 + bonus + (pen_hero + c_safe) / 2.0)
+                bonus = -0.32 if fotos[idx_hero].get("destaque") else 0.0
+                custo = 0.42 + bonus + pen_hero + c_safe
 
                 saida.append({
                     "custo": custo,
-                    "espacos": espacos,
-                    "sobreposicoes": [],
-                    "modelo": None,
-                    "tipo_layout": etiqueta,
-                })
-
-        # Variação com 2 fotos preenchendo 100% da página sangrada + (n - 2) fotos na Safe Zone
-        if n >= 4:
-            par_sangrado = [0, 1] if pagina_sangrada == 0 else [n - 2, n - 1]
-            indices_safe = [i for i in range(n) if i not in par_sangrado]
-            props_sang = [max(0.1, float(fotos[i]["proporcao"])) for i in par_sangrado]
-            props_safe = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_safe]
-            ops_sang = layouts_pagina(props_sang, area_sangrada, intervalo, (), produto=None, pagina=pagina_sangrada, maximo=1, corte_max=corte_sangria)
-            ops_safe = layouts_pagina(props_safe, area_safe, intervalo, (), produto=None, pagina=pagina_safe, maximo=1, corte_max=corte_max)
-            if ops_sang and ops_safe and ops_sang[0][1] and ops_safe[0][1]:
-                c_sg, q_sg, _m1, ord_sg = ops_sang[0]
-                c_sf, q_sf, _m2, ord_sf = ops_safe[0]
-                espacos = []
-                if pagina_sangrada == 0:
-                    for q, idx_r in zip(q_sg, ord_sg):
-                        espacos.append(_espaco(produto, q, fotos[par_sangrado[idx_r]]["caminho"]))
-                    for q, idx_r in zip(q_sf, ord_sf):
-                        espacos.append(_espaco(produto, q, fotos[indices_safe[idx_r]]["caminho"]))
-                else:
-                    for q, idx_r in zip(q_sf, ord_sf):
-                        espacos.append(_espaco(produto, q, fotos[indices_safe[idx_r]]["caminho"]))
-                    for q, idx_r in zip(q_sg, ord_sg):
-                        espacos.append(_espaco(produto, q, fotos[par_sangrado[idx_r]]["caminho"]))
-                saida.append({
-                    "custo": 0.26 + (c_sg + c_sf) * 0.45,
                     "espacos": espacos,
                     "sobreposicoes": [],
                     "modelo": None,
@@ -974,7 +973,7 @@ def _layouts_meio_termo(fotos, produto, cfg):
 def _layouts_preenchimento_maximo(fotos, produto, cfg):
     """
     Layouts de Preenchimento Máximo ("Sangria Total / Sem Margem"):
-    - Variações dos layouts que ignoram as linhas da Safe Zone e expandem as fotos até o limite
+    - Variações opcionais que ignoram as linhas da Safe Zone e expandem as fotos até o limite
       máximo da página/lâmina (incluindo sangria externa), mantendo apenas o espaçamento fino entre quadros.
     """
     if not cfg.get("permitir_sangria_total", True):
@@ -991,7 +990,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
 
     if n == 1:
         saida.append({
-            "custo": 0.15,
+            "custo": 1.45,
             "espacos": [_espaco(produto, (0.0, 0.0, lw, lh), fotos[0]["caminho"])],
             "sobreposicoes": [],
             "modelo": None,
@@ -1000,7 +999,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
         if paginas >= 2:
             for p_idx, etq in ((0, "meio_termo_esq"), (1, "meio_termo_dir")):
                 saida.append({
-                    "custo": 0.28,
+                    "custo": 1.50,
                     "espacos": [_espaco(produto, area_pagina_mm(produto, p_idx), fotos[0]["caminho"])],
                     "sobreposicoes": [],
                     "modelo": None,
@@ -1008,7 +1007,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
                 })
         return saida
 
-    # 1. Divisões página a página ocupando 100% de cada página até a sangria
+    # Divisões página a página ocupando 100% de cada página até a sangria (apenas como sugestão opcional)
     divisoes = [(n,)] if paginas == 1 else [(k, n - k) for k in range(1, n)]
     for divisao in divisoes:
         if any(k > max_pagina for k in divisao):
@@ -1020,7 +1019,6 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
             grupo = fotos[inicio:inicio + k]
             inicio += k
             px, py, pw, ph = area_pagina_mm(produto, pagina)
-            # Pequeno intervalo no encontro central se os dois lados tiverem fotos
             if paginas > 1 and intervalo > 0:
                 if pagina == 0:
                     area_p = (px, py, max(10.0, pw - intervalo / 2.0), ph)
@@ -1044,7 +1042,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
             for (grupo, _ops), (_c, quadros, _mod, ordem) in zip(por_pagina, combinacao):
                 for quadro, indice in zip(quadros, ordem):
                     espacos.append(_espaco(produto, quadro, grupo[indice]["caminho"]))
-            custo = 0.24 + penalidade + sum(c[0] for c in combinacao) * 0.55
+            custo = 1.45 + penalidade + sum(c[0] for c in combinacao)
             saida.append({
                 "custo": custo,
                 "espacos": espacos,
@@ -1052,38 +1050,6 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
                 "modelo": None,
                 "tipo_layout": "sangria_total",
             })
-
-    # 2. Transpasse 60/40 e 70/30 em Sangria Total (0mm de margem externa)
-    if paginas >= 2 and cfg.get("permitir_transpasse", True) and 2 <= n <= 8:
-        idx_hero = max(range(n), key=lambda i: (bool(fotos[i].get("destaque")), float(fotos[i].get("proporcao") or 1.0)))
-        indices_rest = [i for i in range(n) if i != idx_hero]
-        props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
-        for fracao_h in (0.60, 0.70):
-            w_hero = (lw - intervalo) * fracao_h
-            w_resto = (lw - intervalo) - w_hero
-            for lado in ("esq", "dir"):
-                q_hero = (0.0, 0.0, w_hero, lh) if lado == "esq" else (w_resto + intervalo, 0.0, w_hero, lh)
-                area_r = (w_hero + intervalo, 0.0, w_resto, lh) if lado == "esq" else (0.0, 0.0, w_resto, lh)
-                ops_r = layouts_pagina(props_rest, area_r, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_sangria)
-                if not ops_r or not ops_r[0][1]:
-                    continue
-                _cr, quadros_r, _mr, ordem_r = ops_r[0]
-                quadros_mapa = {idx_hero: q_hero}
-                for qr, idx_rel in zip(quadros_r, ordem_r):
-                    quadros_mapa[indices_rest[idx_rel]] = qr
-                pen_rosto, _d = _custo_rosto_na_dobra(fotos[idx_hero], q_hero, lw)
-                espacos = []
-                for i in range(n):
-                    _p, dobra_rel = _custo_rosto_na_dobra(fotos[i], quadros_mapa[i], lw)
-                    ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
-                    espacos.append(_espaco(produto, quadros_mapa[i], fotos[i]["caminho"], ed))
-                saida.append({
-                    "custo": 0.29 + pen_rosto,
-                    "espacos": espacos,
-                    "sobreposicoes": [],
-                    "modelo": None,
-                    "tipo_layout": "sangria_total",
-                })
 
     saida.sort(key=lambda op: op["custo"])
     return saida
@@ -1171,6 +1137,34 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
 
     # 5. Opções com proporção 100% nativa sem corte
     opcoes.extend(_layouts_sem_corte(proporcoes, area, espaco, priorizar=somente_sem_corte))
+
+    # Garantia estrita de que nenhum quadro ultrapasse os limites de `area` (Safe Zone ou página)
+    ax0, ay0, aW, aH = area
+    opcoes_clamped = []
+    for c_op, q_op, m_op, ord_op in opcoes:
+        if not q_op:
+            opcoes_clamped.append((c_op, q_op, m_op, ord_op))
+            continue
+        min_x = min(q[0] for q in q_op)
+        min_y = min(q[1] for q in q_op)
+        max_x = max(q[0] + q[2] for q in q_op)
+        max_y = max(q[1] + q[3] for q in q_op)
+        span_w = max_x - min_x
+        span_h = max_y - min_y
+        if min_x < ax0 - 1e-3 or min_y < ay0 - 1e-3 or max_x > ax0 + aW + 1e-3 or max_y > ay0 + aH + 1e-3:
+            esc_x = aW / span_w if span_w > aW else 1.0
+            esc_y = aH / span_h if span_h > aH else 1.0
+            esc = min(esc_x, esc_y)
+            novo_w = span_w * esc
+            novo_h = span_h * esc
+            off_x = ax0 + (aW - novo_w) / 2.0
+            off_y = ay0 + (aH - novo_h) / 2.0
+            q_op = [
+                (off_x + (qx - min_x) * esc, off_y + (qy - min_y) * esc, qw * esc, qh * esc)
+                for (qx, qy, qw, qh) in q_op
+            ]
+        opcoes_clamped.append((c_op, q_op, m_op, ord_op))
+    opcoes = opcoes_clamped
     opcoes.sort(key=lambda o: o[0])
 
     vistos = set()
@@ -1225,17 +1219,20 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
 
     if n == 1:
         p = max(0.1, float(fotos[0]["proporcao"]))
-        area_lamina_util = (margem, margem, max(1.0, lw - 2 * margem), max(1.0, lh - 2 * margem))
-        corte_lamina = _corte_quadro(p, (0, 0, lw, lh))
-        if cfg.get("permitir_transpasse", True) and (corte_lamina <= corte_max or (fotos[0].get("destaque") and p >= 1.35)):
-            bonus = -2.0 if fotos[0].get("destaque") and p > 1.25 else 0.0
-            quadro_l = (0, 0, lw, lh) if corte_lamina <= corte_max else caixa_proporcao_padrao(p, area_lamina_util)
+        b = float(produto.get("sangria_mm", 3.0))
+        seg = float(produto.get("seguranca_mm", 8.0))
+        m_seg = b + max(seg, margem)
+        area_lamina_util = (m_seg, m_seg, max(1.0, lw - 2 * m_seg), max(1.0, lh - 2 * m_seg))
+        corte_lamina = _corte_quadro(p, area_lamina_util)
+        if cfg.get("permitir_transpasse", True) and p >= 1.15:
+            bonus = -0.35 if fotos[0].get("destaque") and p > 1.25 else 0.0
+            quadro_l = area_lamina_util if corte_lamina <= corte_max else caixa_proporcao_padrao(p, area_lamina_util)
             opcoes.append({
-                "custo": PESO_CORTE * math.log(max(1.0, min(corte_lamina, corte_max))) ** 2 * 0.5 + bonus,
+                "custo": 0.20 + PESO_CORTE * math.log(max(1.0, min(corte_lamina, corte_max))) ** 2 * 0.5 + bonus,
                 "espacos": [_espaco(produto, quadro_l, fotos[0]["caminho"])],
                 "sobreposicoes": [],
                 "modelo": None,
-                "tipo_layout": "panoramico_meio" if quadro_l == (0, 0, lw, lh) else "sem_corte",
+                "tipo_layout": "panoramico_meio" if quadro_l == area_lamina_util else "sem_corte",
             })
 
     for modelo in modelos_lamina:
@@ -1672,7 +1669,7 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_f
     # 2. Variações de Sangria Total da Página (ultrapassa a Safe Zone e preenche a página até a sangria)
     if n == 1:
         opcoes_brutas.append({
-            "custo": 0.12,
+            "custo": 0.85,
             "espacos": montar_espacos([area_sang], [0]),
             "nome": "Sangria Total · Página 100% Cheia",
             "estilo": "sangria_pagina",
@@ -1686,7 +1683,7 @@ def opcoes_pagina_unica(fotos, produto, pagina=0, cfg=None, maximo=14, espacos_f
             if not quadros_s or marcador_s == "__sem_corte__":
                 continue
             opcoes_brutas.append({
-                "custo": 0.18 + custo_s * 0.55 + idx_s * 0.03,
+                "custo": 0.88 + custo_s + idx_s * 0.03,
                 "espacos": montar_espacos(quadros_s, ordem_s),
                 "nome": "Sangria Total · Preenchimento %d" % (idx_s + 1),
                 "estilo": "sangria_pagina",
@@ -2773,11 +2770,21 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         return False
 
     from comum import cor_rgb
-    from composicao import extrair_paleta_fotos
+    try:
+        from composicao import NOMES_ESTILOS_MOLDURA, extrair_paleta_fotos, sombra_padrao
+    except ImportError:
+        NOMES_ESTILOS_MOLDURA = {
+            "simples", "dupla", "pontilhada", "royal", "degrade_bicolor",
+            "metalica_ouro", "cantoneira_imperial", "chanfrada_3d",
+            "passepartout", "filete_triplo", "cruzada_vintage", "halo_luminoso",
+        }
+        def extrair_paleta_fotos(_c):
+            return {"tons_medios": ["#d4c5b4"], "cor_moldura_clara": "#faf8f5", "cor_moldura_escura": "#52483e"}
+        def sombra_padrao():
+            return {"ativa": False, "cor": "#000000", "opacidade": 40, "desfoque_mm": 2.2, "offset_x_mm": 1.2, "offset_y_mm": 1.6, "expansao_mm": 0.2, "sincronizar_moldura": True}
 
     regra = str(cfg.get("regra_auto_molduras", "grades_com_margem") or "grades_com_margem").strip().lower()
     estilo = str(cfg.get("estilo_auto_molduras", "simples") or "simples").strip().lower()
-    from composicao import NOMES_ESTILOS_MOLDURA, sombra_padrao
     if estilo not in NOMES_ESTILOS_MOLDURA:
         estilo = "simples"
     cor_modo = str(cfg.get("cor_auto_molduras", "contraste_automatico") or "contraste_automatico").strip().lower()
@@ -2839,27 +2846,31 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         eh = float(esp.get("h", 0.0))
         area_e = ew * eh
 
-        # Regra 2: Nunca coloca moldura em foto sangrada nas bordas da lâmina ou página inteira cheia
+        # Regra 2: Nunca coloca moldura em foto sangrada nas bordas externas da lâmina
         sangrada_borda = (
-            ex <= 0.008
-            or ey <= 0.008
-            or (ex + ew) >= 0.992
-            or (ey + eh) >= 0.992
-            or (ew >= 0.485 and eh >= 0.95)
+            ex <= 0.005
+            or ey <= 0.005
+            or (ex + ew) >= 0.995
+            or (ey + eh) >= 0.995
         )
         if sangrada_borda:
+            ed.pop("moldura", None)
+            if incluir_sombra:
+                ed.pop("sombra", None)
             continue
 
         centro_x = ex + ew * 0.5
         qtd_na_pagina = qtd_esq if centro_x < 0.5 else qtd_dir
 
         elegivel = False
-        if regra in ("todas_com_margem", "grades_e_margem"):
+        if regra in ("todas_com_margem", "grades_e_margem", "grades_com_margem"):
             elegivel = True
         elif regra == "secundarias":
             elegivel = len(espacos) >= 2 and area_e < maior_area * 0.85
+        elif regra == "apenas_grades":
+            elegivel = qtd_na_pagina >= 2
         else:
-            elegivel = (qtd_na_pagina >= 2) or (len(espacos) >= 2) or (area_e <= 0.36)
+            elegivel = True
 
         if not elegivel:
             continue
@@ -2889,7 +2900,13 @@ def aplicar_sombra_automatica(lamina, cfg_sombra=None, apenas_com_moldura=False)
     ou as fotos em grade/margem elegíveis para moldura (nunca em fotos sangradas 100% ou com degradê).
     Aceita tanto uma lâmina (`dict`) quanto uma lista de lâminas (`list`).
     """
-    from composicao import sombra_padrao, tem_degrade_ativo
+    try:
+        from composicao import sombra_padrao, tem_degrade_ativo
+    except ImportError:
+        def sombra_padrao():
+            return {"ativa": False, "cor": "#000000", "opacidade": 40, "desfoque_mm": 2.2, "offset_x_mm": 1.2, "offset_y_mm": 1.6, "expansao_mm": 0.2, "sincronizar_moldura": True}
+        def tem_degrade_ativo(d):
+            return bool(isinstance(d, dict) and d.get("ativo"))
 
     if isinstance(lamina, list):
         alterou_alguma = False
@@ -2915,13 +2932,13 @@ def aplicar_sombra_automatica(lamina, cfg_sombra=None, apenas_com_moldura=False)
         ew = float(esp.get("w", 0.0))
         eh = float(esp.get("h", 0.0))
         sangrada_borda = (
-            ex <= 0.008
-            or ey <= 0.008
-            or (ex + ew) >= 0.992
-            or (ey + eh) >= 0.992
-            or (ew >= 0.485 and eh >= 0.95)
+            ex <= 0.005
+            or ey <= 0.005
+            or (ex + ew) >= 0.995
+            or (ey + eh) >= 0.995
         )
         if sangrada_borda:
+            ed.pop("sombra", None)
             continue
         if apenas_com_moldura and not ed.get("moldura"):
             continue
@@ -2973,19 +2990,24 @@ def aplicar_tema_em_laminas(
             ew = float(esp.get("w", 0.0))
             eh = float(esp.get("h", 0.0))
             sangrada_borda = (
-                ex <= 0.008
-                or ey <= 0.008
-                or (ex + ew) >= 0.992
-                or (ey + eh) >= 0.992
-                or (ew >= 0.485 and eh >= 0.95)
+                ex <= 0.005
+                or ey <= 0.005
+                or (ex + ew) >= 0.995
+                or (ey + eh) >= 0.995
             )
             tem_deg = tem_degrade_ativo(ed.get("degrade"))
 
-            if aplicar_moldura and not sangrada_borda and not tem_deg:
-                ed["moldura"] = dict(tema_cfg.get("moldura") or {"estilo": "royal", "cor": "#d4af37", "espessura_mm": 0.6})
+            if aplicar_moldura:
+                if not sangrada_borda and not tem_deg:
+                    ed["moldura"] = dict(tema_cfg.get("moldura") or {"estilo": "royal", "cor": "#d4af37", "espessura_mm": 0.6})
+                else:
+                    ed.pop("moldura", None)
 
-            if aplicar_sombra and not sangrada_borda and not tem_deg:
-                ed["sombra"] = dict(tema_cfg.get("sombra") or {"ativa": True, "opacidade": 50, "desfoque_mm": 2.5, "offset_x_mm": 1.3, "offset_y_mm": 1.7, "sincronizar_moldura": True})
+            if aplicar_sombra:
+                if not sangrada_borda and not tem_deg:
+                    ed["sombra"] = dict(tema_cfg.get("sombra") or {"ativa": True, "opacidade": 50, "desfoque_mm": 2.5, "offset_x_mm": 1.3, "offset_y_mm": 1.7, "sincronizar_moldura": True})
+                else:
+                    ed.pop("sombra", None)
 
             if aplicar_edicao and isinstance(tema_cfg.get("edicao_foto"), dict):
                 for ch_ed, val_ed in tema_cfg["edicao_foto"].items():

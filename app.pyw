@@ -7121,13 +7121,63 @@ class Aplicativo:
             return self.projeto["laminas"][indice]
         return None
 
+    def _sincronizar_molduras_sombra_lamina(self, lamina, moldura_ref=None, sombra_ref=None):
+        """Garante que todas as fotos na Safe Zone recebam a moldura/sombra da lâmina e fotos sangradas nas bordas não fiquem com moldura."""
+        if not lamina or not lamina.get("espacos"):
+            return
+        if moldura_ref is None:
+            for esp in lamina.get("espacos", []):
+                m_e = (esp.get("edicao") or {}).get("moldura")
+                if isinstance(m_e, dict) and m_e.get("estilo") and m_e.get("estilo") != "nenhuma":
+                    moldura_ref = dict(m_e)
+                    break
+        if sombra_ref is None:
+            for esp in lamina.get("espacos", []):
+                s_e = (esp.get("edicao") or {}).get("sombra")
+                if isinstance(s_e, dict) and s_e.get("ativa", True):
+                    sombra_ref = dict(s_e)
+                    break
+
+        for esp in lamina.get("espacos", []):
+            if not esp.get("foto"):
+                continue
+            ed = esp.setdefault("edicao", {})
+            ex = float(esp.get("x", 0.0))
+            ey = float(esp.get("y", 0.0))
+            ew = float(esp.get("w", 0.0))
+            eh = float(esp.get("h", 0.0))
+            sangrada_borda = (
+                ex <= 0.005
+                or ey <= 0.005
+                or (ex + ew) >= 0.995
+                or (ey + eh) >= 0.995
+            )
+            tem_deg = bool((ed.get("degrade") or {}).get("ativo"))
+            if sangrada_borda or tem_deg:
+                ed.pop("moldura", None)
+                ed.pop("sombra", None)
+            else:
+                if moldura_ref and not ed.get("moldura"):
+                    ed["moldura"] = dict(moldura_ref)
+                if sombra_ref and not ed.get("sombra"):
+                    ed["sombra"] = dict(sombra_ref)
+
+        if moldura_ref is None and self._cfg().get("auto_molduras", True):
+            diagramar.aplicar_molduras_automaticas(lamina, None, self.produto, self._cfg())
+
     def _aplicar_opcao(self, lamina, opcao):
-        """Troca o layout, mantendo giro e ajustes de cada foto (o corte é refeito)."""
+        """Troca o layout, mantendo giro e ajustes de cada foto (o corte é refeito) e sincronizando molduras na Safe Zone."""
         antigas = {}
+        moldura_ref = None
+        sombra_ref = None
         for espaco in lamina.get("espacos", []):
             if espaco.get("foto"):
                 ed = dict(espaco.get("edicao") or {})
                 ed.pop("corte", None)
+                if moldura_ref is None and isinstance(ed.get("moldura"), dict) and ed["moldura"].get("estilo") != "nenhuma":
+                    moldura_ref = dict(ed["moldura"])
+                if sombra_ref is None and isinstance(ed.get("sombra"), dict) and ed["sombra"].get("ativa", True):
+                    sombra_ref = dict(ed["sombra"])
                 antigas[normalizar_caminho(espaco["foto"])] = ed
         novos_espacos = []
         for e in opcao["espacos"]:
@@ -7143,6 +7193,7 @@ class Aplicativo:
         lamina["espacos"] = novos_espacos
         lamina["sobreposicoes"] = list(opcao.get("sobreposicoes") or [])
         lamina["modelo"] = opcao.get("modelo")
+        self._sincronizar_molduras_sombra_lamina(lamina, moldura_ref, sombra_ref)
         ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lamina)
         if ch_l:
             lamina["pasta"] = ch_l
@@ -7870,6 +7921,7 @@ class Aplicativo:
             novos = opcoes[0]["espacos"]
             lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
             lamina["modelo"] = None
+            self._sincronizar_molduras_sombra_lamina(lamina)
             self.espaco_sel = None
             self.atualizar_lamina_atual()
             self._animar_transicao_layout(antes, lamina.get("espacos", []))
@@ -7898,6 +7950,7 @@ class Aplicativo:
             novos = [proj.copia(e) for e in opcao["espacos"]]
             lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
             lamina["modelo"] = None
+            self._sincronizar_molduras_sombra_lamina(lamina)
             self.espaco_sel = None
             self.atualizar_lamina_atual()
             self._animar_transicao_layout(antes, lamina.get("espacos", []))
@@ -7925,6 +7978,7 @@ class Aplicativo:
             lamina["espacos"] = novos
             lamina["sobreposicoes"] = [sobre] if sobre else []
         lamina["modelo"] = modelo["id"]
+        self._sincronizar_molduras_sombra_lamina(lamina)
         if sobras:
             self.registrar("%s foto(s) não couberam no modelo e voltaram para as não usadas." % len(sobras))
         self.espaco_sel = None
