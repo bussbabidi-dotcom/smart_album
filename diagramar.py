@@ -2627,10 +2627,12 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
     """
     FUNÇÃO 2 (Independente): Motor de Degradê Automático nas Fotos e na Fusão de Páginas.
     Regras próprias:
-    - Atua em fotos de Destaque Lateral, Meio-Termo ('meio_termo_esq', 'meio_termo_dir') e
-      Transpasses ('transpasse_60_40', 'transpasse_70_30'), aplicando transição suave na borda
-      voltada para o interior da lâmina.
-    - Nunca aplica degradê nas bordas de fotos em grade ('safe_zone' / 'sem_corte').
+    1. Foto SOZINHA na página sangrada: layouts Meio-Termo ('meio_termo_esq', 'meio_termo_dir')
+       na página 100% sangrada, ou 1 única foto ocupando toda a página até a sangria externa.
+    2. Foto marcada com ESTRELA (Destaque ★): quando está em Transpasse (60/40 ou 70/30) ou
+       sozinha na sua página.
+    - Nunca aplica degradê aleatoriamente em fotos sem estrela em grades ('safe_zone' / 'sem_corte')
+      nem em Transpasses sem estrela.
     - Protege os rostos/pessoas detectados na foto para que o esfumaçado nunca atinja ninguém.
     - Quando a lâmina possui fundos separados por página, ativa fusão suave no centro ('fundo_fusao').
     """
@@ -2641,35 +2643,43 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
         prod_eff = cfg if (isinstance(cfg, dict) and "paginas_por_lamina" in cfg) else {"paginas_por_lamina": 2}
         algum = False
         for lam_item in lamina:
-            if aplicar_degrade_automatico(lam_item, None, prod_eff, cfg_eff):
+            if aplicar_degrade_automatico(lam_item, fotos_lamina, prod_eff, cfg_eff):
                 algum = True
         return algum
     cfg = cfg or {}
     if not bool(cfg.get("auto_degrade", True)):
         return False
 
-    from composicao import tem_fundo_por_pagina
+    try:
+        from composicao import tem_fundo_por_pagina
+    except ImportError:
+        def tem_fundo_por_pagina(lam):
+            return bool(lam.get("fundo_esquerda") or lam.get("fundo_direita") or lam.get("fundo_imagem_esquerda") or lam.get("fundo_imagem_direita"))
+    from comum import normalizar_caminho
 
-    regra = str(cfg.get("regra_auto_degrade", "destaque_e_fusao") or "destaque_e_fusao").strip().lower()
+    regra = str(cfg.get("regra_auto_degrade", "destaques") or "destaques").strip().lower()
     intensidade = str(cfg.get("intensidade_auto_degrade", "suave") or "suave").strip().lower()
     mapa_inicio = {"suave": 68, "medio": 56, "forte": 44}
     inicio_base = mapa_inicio.get(intensidade, 68)
     alterou = False
 
     # Regra A: Fusão central suave entre páginas quando esquerda e direita têm fundos próprios
-    if regra in ("destaque_e_fusao", "somente_fusao") and tem_fundo_por_pagina(lamina):
+    if regra in ("destaques", "destaque_e_fusao", "somente_fusao") and tem_fundo_por_pagina(lamina):
         lamina["fundo_fusao"] = {"suave": 36, "medio": 50, "forte": 66}.get(intensidade, 36)
         alterou = True
 
     if regra == "somente_fusao":
         return alterou
 
-    # Regra B: Degradê na borda livre de fotos de Destaque / Meio-Termo / Transpasse
+    # Regra B: Degradê apenas em fotos com ESTRELA (destaque) ou SOZINHAS na página sangrada
     espacos = lamina.get("espacos") or []
     com_foto = [e for e in espacos if e.get("foto")]
-    if len(com_foto) < 2:
-        # Se houver apenas 1 foto em 1 página isolada ao lado de uma página vazia com fundo, suaviza a borda interna
-        if len(com_foto) == 1:
+    tipo_layout = str(lamina.get("tipo_layout") or "")
+    if tipo_layout in ("safe_zone", "sem_corte", "sangria_total", "panoramico_meio"):
+        return alterou
+
+    if len(com_foto) == 1:
+        if regra not in ("destaque_apenas", "somente_destaque"):
             e0 = com_foto[0]
             x0, w0, h0 = float(e0.get("x", 0.0)), float(e0.get("w", 0.0)), float(e0.get("h", 0.0))
             if h0 >= 0.88 and w0 <= 0.62 and (x0 <= 0.02 or x0 + w0 >= 0.98):
@@ -2685,43 +2695,93 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
                 ed.pop("moldura", None)
                 return True
         return alterou
+    if len(com_foto) < 2:
+        return alterou
 
     mapa_rostos = {}
-    for f in fotos_lamina or []:
-        if isinstance(f, dict) and f.get("caminho") and isinstance(f.get("rosto"), dict):
-            mapa_rostos[str(f["caminho"])] = f["rosto"]
+    mapa_destaque = {}
+    if isinstance(fotos_lamina, dict):
+        for ch_f, info_f in fotos_lamina.items():
+            if isinstance(info_f, dict):
+                ch_n = normalizar_caminho(str(ch_f))
+                if isinstance(info_f.get("rosto"), dict):
+                    mapa_rostos[str(ch_f)] = info_f["rosto"]
+                    mapa_rostos[ch_n] = info_f["rosto"]
+                if info_f.get("destaque"):
+                    mapa_destaque[str(ch_f)] = True
+                    mapa_destaque[ch_n] = True
+    else:
+        for f in fotos_lamina or []:
+            if isinstance(f, dict) and f.get("caminho"):
+                cam_f = str(f["caminho"])
+                cam_n = normalizar_caminho(cam_f)
+                if isinstance(f.get("rosto"), dict):
+                    mapa_rostos[cam_f] = f["rosto"]
+                    mapa_rostos[cam_n] = f["rosto"]
+                if f.get("destaque"):
+                    mapa_destaque[cam_f] = True
+                    mapa_destaque[cam_n] = True
 
-    tipo_layout = str(lamina.get("tipo_layout") or "")
     for esp in com_foto:
         ex = float(esp.get("x", 0.0))
         ey = float(esp.get("y", 0.0))
         ew = float(esp.get("w", 0.0))
         eh = float(esp.get("h", 0.0))
         ex1 = ex + ew
+        centro_x = ex + ew * 0.5
+        cam_esp = str(esp.get("foto") or "")
+        cam_esp_norm = normalizar_caminho(cam_esp) if cam_esp else ""
 
+        qtd_mesma_pag = sum(
+            1
+            for e2 in com_foto
+            if ((float(e2.get("x", 0.0)) + float(e2.get("w", 0.0)) * 0.5) < 0.5) == (centro_x < 0.5)
+        )
+        tem_estrela = bool(
+            esp.get("destaque")
+            or mapa_destaque.get(cam_esp)
+            or (cam_esp_norm and mapa_destaque.get(cam_esp_norm))
+        )
+
+        # 1. Foto SOZINHA na página sangrada
+        eh_sozinha_sangrada = False
         direcao_deg = None
         if tipo_layout == "meio_termo_esq" and ex <= 0.02 and abs(ew - 0.5) <= 0.05 and eh >= 0.90:
+            eh_sozinha_sangrada = True
             direcao_deg = "direita"
         elif tipo_layout == "meio_termo_dir" and ex >= 0.45 and ex1 >= 0.98 and eh >= 0.90:
+            eh_sozinha_sangrada = True
             direcao_deg = "esquerda"
-        elif tipo_layout in ("transpasse_60_40", "transpasse_70_30") and ex < 0.48 and ex1 > 0.52 and eh >= 0.85:
-            if ex <= 0.02 and ex1 < 0.85:
+        elif qtd_mesma_pag == 1 and eh >= 0.95 and ew <= 0.54 and tipo_layout != "sangria_total":
+            if ex <= 0.015:
+                eh_sozinha_sangrada = True
                 direcao_deg = "direita"
-            elif ex1 >= 0.98 and ex > 0.15:
+            elif ex1 >= 0.985:
+                eh_sozinha_sangrada = True
                 direcao_deg = "esquerda"
-        elif eh >= 0.92 and 0.44 <= ew <= 0.72:
-            # Destaque sangrado em uma das laterais enquanto o lado oposto tem composição em grade
-            if ex <= 0.015 and ex1 <= 0.72:
-                direcao_deg = "direita"
-            elif ex1 >= 0.985 and ex >= 0.28:
-                direcao_deg = "esquerda"
+
+        # 2. Foto com ESTRELA (Destaque ★) em Transpasse ou sozinha na página
+        if not eh_sozinha_sangrada and tem_estrela and regra != "meio_termo_apenas":
+            if ex < 0.48 and ex1 > 0.52 and eh >= 0.85:
+                if ex <= 0.02 and ex1 < 0.85:
+                    direcao_deg = "direita"
+                elif ex1 >= 0.98 and ex > 0.15:
+                    direcao_deg = "esquerda"
+            elif qtd_mesma_pag == 1 and eh >= 0.85:
+                if centro_x < 0.5 and ex <= 0.05:
+                    direcao_deg = "direita"
+                elif centro_x >= 0.5 and ex1 >= 0.95:
+                    direcao_deg = "esquerda"
+
+        if regra in ("destaque_apenas", "somente_destaque") and not tem_estrela:
+            direcao_deg = None
 
         if not direcao_deg:
             continue
 
         # Proteção inteligente da caixa de rostos/pessoas: o degradê nunca começa sobre alguém
         ini_seguro = inicio_base
-        rosto = mapa_rostos.get(str(esp.get("foto") or ""))
+        rosto = mapa_rostos.get(cam_esp) or (mapa_rostos.get(cam_esp_norm) if cam_esp_norm else None)
         if isinstance(rosto, dict):
             if direcao_deg == "direita" and rosto.get("x1") is not None:
                 limite_rosto = int(round(float(rosto["x1"]) * 100.0)) + 6

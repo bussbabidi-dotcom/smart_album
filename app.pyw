@@ -2219,17 +2219,24 @@ class Aplicativo:
         return espaco if espaco.get("foto") else None
 
     def _espacos_moldura_alvo(self):
+        lamina = self._lamina()
+        selecionados = self._indices_espacos_selecionados()
+        if lamina is not None and selecionados:
+            alvos_lamina = [
+                lamina["espacos"][indice]
+                for indice in sorted(selecionados)
+                if 0 <= indice < len(lamina["espacos"]) and lamina["espacos"][indice].get("foto")
+            ]
+            if alvos_lamina:
+                return alvos_lamina
+        espaco = self._moldura_selecionada()
+        if espaco:
+            return [espaco]
         escolhidas = set(self.fotos_sel)
         if escolhidas:
             return [espaco for espaco in proj.todos_espacos(self.projeto)
                     if espaco.get("foto") and normalizar_caminho(espaco["foto"]) in escolhidas]
-        lamina = self._lamina()
-        selecionados = self._indices_espacos_selecionados()
-        if lamina is not None and selecionados:
-            return [lamina["espacos"][indice] for indice in selecionados
-                    if lamina["espacos"][indice].get("foto")]
-        espaco = self._moldura_selecionada()
-        return [espaco] if espaco else []
+        return []
 
     def _atualizar_depois_da_moldura(self):
         self._marcar_modificado()
@@ -2971,13 +2978,25 @@ class Aplicativo:
     def _alvos_degrade(self):
         """
         Retorna (lista_espacos_foto, lista_dicts_fundo) que receberão o degradê simultaneamente.
-        Suporta várias fotos selecionadas (na lâmina ou na tira de fotos) e vários fundos marcados.
+        Prioriza a foto clicada na lâmina; se nenhuma estiver clicada, foca automaticamente na
+        foto da lâmina atual que já tenha degradê ativo (ou na primeira foto da lâmina).
         """
         espacos = []
+        lamina = self._lamina()
         if getattr(self, "degrade_em_fotos", None) and self.degrade_em_fotos.get():
             espacos = self._espacos_moldura_alvo()
+            if not espacos and lamina is not None:
+                com_foto = [e for e in (lamina.get("espacos") or []) if e.get("foto")]
+                com_deg = [
+                    e for e in com_foto
+                    if isinstance((e.get("edicao") or {}).get("degrade"), dict)
+                    and (e.get("edicao") or {}).get("degrade", {}).get("ativo")
+                ]
+                if com_deg:
+                    espacos = [com_deg[0]]
+                elif com_foto:
+                    espacos = [com_foto[0]]
         fundos_alvos = []
-        lamina = self._lamina()
         if lamina is not None and getattr(self, "degrade_em_fundos", None) and self.degrade_em_fundos.get():
             chaves = []
             if self.degrade_fundo_lamina.get():
@@ -3008,14 +3027,20 @@ class Aplicativo:
         if not hasattr(self, "degrade_ativo"):
             return
         espacos, fundos_alvos = self._alvos_degrade()
+        lamina = self._lamina()
         resumo = []
         if espacos:
-            resumo.append("%d foto(s)" % len(espacos))
+            if len(espacos) == 1 and lamina is not None and espacos[0] in (lamina.get("espacos") or []):
+                idx_slot = (lamina.get("espacos") or []).index(espacos[0]) + 1
+                nome_arq = os.path.basename(str(espacos[0].get("foto") or ""))
+                resumo.append("Quadro #%d (%s)" % (idx_slot, nome_arq[:22]))
+            else:
+                resumo.append("%d foto(s)" % len(espacos))
         if fundos_alvos:
             resumo.append("%d fundo(s)" % len(fundos_alvos))
         self.rotulo_alvo_degrade.configure(
-            text=("Alvo atual: " + " + ".join(resumo)) if resumo
-            else "Selecione uma ou mais fotos (Ctrl+clique) e/ou marque fundos da lâmina."
+            text=("Editando na lâmina: " + " + ".join(resumo) + " · Clique em outra foto na lâmina para trocar") if resumo
+            else "Clique em uma foto na lâmina para editar o degradê dela."
         )
         ref_deg = None
         ref_op = 100
@@ -5097,25 +5122,80 @@ class Aplicativo:
         paginas = max(1, int(self.produto["paginas_por_lamina"]))
 
         janela = tk.Toplevel(self.root)
-        janela.title("Diagramação Automática · Motor Elástico & Ordem por Grupos (Photoshop CC)")
+        janela.title("Diagramação Automática")
         janela.configure(bg=tema.PAINEL)
         janela.transient(self.root)
 
         tema.criar_cabecalho_janela(
             janela,
-            "Diagramação Automática — Motor Elástico e Grupos Numerados",
-            "Configure o escopo, separação por grupos de ordem/pastas, limite de corte elástico e layouts 60/40 e 70/30",
+            "Diagramação Automática",
+            "Organizado em 3 abas rápidas: Básico, Grupos e Ordem, e Acabamento",
             icone="❖",
         )
 
-        # Rodapé fixo na base da janela para continuar sempre visível ao redimensionar
-        rodape_fixo = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=9)
+        # Barra de 3 abas no topo da janela
+        barra_abas = tk.Frame(
+            janela,
+            bg=tema.CABECALHO,
+            highlightthickness=1,
+            highlightbackground=tema.BORDA,
+            padx=14,
+            pady=6,
+        )
+        barra_abas.pack(side="top", fill="x")
+        aba_diag_var = tk.StringVar(value="basico")
+
+        # Rodapé fixo na base da janela com resumo ao vivo + botões de ação
+        rodape_fixo = tk.Frame(
+            janela,
+            bg=tema.CABECALHO,
+            highlightthickness=1,
+            highlightbackground=tema.BORDA,
+            padx=14,
+            pady=10,
+        )
         rodape_fixo.pack(side="bottom", fill="x")
 
-        quadro, _container_rol, _canvas_rol = tema.criar_corpo_rolavel(janela, padding=14)
+        quadro, _container_rol, canvas_rol = tema.criar_corpo_rolavel(janela, padding=14)
 
-        # --- 1. Escopo da Diagramação ---
-        quadro_escopo = ttk.LabelFrame(quadro, text="1. O que você deseja diagramar?", padding=10)
+        aba_basico = ttk.Frame(quadro)
+        aba_grupos = ttk.Frame(quadro)
+        aba_acabamento = ttk.Frame(quadro)
+
+        def _trocar_aba_diag(*_args):
+            aba = aba_diag_var.get()
+            aba_basico.pack_forget()
+            aba_grupos.pack_forget()
+            aba_acabamento.pack_forget()
+            if aba == "grupos":
+                aba_grupos.pack(fill="x", expand=True)
+            elif aba == "acabamento":
+                aba_acabamento.pack(fill="x", expand=True)
+            else:
+                aba_basico.pack(fill="x", expand=True)
+            try:
+                canvas_rol.yview_moveto(0.0)
+            except Exception:
+                pass
+
+        for val_aba, txt_aba in (
+            ("basico", "1. Básico (Escopo e Medidas)"),
+            ("grupos", "2. Grupos e Ordem"),
+            ("acabamento", "3. Acabamento (Fundo, Degradê e Moldura)"),
+        ):
+            ttk.Radiobutton(
+                barra_abas,
+                text=txt_aba,
+                value=val_aba,
+                variable=aba_diag_var,
+                style="Filtro.TRadiobutton",
+                command=_trocar_aba_diag,
+            ).pack(side="left", fill="x", expand=True, padx=2)
+
+        # ==================================================================
+        # ABA 1: BÁSICO (Escopo, Quantidades/Margens e Proporção/Layouts)
+        # ==================================================================
+        quadro_escopo = ttk.LabelFrame(aba_basico, text="1. O que você deseja diagramar?", padding=10)
         quadro_escopo.pack(fill="x", pady=(0, 8))
 
         filtro_atual = getattr(self, "pasta_filtro_ativa", "todas")
@@ -5157,7 +5237,7 @@ class Aplicativo:
             textvariable=pasta_escolhida_var,
             values=opcoes_pastas_texto,
             state="readonly" if opcoes_pastas_texto else "disabled",
-            width=32,
+            width=34,
         )
         combo_pasta.pack(side="left", padx=(8, 0))
         combo_pasta.bind("<<ComboboxSelected>>", lambda _e: escopo_var.set("pasta"))
@@ -5172,204 +5252,7 @@ class Aplicativo:
         if not fotos_livres:
             rb_livres.configure(state="disabled")
 
-        # --- 2. Pastas, Grupos Numerados, Cenário dentro do Grupo e Prioridade ---
-        quadro_grupos = ttk.LabelFrame(
-            quadro,
-            text="2. Ordem das Fotos, Grupos Numerados, Cenário no Grupo e Prioridade (Individual vs. Grupo)",
-            padding=10,
-        )
-        quadro_grupos.pack(fill="x", pady=(0, 8))
-
-        separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
-        respeitar_grupos_var = tk.BooleanVar(value=bool(cfg.get("respeitar_grupos_manuais", True)))
-        reconhecer_cenarios_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
-        limiar_cenario_var = tk.DoubleVar(value=max(0.15, min(0.45, float(cfg.get("limiar_cenario", 0.28)))))
-        ordem_pessoas_var = tk.StringVar(value=str(cfg.get("ordem_pessoas_grupo", "manter") or "manter"))
-
-        ttk.Checkbutton(
-            quadro_grupos,
-            text="Respeitar divisão por pastas (nunca misturar pastas diferentes na mesma lâmina)",
-            variable=separar_pastas_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_grupos,
-            text="Respeitar ordem e grupos numerados definidos (nunca misturar grupos diferentes na mesma lâmina)",
-            variable=respeitar_grupos_var,
-        ).pack(anchor="w", pady=2)
-
-        linha_cenario_cfg = ttk.Frame(quadro_grupos)
-        linha_cenario_cfg.pack(fill="x", pady=2)
-        ttk.Checkbutton(
-            linha_cenario_cfg,
-            text="🎨 Identificar e agrupar por cenário visual (fundo/iluminação) dentro de cada grupo",
-            variable=reconhecer_cenarios_var,
-        ).pack(side="left")
-        spin_limiar_cen = ttk.Spinbox(
-            linha_cenario_cfg,
-            from_=0.15,
-            to=0.45,
-            increment=0.02,
-            format="%.2f",
-            textvariable=limiar_cenario_var,
-            width=6,
-        )
-        spin_limiar_cen.pack(side="right")
-        ttk.Label(
-            linha_cenario_cfg,
-            text="Sensibilidade (0.15=alta · 0.28=padrão):",
-            style="Fraco.TLabel",
-        ).pack(side="right", padx=(6, 4))
-
-        ttk.Separator(quadro_grupos, orient="horizontal").pack(fill="x", pady=6)
-
-        ttk.Label(
-            quadro_grupos,
-            text="Ordem de fotos Individuais vs. Em Grupo/Turma dentro de cada grupo numerado (permite dividir a mesma lâmina):",
-            font=tema.FONTE_FORTE,
-        ).pack(anchor="w", pady=(0, 3))
-
-        ttk.Radiobutton(
-            quadro_grupos,
-            text="Manter a ordem manual exata definida dentro de cada grupo",
-            value="manter",
-            variable=ordem_pessoas_var,
-        ).pack(anchor="w", pady=1)
-        ttk.Radiobutton(
-            quadro_grupos,
-            text="👤 Fotos Individuais primeiro em cada grupo (1 pessoa → depois fotos em grupo/turma)",
-            value="individuais_primeiro",
-            variable=ordem_pessoas_var,
-        ).pack(anchor="w", pady=1)
-        ttk.Radiobutton(
-            quadro_grupos,
-            text="👥 Fotos em Grupo/Turma primeiro em cada grupo (2+ pessoas → depois fotos individuais)",
-            value="turma_primeiro",
-            variable=ordem_pessoas_var,
-        ).pack(anchor="w", pady=1)
-
-        linha_grupos_btn = ttk.Frame(quadro_grupos)
-        linha_grupos_btn.pack(fill="x", pady=(6, 0))
-        lbl_resumo_grupos = ttk.Label(
-            linha_grupos_btn,
-            text="",
-            style="Fraco.TLabel",
-        )
-        lbl_resumo_grupos.pack(side="left")
-
-        def _atualizar_resumo_grupos():
-            grupos_atuais = proj.listar_grupos_ordem(self.projeto)
-            qtd_g = len(grupos_atuais)
-            nomes_g = ", ".join("%s (%d)" % (g["nome"], len(g["fotos"])) for g in grupos_atuais[:4])
-            if qtd_g > 4:
-                nomes_g += "…"
-            lbl_resumo_grupos.configure(
-                text="Grupos configurados: %d — %s" % (qtd_g, nomes_g if nomes_g else "Grupo 1")
-            )
-
-        _atualizar_resumo_grupos()
-
-        def _abrir_janela_grupos_daqui():
-            def _depois_salvar_grupos():
-                nonlocal todas_fotos, fotos_livres
-                todas_fotos = proj.fotos_para_diagramar(self.projeto, self.info)
-                fotos_livres = proj.fotos_para_diagramar(self.projeto, self.info, somente_nao_usadas=True)
-                _atualizar_resumo_grupos()
-                _atualizar_previa()
-
-            self.abrir_ordem_grupos(ao_salvar=_depois_salvar_grupos, janela_pai=janela)
-
-        ttk.Button(
-            linha_grupos_btn,
-            text="🗂 Organizar Ordem e Grupos de Fotos...",
-            style="PrimarioCompacto.TButton",
-            command=_abrir_janela_grupos_daqui,
-        ).pack(side="right")
-
-        # --- 3. Geometria Elástica, Limite de Corte e Layouts no Meio ---
-        quadro_geom = ttk.LabelFrame(
-            quadro,
-            text="3. Proporção Elástica (22% vs Sem Corte) e Layouts no Meio (60/40 e 70/30)",
-            padding=10,
-        )
-        quadro_geom.pack(fill="x", pady=(0, 8))
-
-        modo_corte_var = tk.StringVar(value=str(cfg.get("modo_corte", "elastico")))
-        corte_max_pct_inicial = int(round((float(cfg.get("corte_maximo", diagramar.CORTE_MAXIMO)) - 1.0) * 100))
-        corte_max_pct_var = tk.IntVar(value=max(5, min(35, corte_max_pct_inicial or 22)))
-        transpasse_var = tk.BooleanVar(value=bool(cfg.get("permitir_transpasse", True)))
-        meio_termo_var = tk.BooleanVar(value=bool(cfg.get("permitir_meio_termo", True)))
-        sangria_total_var = tk.BooleanVar(value=bool(cfg.get("permitir_sangria_total", True)))
-        rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
-        nao_cortar_pessoas_var = tk.BooleanVar(value=bool(cfg.get("nao_cortar_pessoas", True)))
-        preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
-        repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
-
-        linha_modo_corte = ttk.Frame(quadro_geom)
-        linha_modo_corte.pack(fill="x", pady=2)
-        ttk.Radiobutton(
-            linha_modo_corte,
-            text="Preencher página (corte elástico até o limite + expansão vizinha):",
-            value="elastico",
-            variable=modo_corte_var,
-        ).pack(side="left")
-        ttk.Label(linha_modo_corte, text="% máx:").pack(side="right", padx=(4, 0))
-        spin_corte_pct = ttk.Spinbox(
-            linha_modo_corte,
-            from_=5,
-            to=35,
-            increment=1,
-            textvariable=corte_max_pct_var,
-            width=5,
-        )
-        spin_corte_pct.pack(side="right")
-
-        ttk.Radiobutton(
-            quadro_geom,
-            text="Preservar 100% da proporção original em todas as fotos (0% de corte forçado)",
-            value="sem_corte",
-            variable=modo_corte_var,
-        ).pack(anchor="w", pady=2)
-
-        ttk.Separator(quadro_geom, orient="horizontal").pack(fill="x", pady=6)
-
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Incluir layouts Meio Termo (1 página inteira sangrada + outra dentro da Safe Zone)",
-            variable=meio_termo_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Incluir variações de Preenchimento Máximo / Sangria Total (sem respeitar linhas da Safe Zone)",
-            variable=sangria_total_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Incluir layouts 60/40, 70/30 e panorâmicos que passam do meio da lâmina",
-            variable=transpasse_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Identificar quantos rostos há na imagem e ajustar para NÃO cortar nenhuma pessoa",
-            variable=nao_cortar_pessoas_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Desviar todos os rostos detectados automaticamente da linha de dobra central",
-            variable=rostos_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Sobrepor uma foto extra na lâmina sem repetir imagens",
-            variable=preencher_extras_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            quadro_geom,
-            text="Excluir fotos visualmente repetidas (mantém apenas uma cópia)",
-            variable=repetidas_var,
-        ).pack(anchor="w", pady=2)
-
-        # --- 4. Quantidade e Espaços ---
-        numeros = ttk.LabelFrame(quadro, text="4. Quantidade de Lâminas, Fotos por Página e Margens", padding=10)
+        numeros = ttk.LabelFrame(aba_basico, text="2. Quantidade de Lâminas, Fotos por Página e Margens", padding=10)
         numeros.pack(fill="x", pady=(0, 8))
 
         vars_num = {
@@ -5388,7 +5271,7 @@ class Aplicativo:
             ("Máximo de fotos por página", "max_fotos_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
             ("Margem externa de segurança (mm)", "margem_mm", 0, 60, 1),
             ("Espaçamento entre fotos (mm)", "espacamento_mm", 0, 40, 0.5),
-            ("Auto-salvamento do .album.json (min, 0 = desligado)", "auto_salvar_minutos", 0, 60, 1),
+            ("Auto-salvamento do projeto (min, 0 = desligado)", "auto_salvar_minutos", 0, 60, 1),
         )
         for texto, chave, minimo, maximo, passo in campos:
             linha = ttk.Frame(numeros)
@@ -5403,160 +5286,377 @@ class Aplicativo:
                 width=8,
             ).pack(side="right")
 
-        # --- 5. Função 1: Fundos Automáticos (Degradê, Abstrato e Pasta) ---
+        quadro_geom = ttk.LabelFrame(
+            aba_basico,
+            text="3. Proporção Elástica e Tipos de Layout Permitidos",
+            padding=10,
+        )
+        quadro_geom.pack(fill="x", pady=(0, 6))
+
+        modo_corte_var = tk.StringVar(value=str(cfg.get("modo_corte", "elastico")))
+        corte_max_pct_inicial = int(round((float(cfg.get("corte_maximo", diagramar.CORTE_MAXIMO)) - 1.0) * 100))
+        corte_max_pct_var = tk.IntVar(value=max(5, min(35, corte_max_pct_inicial or 22)))
+        transpasse_var = tk.BooleanVar(value=bool(cfg.get("permitir_transpasse", True)))
+        meio_termo_var = tk.BooleanVar(value=bool(cfg.get("permitir_meio_termo", True)))
+        sangria_total_var = tk.BooleanVar(value=bool(cfg.get("permitir_sangria_total", True)))
+        rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
+        nao_cortar_pessoas_var = tk.BooleanVar(value=bool(cfg.get("nao_cortar_pessoas", True)))
+        preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
+        repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
+
+        linha_modo_corte = ttk.Frame(quadro_geom)
+        linha_modo_corte.pack(fill="x", pady=2)
+        ttk.Radiobutton(
+            linha_modo_corte,
+            text="Preencher página com corte elástico controlado:",
+            value="elastico",
+            variable=modo_corte_var,
+        ).pack(side="left")
+        spin_corte_pct = ttk.Spinbox(
+            linha_modo_corte,
+            from_=5,
+            to=35,
+            increment=1,
+            textvariable=corte_max_pct_var,
+            width=5,
+        )
+        spin_corte_pct.pack(side="right")
+        ttk.Label(linha_modo_corte, text="Limite máx. (%):").pack(side="right", padx=(6, 4))
+
+        ttk.Radiobutton(
+            quadro_geom,
+            text="Preservar 100% da proporção original em todas as fotos (0% de corte)",
+            value="sem_corte",
+            variable=modo_corte_var,
+        ).pack(anchor="w", pady=2)
+
+        ttk.Separator(quadro_geom, orient="horizontal").pack(fill="x", pady=6)
+
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Permitir Meio Termo (1 página sangrada + outra página dentro da área segura)",
+            variable=meio_termo_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Permitir Transpasses 60/40 e 70/30 que atravessam o centro da lâmina",
+            variable=transpasse_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Permitir Sangria Total (preenchimento máximo até a borda externa)",
+            variable=sangria_total_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Detectar pessoas/rostos para nunca cortar ninguém nem posicionar rostos na dobra",
+            variable=nao_cortar_pessoas_var,
+            command=lambda: rostos_var.set(bool(nao_cortar_pessoas_var.get())),
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Excluir fotos visualmente repetidas (mantém apenas uma cópia)",
+            variable=repetidas_var,
+        ).pack(anchor="w", pady=2)
+
+        # ==================================================================
+        # ABA 2: GRUPOS E ORDEM (Pastas, Grupos Numerados, Cenário e Pessoas)
+        # ==================================================================
+        quadro_grupos = ttk.LabelFrame(
+            aba_grupos,
+            text="1. Divisão por Pastas, Grupos Numerados e Cenário Visual",
+            padding=10,
+        )
+        quadro_grupos.pack(fill="x", pady=(0, 8))
+
+        separar_pastas_var = tk.BooleanVar(value=bool(cfg.get("separar_pastas", True)))
+        respeitar_grupos_var = tk.BooleanVar(value=bool(cfg.get("respeitar_grupos_manuais", True)))
+        reconhecer_cenarios_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_cenarios", True)))
+        limiar_cenario_var = tk.DoubleVar(value=max(0.15, min(0.45, float(cfg.get("limiar_cenario", 0.28)))))
+        ordem_pessoas_var = tk.StringVar(value=str(cfg.get("ordem_pessoas_grupo", "manter") or "manter"))
+
+        ttk.Checkbutton(
+            quadro_grupos,
+            text="Respeitar divisão por pastas (nunca misturar pastas diferentes na mesma lâmina)",
+            variable=separar_pastas_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Checkbutton(
+            quadro_grupos,
+            text="Respeitar grupos numerados (nunca misturar grupos diferentes na mesma lâmina)",
+            variable=respeitar_grupos_var,
+        ).pack(anchor="w", pady=2)
+
+        linha_cenario_cfg = ttk.Frame(quadro_grupos)
+        linha_cenario_cfg.pack(fill="x", pady=2)
+        ttk.Checkbutton(
+            linha_cenario_cfg,
+            text="🎨 Agrupar por cenário visual (cor/iluminação) dentro de cada grupo",
+            variable=reconhecer_cenarios_var,
+        ).pack(side="left")
+        spin_limiar_cen = ttk.Spinbox(
+            linha_cenario_cfg,
+            from_=0.15,
+            to=0.45,
+            increment=0.02,
+            format="%.2f",
+            textvariable=limiar_cenario_var,
+            width=6,
+        )
+        spin_limiar_cen.pack(side="right")
+        ttk.Label(
+            linha_cenario_cfg,
+            text="Sensibilidade (0.28 padrão):",
+            style="Fraco.TLabel",
+        ).pack(side="right", padx=(6, 4))
+
+        quadro_ordem_p = ttk.LabelFrame(
+            aba_grupos,
+            text="2. Prioridade de Fotos (Individuais vs. Turma) dentro de cada Grupo",
+            padding=10,
+        )
+        quadro_ordem_p.pack(fill="x", pady=(0, 8))
+
+        ttk.Radiobutton(
+            quadro_ordem_p,
+            text="Manter exatamente a ordem manual das fotos em cada grupo",
+            value="manter",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Radiobutton(
+            quadro_ordem_p,
+            text="👤 Fotos Individuais primeiro (1 pessoa → depois fotos em grupo/turma)",
+            value="individuais_primeiro",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Radiobutton(
+            quadro_ordem_p,
+            text="👥 Fotos em Grupo/Turma primeiro (2+ pessoas → depois fotos individuais)",
+            value="turma_primeiro",
+            variable=ordem_pessoas_var,
+        ).pack(anchor="w", pady=2)
+
+        quadro_ger_grupos = ttk.LabelFrame(
+            aba_grupos,
+            text="3. Editor Visual de Ordem e Grupos Numerados",
+            padding=10,
+        )
+        quadro_ger_grupos.pack(fill="x", pady=(0, 6))
+
+        lbl_resumo_grupos = ttk.Label(
+            quadro_ger_grupos,
+            text="",
+            style="Fraco.TLabel",
+            wraplength=580,
+            justify="left",
+        )
+        lbl_resumo_grupos.pack(anchor="w", pady=(0, 6))
+
+        def _atualizar_resumo_grupos():
+            grupos_atuais = proj.listar_grupos_ordem(self.projeto)
+            qtd_g = len(grupos_atuais)
+            nomes_g = ", ".join("%s (%d fotos)" % (g["nome"], len(g["fotos"])) for g in grupos_atuais[:5])
+            if qtd_g > 5:
+                nomes_g += "…"
+            lbl_resumo_grupos.configure(
+                text="Grupos configurados: %d — %s" % (qtd_g, nomes_g if nomes_g else "Grupo 1")
+            )
+
+        _atualizar_resumo_grupos()
+
+        def _abrir_janela_grupos_daqui():
+            def _depois_salvar_grupos():
+                nonlocal todas_fotos, fotos_livres
+                todas_fotos = proj.fotos_para_diagramar(self.projeto, self.info)
+                fotos_livres = proj.fotos_para_diagramar(self.projeto, self.info, somente_nao_usadas=True)
+                _atualizar_resumo_grupos()
+                _atualizar_previa()
+
+            self.abrir_ordem_grupos(ao_salvar=_depois_salvar_grupos, janela_pai=janela)
+
+        ttk.Button(
+            quadro_ger_grupos,
+            text="🗂 Abrir Editor de Ordem e Grupos de Fotos...",
+            style="PrimarioCompacto.TButton",
+            command=_abrir_janela_grupos_daqui,
+        ).pack(anchor="w")
+
+        # ==================================================================
+        # ABA 3: ACABAMENTO (Fundos, Degradê em Destaques e Molduras)
+        # ==================================================================
         quadro_f1 = ttk.LabelFrame(
-            quadro,
-            text="5. Função 1 — Fundos Automáticos (Degradê, Abstrato e Pasta de Fundos)",
+            aba_acabamento,
+            text="1. Fundos Automáticos (Cores das Fotos e Pasta de Fundos)",
             padding=10,
         )
         quadro_f1.pack(fill="x", pady=(0, 8))
         auto_fundos_var = tk.BooleanVar(value=bool(cfg.get("auto_fundos", True)))
-        modo_auto_fundos_var = tk.StringVar(value=str(cfg.get("modo_auto_fundos", "misturar")))
-        estilo_fundo_gerado_var = tk.StringVar(value=str(cfg.get("estilo_fundo_gerado", "ambos")))
-        escopo_auto_fundos_var = tk.StringVar(value=str(cfg.get("escopo_auto_fundos", "auto")))
+        modo_auto_fundos_var = tk.StringVar(value=str(cfg.get("modo_auto_fundos", "misturar") or "misturar"))
+        estilo_fundo_gerado_var = tk.StringVar(value=str(cfg.get("estilo_fundo_gerado", "ambos") or "ambos"))
+        escopo_auto_fundos_var = tk.StringVar(value=str(cfg.get("escopo_auto_fundos", "auto") or "auto"))
 
         ttk.Checkbutton(
             quadro_f1,
-            text="Ativar Fundos Automáticos na diagramação (opcional, ativado por padrão)",
+            text="Gerar ou aplicar Fundos Automáticos harmonizados com as fotos",
             variable=auto_fundos_var,
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 6))
 
-        linha_f1_modo = ttk.Frame(quadro_f1)
-        linha_f1_modo.pack(fill="x", pady=2)
-        ttk.Label(linha_f1_modo, text="Origem dos fundos:").pack(side="left")
-        for val_m, txt_m in (
-            ("misturar", "Misturar Gerados pelas Fotos + Pasta Sugerida"),
-            ("gerados", "Só Gerados pelas Fotos"),
-            ("pasta", "Só Pasta de Fundos"),
-        ):
-            ttk.Radiobutton(
-                linha_f1_modo, text=txt_m, value=val_m, variable=modo_auto_fundos_var
-            ).pack(side="left", padx=(8, 0))
+        def _criar_combo_acabamento(pai, rotulo_txt, var_alvo, pares_opcoes):
+            linha = ttk.Frame(pai)
+            linha.pack(fill="x", pady=2)
+            ttk.Label(linha, text=rotulo_txt, width=26).pack(side="left")
+            textos = [t for _v, t in pares_opcoes]
+            val_para_txt = {v: t for v, t in pares_opcoes}
+            txt_para_val = {t: v for v, t in pares_opcoes}
+            txt_var = tk.StringVar(value=val_para_txt.get(var_alvo.get(), textos[0]))
+            cb = ttk.Combobox(linha, textvariable=txt_var, values=textos, state="readonly")
+            cb.pack(side="left", fill="x", expand=True)
+            cb.bind("<<ComboboxSelected>>", lambda _e: var_alvo.set(txt_para_val.get(txt_var.get(), pares_opcoes[0][0])))
+            return cb
 
-        linha_f1_est = ttk.Frame(quadro_f1)
-        linha_f1_est.pack(fill="x", pady=2)
-        ttk.Label(linha_f1_est, text="Motor de geração pelas cores das fotos:").pack(side="left")
-        for val_e, txt_e in (
-            ("ambos", "Degradê + Abstrato (com variação aleatória)"),
-            ("degrade", "Só Degradê Suave"),
-            ("abstrato", "Só Abstrato Suave"),
-        ):
-            ttk.Radiobutton(
-                linha_f1_est, text=txt_e, value=val_e, variable=estilo_fundo_gerado_var
-            ).pack(side="left", padx=(8, 0))
+        _criar_combo_acabamento(
+            quadro_f1,
+            "Origem dos fundos:",
+            modo_auto_fundos_var,
+            (
+                ("misturar", "Misturar Gerados pelas Fotos + Pasta de Fundos"),
+                ("gerados", "Somente Gerados pelas Cores das Fotos"),
+                ("pasta", "Somente da Pasta de Fundos do Usuário"),
+            ),
+        )
+        _criar_combo_acabamento(
+            quadro_f1,
+            "Estilo gerado pelas fotos:",
+            estilo_fundo_gerado_var,
+            (
+                ("ambos", "Degradê Suave + Abstrato Suave"),
+                ("degrade_e_abstrato", "Degradê Suave + Abstrato Suave"),
+                ("degrade", "Somente Degradê Suave"),
+                ("abstrato", "Somente Abstrato Suave"),
+            ),
+        )
+        _criar_combo_acabamento(
+            quadro_f1,
+            "Análise de cores:",
+            escopo_auto_fundos_var,
+            (
+                ("auto", "Automático (separa páginas quando o cenário muda)"),
+                ("adaptativo", "Automático (separa páginas quando o cenário muda)"),
+                ("lamina", "Um único fundo para a lâmina inteira"),
+                ("pagina", "Separar fundo da Página Esquerda e Direita"),
+            ),
+        )
 
-        linha_f1_esc = ttk.Frame(quadro_f1)
-        linha_f1_esc.pack(fill="x", pady=2)
-        ttk.Label(linha_f1_esc, text="Análise de cores:").pack(side="left")
-        for val_sc, txt_sc in (
-            ("auto", "Automático (por página ou lâmina inteira)"),
-            ("lamina", "Analisar lâmina inteira"),
-            ("pagina", "Analisar cada página separada (Esq. / Dir.)"),
-        ):
-            ttk.Radiobutton(
-                linha_f1_esc, text=txt_sc, value=val_sc, variable=escopo_auto_fundos_var
-            ).pack(side="left", padx=(8, 0))
-
-        # --- 6. Função 2: Degradê Automático nas Fotos ---
+        # --- 2. Degradê Automático nas Fotos ---
         quadro_f2 = ttk.LabelFrame(
-            quadro,
-            text="6. Função 2 — Degradê Automático de Transição (Regras Próprias)",
+            aba_acabamento,
+            text="2. Degradê Automático nas Fotos (Somente Destaques)",
             padding=10,
         )
         quadro_f2.pack(fill="x", pady=(0, 8))
         auto_degrade_var = tk.BooleanVar(value=bool(cfg.get("auto_degrade", True)))
-        regra_auto_degrade_var = tk.StringVar(value=str(cfg.get("regra_auto_degrade", "destaques")))
-        intensidade_auto_degrade_var = tk.StringVar(value=str(cfg.get("intensidade_auto_degrade", "suave")))
+        regra_deg_ini = str(cfg.get("regra_auto_degrade", "destaques") or "destaques")
+        if regra_deg_ini not in ("destaques", "destaque_apenas", "meio_termo_apenas"):
+            regra_deg_ini = "destaques"
+        regra_auto_degrade_var = tk.StringVar(value=regra_deg_ini)
+        intensidade_auto_degrade_var = tk.StringVar(value=str(cfg.get("intensidade_auto_degrade", "suave") or "suave"))
 
         ttk.Checkbutton(
             quadro_f2,
-            text="Ativar Degradê Automático em fotos de destaque/meio-termo (protege rostos, não aplica em grades)",
+            text="Aplicar Degradê Automático apenas nas fotos de destaque (editável na aba Degradê)",
             variable=auto_degrade_var,
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 6))
 
-        linha_f2 = ttk.Frame(quadro_f2)
-        linha_f2.pack(fill="x", pady=2)
-        ttk.Label(linha_f2, text="Regra de aplicação:").pack(side="left")
-        for val_rd, txt_rd in (
-            ("destaques", "Destaques, Meio-termo e Transpasses"),
-            ("meio_termo_apenas", "Apenas fotos Meio-termo"),
-        ):
-            ttk.Radiobutton(
-                linha_f2, text=txt_rd, value=val_rd, variable=regra_auto_degrade_var
-            ).pack(side="left", padx=(8, 0))
+        _criar_combo_acabamento(
+            quadro_f2,
+            "Quando aplicar na foto:",
+            regra_auto_degrade_var,
+            (
+                ("destaques", "Em fotos com Estrela (★) ou Sozinhas na página sangrada"),
+                ("destaque_apenas", "Somente em fotos marcadas com Estrela (★)"),
+                ("meio_termo_apenas", "Somente em foto sozinha na página sangrada (Meio-Termo)"),
+            ),
+        )
+        _criar_combo_acabamento(
+            quadro_f2,
+            "Intensidade da transição:",
+            intensidade_auto_degrade_var,
+            (
+                ("suave", "Suave (recomendado — protege pessoas e rostos)"),
+                ("medio", "Médio"),
+                ("forte", "Forte (transição mais longa)"),
+            ),
+        )
 
-        ttk.Label(linha_f2, text="   Intensidade:").pack(side="left", padx=(12, 0))
-        for val_id, txt_id in (("suave", "Suave"), ("medio", "Médio"), ("forte", "Forte")):
-            ttk.Radiobutton(
-                linha_f2, text=txt_id, value=val_id, variable=intensidade_auto_degrade_var
-            ).pack(side="left", padx=(6, 0))
-
-        # --- 7. Função 3: Molduras Automáticas nas Fotos ---
+        # --- 3. Molduras Automáticas nas Fotos ---
         quadro_f3 = ttk.LabelFrame(
-            quadro,
-            text="7. Função 3 — Molduras Automáticas nas Fotos (Regras Próprias)",
+            aba_acabamento,
+            text="3. Molduras Automáticas nas Fotos (Páginas Seguras)",
             padding=10,
         )
-        quadro_f3.pack(fill="x", pady=(0, 8))
+        quadro_f3.pack(fill="x", pady=(0, 6))
         auto_molduras_var = tk.BooleanVar(value=bool(cfg.get("auto_molduras", True)))
-        regra_auto_molduras_var = tk.StringVar(value=str(cfg.get("regra_auto_molduras", "grades_e_margem")))
-        cor_auto_molduras_var = tk.StringVar(value=str(cfg.get("cor_auto_molduras", "contraste_fundo")))
-        estilo_auto_molduras_var = tk.StringVar(value=str(cfg.get("estilo_auto_molduras", "simples")))
+        regra_auto_molduras_var = tk.StringVar(value=str(cfg.get("regra_auto_molduras", "grades_e_margem") or "grades_e_margem"))
+        cor_auto_molduras_var = tk.StringVar(value=str(cfg.get("cor_auto_molduras", "contraste_fundo") or "contraste_fundo"))
+        estilo_auto_molduras_var = tk.StringVar(value=str(cfg.get("estilo_auto_molduras", "simples") or "simples"))
         espessura_auto_molduras_var = tk.DoubleVar(value=float(cfg.get("espessura_auto_molduras_mm", 0.5)))
 
         ttk.Checkbutton(
             quadro_f3,
-            text="Ativar Molduras Automáticas em fotos de grade/margem (nunca em fotos sangradas ou com degradê)",
+            text="Aplicar Molduras Automáticas em fotos na área segura (nunca em fotos sangradas ou com degradê)",
             variable=auto_molduras_var,
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 6))
 
-        linha_f3 = ttk.Frame(quadro_f3)
-        linha_f3.pack(fill="x", pady=2)
-        ttk.Label(linha_f3, text="Regra:").pack(side="left")
-        for val_rm, txt_rm in (
-            ("grades_e_margem", "Grades (2+ fotos) e fotos com margem"),
-            ("apenas_grades", "Apenas em grades (2+ fotos na página)"),
-        ):
-            ttk.Radiobutton(
-                linha_f3, text=txt_rm, value=val_rm, variable=regra_auto_molduras_var
-            ).pack(side="left", padx=(8, 0))
+        _criar_combo_acabamento(
+            quadro_f3,
+            "Onde aplicar moldura:",
+            regra_auto_molduras_var,
+            (
+                ("grades_e_margem", "Todas as fotos na área segura (1 ou mais fotos)"),
+                ("grades_com_margem", "Todas as fotos na área segura (1 ou mais fotos)"),
+                ("apenas_grades", "Somente em grades (2 ou mais fotos na página)"),
+            ),
+        )
+        _criar_combo_acabamento(
+            quadro_f3,
+            "Cor da moldura:",
+            cor_auto_molduras_var,
+            (
+                ("contraste_fundo", "Contraste automático com o fundo da página"),
+                ("contraste_automatico", "Contraste automático com o fundo da página"),
+                ("branca", "Branca clássica"),
+                ("paleta", "Tom suave extraído da foto"),
+            ),
+        )
 
-        linha_f3_b = ttk.Frame(quadro_f3)
-        linha_f3_b.pack(fill="x", pady=2)
-        ttk.Label(linha_f3_b, text="Cor da moldura:").pack(side="left")
-        for val_cm, txt_cm in (
-            ("contraste_fundo", "Contraste automático com o fundo"),
-            ("branca", "Branca clássica"),
-            ("paleta", "Tom suave da foto"),
-        ):
-            ttk.Radiobutton(
-                linha_f3_b, text=txt_cm, value=val_cm, variable=cor_auto_molduras_var
-            ).pack(side="left", padx=(8, 0))
-
-        ttk.Label(linha_f3_b, text="   Espessura (mm):").pack(side="left", padx=(10, 4))
+        linha_f3_esp = ttk.Frame(quadro_f3)
+        linha_f3_esp.pack(fill="x", pady=2)
+        ttk.Label(linha_f3_esp, text="Espessura da linha (mm):", width=26).pack(side="left")
         ttk.Spinbox(
-            linha_f3_b,
+            linha_f3_esp,
             from_=0.2,
             to=2.5,
             increment=0.1,
             textvariable=espessura_auto_molduras_var,
-            width=6,
+            width=8,
         ).pack(side="left")
 
-        # --- 8. Prévia ao Vivo da Diagramação ---
-        quadro_previa = ttk.LabelFrame(quadro, text="Prévia ao vivo do resultado", padding=10)
-        quadro_previa.pack(fill="x", pady=(0, 6))
+        # Inicializa na primeira aba
+        _trocar_aba_diag()
+
+        # --- Resumo ao vivo e botões no Rodapé Fixo ---
+        quadro_previa = tk.Frame(rodape_fixo, bg=tema.CABECALHO)
+        quadro_previa.pack(fill="x", pady=(0, 8))
         lbl_previa_1 = ttk.Label(quadro_previa, text="", font=("Segoe UI", 9, "bold"), justify="left")
         lbl_previa_1.pack(anchor="w", fill="x")
         lbl_previa_2 = ttk.Label(quadro_previa, text="", style="Fraco.TLabel", justify="left")
         lbl_previa_2.pack(anchor="w", fill="x", pady=(2, 0))
 
         def _ajustar_wraps_diag(evento):
-            larg = max(360, int(evento.width) - 48)
+            larg = max(360, int(evento.width) - 36)
             lbl_previa_1.configure(wraplength=larg)
             lbl_previa_2.configure(wraplength=larg)
 
-        quadro.bind("<Configure>", _ajustar_wraps_diag, add="+")
+        rodape_fixo.bind("<Configure>", _ajustar_wraps_diag, add="+")
 
         def _obter_fotos_escopo():
             esc = escopo_var.get()
@@ -5656,13 +5756,12 @@ class Aplicativo:
                 cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
-                text="Fotos: %d (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d (🎨 %d cen.)  |  Pastas: %d  →  %d lâmina(s)"
+                text="Resumo: %d fotos (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d  |  Pastas: %d  →  %d lâmina(s)"
                 % (
                     prev["total_fotos"],
                     prev.get("fotos_individuais", 0),
                     prev.get("fotos_em_grupo", 0),
                     prev.get("grupos", 1),
-                    prev.get("cenarios", prev.get("grupos", 1)),
                     prev["pastas"],
                     prev["laminas_estimadas"],
                 )
@@ -5672,19 +5771,17 @@ class Aplicativo:
                 prev["laminas_com_fotos"],
             )
             if prev["laminas_extras_vazias"] > 0:
-                detalhes += " + %d vazia(s) p/ atingir a meta" % prev["laminas_extras_vazias"]
+                detalhes += " + %d vazia(s)" % prev["laminas_extras_vazias"]
             detalhes += ")."
-            if respeitar_grupos_var.get():
-                detalhes += " Grupos numerados isolados."
-            if reconhecer_cenarios_var.get():
-                detalhes += " 🎨 Cenários identificados dentro de cada grupo."
-            modo_p = ordem_pessoas_var.get()
-            if modo_p == "individuais_primeiro":
-                detalhes += " Ordem: Individuais primeiro em cada grupo."
-            elif modo_p == "turma_primeiro":
-                detalhes += " Ordem: Fotos em Grupo/Turma primeiro em cada grupo."
-            if nao_cortar_pessoas_var.get():
-                detalhes += " Proteção ativa: nenhuma pessoa será cortada."
+            acabamentos = []
+            if auto_fundos_var.get():
+                acabamentos.append("Fundo Auto")
+            if auto_degrade_var.get():
+                acabamentos.append("Degradê só em Destaques")
+            if auto_molduras_var.get():
+                acabamentos.append("Moldura Auto")
+            if acabamentos:
+                detalhes += " Acabamento: " + " · ".join(acabamentos) + "."
             if prev["sobras"] > 0:
                 detalhes += " Atenção: %d foto(s) excedem o limite máximo de lâminas." % prev["sobras"]
             lbl_previa_2.configure(text=detalhes)
@@ -5704,6 +5801,10 @@ class Aplicativo:
             nao_cortar_pessoas_var,
             preencher_extras_var,
             repetidas_var,
+            auto_fundos_var,
+            auto_degrade_var,
+            auto_molduras_var,
+            regra_auto_degrade_var,
             *vars_num.values(),
         ):
             v.trace_add("write", _atualizar_previa)
@@ -5785,10 +5886,10 @@ class Aplicativo:
             janela,
             pai=self,
             chave="janela_diagramar",
-            largura=720,
-            altura=640,
-            min_largura=490,
-            min_altura=350,
+            largura=680,
+            altura=580,
+            min_largura=520,
+            min_altura=420,
         )
         janela.grab_set()
         janela.focus_set()
@@ -9255,6 +9356,16 @@ class Aplicativo:
             validos.clear()
         self.espacos_sel = validos
         self.espaco_sel = principal if principal in validos else (min(validos) if validos else None)
+        if validos and getattr(self, "fotos_sel", None):
+            self.fotos_sel.clear()
+            if hasattr(self, "atualizar_fotos"):
+                self.agendar("limpar_sel_tira", 20, self.atualizar_fotos)
+        if hasattr(self, "_atualizar_moldura_ui"):
+            self._atualizar_moldura_ui()
+        if hasattr(self, "_atualizar_sombra_ui"):
+            self._atualizar_sombra_ui()
+        if hasattr(self, "_atualizar_degrade_ui"):
+            self._atualizar_degrade_ui()
 
     def _caixa_selecao_espacos(self, indices=None):
         lamina = self._lamina()
@@ -12786,7 +12897,8 @@ class Aplicativo:
         self.marcar_historico()
         cfg = dict(self._cfg())
         cfg["auto_degrade"] = True
-        diagramar.aplicar_degrade_automatico(laminas, self.info, cfg, self.produto)
+        fotos_meta = proj.fotos_para_diagramar(self.projeto, self.info)
+        diagramar.aplicar_degrade_automatico(laminas, fotos_meta, cfg, self.produto)
         self._atualizar_degrade_ui()
         self.atualizar_tudo()
         self.registrar(
