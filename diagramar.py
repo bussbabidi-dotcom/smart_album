@@ -1835,7 +1835,7 @@ def _chave_prioridade_pessoas(foto, modo_ordem):
     return 0
 
 
-def _assinatura_de_foto(foto):
+def _assinatura_de_foto(foto, info=None):
     if not isinstance(foto, dict):
         return None
     ass = foto.get("assinatura_cenario")
@@ -1844,7 +1844,136 @@ def _assinatura_de_foto(foto):
     cen = foto.get("cenario")
     if isinstance(cen, (list, tuple)) and len(cen) > 0:
         return [float(x) for x in cen]
+    if isinstance(info, dict) and foto.get("caminho"):
+        from comum import normalizar_caminho
+        dados_i = info.get(normalizar_caminho(str(foto["caminho"]))) or info.get(str(foto["caminho"])) or {}
+        cen_i = dados_i.get("cenario")
+        if isinstance(cen_i, (list, tuple)) and len(cen_i) > 0:
+            return [float(x) for x in cen_i]
     return None
+
+
+def detectar_nome_evento_foto(foto, info=None, indice=0):
+    """
+    Detecta o nome canônico do Evento/Capítulo de uma foto com base na pasta, nome do arquivo,
+    rótulo de cenário e luminosidade/assinatura visual:
+      - 'Cerimônia do Jaleco'
+      - 'Fotos Externas'
+      - 'Baile de Gala'
+      - 'Culto Ecumênico'
+      - 'Colação 2'
+      - 'Colação 1'
+    """
+    if not isinstance(foto, dict):
+        return "Colação 1"
+    partes = [
+        str(foto.get("nome_grupo") or ""),
+        str(foto.get("pasta") or ""),
+        str(foto.get("nome_pasta") or ""),
+        str(foto.get("rotulo_cenario") or ""),
+        str(foto.get("cenario") if isinstance(foto.get("cenario"), str) else ""),
+        str(foto.get("caminho") or ""),
+    ]
+    txt = " ".join(partes).lower()
+    if any(k in txt for k in ("jaleco", "medicin", "odonto", "enferm", "saude", "saúde", "branco", "hospital", "clinica")):
+        return "Cerimônia do Jaleco"
+    if any(k in txt for k in ("extern", "parque", "praia", "campus", "ar_livre", "jardim", "natureza", "outdoor", "sol")):
+        return "Fotos Externas"
+    if any(k in txt for k in ("baile", "gala", "festa", "pista", "brinde", "balada", "valsa", "recepcao", "recepção")):
+        return "Baile de Gala"
+    if any(k in txt for k in ("culto", "missa", "solenidade", "homenagem")):
+        return "Culto Ecumênico"
+    if any(k in txt for k in ("colacao 2", "colação 2", "colacao_2", "estudio 2", "estúdio 2", "bokeh")):
+        return "Colação 2"
+    if any(k in txt for k in ("colacao", "colação", "beca", "canudo", "grau", "oficial", "estudio", "estúdio")):
+        return "Colação 1"
+
+    vetor = _assinatura_de_foto(foto, info=info)
+    if vetor and len(vetor) >= 6:
+        media_v = sum(vetor) / float(len(vetor))
+        max_v = max(vetor)
+        if media_v > 0.012 and max_v < 0.08:
+            return "Cerimônia do Jaleco"
+    nomes_padrao = ("Colação 1", "Colação 2", "Cerimônia do Jaleco", "Fotos Externas", "Baile de Gala")
+    return nomes_padrao[int(indice) % len(nomes_padrao)]
+
+
+def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
+    """
+    Separa automaticamente uma lista de fotos em capítulos por Evento
+    ('Colação 1', 'Colação 2', 'Cerimônia do Jaleco', 'Fotos Externas', 'Baile de Gala'),
+    subdividindo também se um mesmo evento tiver ambientes visuais muito distintos (ex.: Colação 1 e Colação 2).
+    Devolve lista de dicts: [{"nome": str, "fotos": [dict, ...], "recolhido": False}]
+    """
+    lista = [dict(f) for f in (fotos or []) if isinstance(f, dict)]
+    if not lista:
+        return []
+    # Enriquecer com assinatura de cenário de `info` quando disponível
+    if isinstance(info, dict):
+        from comum import normalizar_caminho
+        for f in lista:
+            if not f.get("cenario") and f.get("caminho"):
+                ch_n = normalizar_caminho(str(f["caminho"]))
+                dados_i = info.get(ch_n) or info.get(str(f["caminho"])) or {}
+                if dados_i.get("cenario"):
+                    f["cenario"] = dados_i["cenario"]
+
+    # 1. Agrupa primeiro pelo evento detectado em cada foto (preservando ordem de aparição)
+    por_evento = {}
+    ordem_eventos = []
+    for idx_f, f in enumerate(lista):
+        ev = detectar_nome_evento_foto(f, info=info, indice=idx_f // max(1, len(lista) // 4 or 1))
+        if ev not in por_evento:
+            por_evento[ev] = []
+            ordem_eventos.append(ev)
+        por_evento[ev].append(f)
+
+    # 2. Se todas caíram em apenas 1 evento mas possuem múltiplos cenários visuais, subdivide por cenário!
+    if len(ordem_eventos) <= 1 and len(lista) >= 2:
+        _ord_c, sub_c = agrupar_por_cenario_no_bloco(lista, limiar=max(0.16, limiar * 0.85))
+        if len(sub_c) > 1:
+            nomes_padrao = ["Colação 1", "Colação 2", "Cerimônia do Jaleco", "Fotos Externas", "Baile de Gala"]
+            saida_sub = []
+            contagem_nomes = {}
+            for idx_b, bloco in enumerate(sub_c):
+                nome_sug = detectar_nome_evento_foto(bloco[0], info=info, indice=idx_b)
+                if idx_b > 0 and nome_sug == "Colação 1":
+                    nome_sug = nomes_padrao[idx_b % len(nomes_padrao)]
+                qtd_ja = contagem_nomes.get(nome_sug, 0) + 1
+                contagem_nomes[nome_sug] = qtd_ja
+                if qtd_ja > 1:
+                    if nome_sug.startswith("Colação"):
+                        nome_sug = "Colação %d" % qtd_ja
+                    else:
+                        nome_sug = "%s %d" % (nome_sug, qtd_ja)
+                saida_sub.append({"nome": nome_sug, "fotos": bloco, "recolhido": False})
+            return saida_sub
+
+    # 3. Dentro de cada evento, se houver 2 ambientes muito diferentes em 'Colação 1' (>= 4 fotos), separa em Colação 1 e Colação 2
+    resultado = []
+    contagem_colacao = 0
+    for ev_nome in ordem_eventos:
+        bloco_ev = por_evento[ev_nome]
+        _ord_ev, sub_ev = agrupar_por_cenario_no_bloco(bloco_ev, limiar=max(0.22, limiar))
+        if ev_nome.startswith("Colação") and len(sub_ev) >= 2 and len(bloco_ev) >= 4:
+            for sub_b in sub_ev:
+                contagem_colacao += 1
+                resultado.append({
+                    "nome": "Colação %d" % contagem_colacao,
+                    "fotos": sub_b,
+                    "recolhido": False,
+                })
+        else:
+            nome_final = ev_nome
+            if ev_nome.startswith("Colação"):
+                contagem_colacao += 1
+                nome_final = "Colação %d" % contagem_colacao
+            resultado.append({
+                "nome": nome_final,
+                "fotos": _ord_ev if _ord_ev else bloco_ev,
+                "recolhido": False,
+            })
+    return resultado
 
 
 def distancia_cenario(f_a, f_b):
@@ -1882,7 +2011,11 @@ def agrupar_por_cenario_no_bloco(fotos_bloco, limiar=0.28, offset_cenario=0):
     clusters = []  # [{"centroide": list|None, "rotulo_str": str|None, "fotos": [dict, ...]}]
     for f in lista:
         vetor = _assinatura_de_foto(f)
-        rot_str = f.get("cenario") if isinstance(f.get("cenario"), str) else None
+        rot_str = (
+            f.get("cenario")
+            if isinstance(f.get("cenario"), str)
+            else (f.get("nome_grupo") or f.get("pasta") or f.get("nome_pasta") or None)
+        )
         melhor_idx = -1
         menor_dist = 999.0
 

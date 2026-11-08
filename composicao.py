@@ -739,10 +739,72 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
                     op_f = rng.uniform(0.18, 0.32)
                 canvas = canvas * (1.0 - feixe * op_f) + cor_f * (feixe * op_f)
 
+    # Texturas detalhadas de superfície por capítulo (cimento queimado, lona de estúdio, gesso/mármore, papel linho/botânico, poeira de ouro)
+    textura_cap = str(esp.get("textura") or "").lower()
+    rng_np = np.random.RandomState(seed % 2147483647)
+    ruido_fino = rng_np.normal(0.0, 1.0, (gh, gw, 1)).astype(np.float32)
+
+    if textura_cap == "concreto_royal" or "colacao_royal" in str(esp.get("id") or ""):
+        # Microtextura de cimento queimado + trama sutil + vinheta de estúdio com centro 2:1 limpo
+        ond_c = (np.sin(u * 38.0 + v * 19.0) * np.cos(v * 29.0 - u * 14.0))[..., None] * 4.5
+        trama = (((xx.astype(np.int32) % 6 == 0) | (yy.astype(np.int32) % 6 == 0)).astype(np.float32))[..., None] * 2.2
+        dist_centro = np.sqrt(((u - 0.5) * 1.15) ** 2 + ((v - 0.5) * 1.25) ** 2)[..., None]
+        vinheta = np.clip((dist_centro - 0.35) * 0.55, 0.0, 0.38)
+        canvas = canvas * (1.0 - vinheta) + ond_c + trama + ruido_fino * 3.2
+
+    elif textura_cap == "lona_bokeh" or "estudio_bokeh" in str(esp.get("id") or ""):
+        # Trama cruzada de lona de estúdio + granulação + luzes bokeh periféricas
+        trama_x = (np.sin(xx * 1.55) * np.cos(yy * 1.55))[..., None] * 3.8
+        canvas = canvas + trama_x + ruido_fino * 3.6
+
+    elif textura_cap == "gesso_marmore" or "jaleco" in str(esp.get("id") or "") or "perola" in str(esp.get("id") or ""):
+        # Relevo mineral de gesso/estuque + veios orgânicos de mármore Carrara + grãos minerais
+        veio1 = np.exp(-((np.sin(u * 5.2 + v * 3.4 + 0.7) * 0.45 + (v - 0.38)) ** 2) / 0.0018)[..., None]
+        veio2 = np.exp(-((np.cos(u * 4.1 - v * 4.8 + 1.3) * 0.38 + (v - 0.66)) ** 2) / 0.0024)[..., None]
+        relevo_gesso = (np.sin(u * 27.0) * np.cos(v * 23.0))[..., None] * 3.0
+        canvas = canvas - veio1 * 11.0 - veio2 * 8.5 + relevo_gesso + ruido_fino * 2.6
+
+    elif textura_cap == "papel_botanico" or "botanica" in str(esp.get("id") or "") or "linho" in str(esp.get("id") or ""):
+        # Trama de papel algodão/linho + projeções suaves de sombras de folhas nas bordas
+        fibra_h = (np.sin(yy * 2.1) * 2.4 + np.cos(xx * 1.8) * 2.0)[..., None]
+        # Sombra projetada de folhagens nos cantos superiores/laterais (deixando o centro livre)
+        folha_esq = (
+            np.exp(-(((u - 0.14) / 0.18) ** 2 + ((v - 0.22) / 0.28) ** 2))
+            * (0.5 + 0.5 * np.sin((u * 28.0 - v * 18.0)))
+        )[..., None]
+        folha_dir = (
+            np.exp(-(((u - 0.86) / 0.18) ** 2 + ((v - 0.24) / 0.28) ** 2))
+            * (0.5 + 0.5 * np.sin((u * 26.0 + v * 19.0)))
+        )[..., None]
+        sombra_folha = np.clip((folha_esq + folha_dir) * 18.0, 0.0, 22.0)
+        canvas = canvas + fibra_h - sombra_folha + ruido_fino * 2.8
+
+    elif textura_cap == "veludo_ouro" or "baile" in str(esp.get("id") or "") or "culto" in str(esp.get("id") or ""):
+        # Textura de veludo escovado escuro + explosão de poeira de ouro nas bordas
+        escovado = (np.sin(yy * 1.9 + u * 6.0) * 2.6)[..., None]
+        canvas = canvas + escovado + ruido_fino * 3.0
+        cor_ouro = np.array([250.0, 208.0, 92.0], dtype=np.float32)
+        for _ in range(56):
+            px_g = rng.randint(0, gw - 1)
+            py_g = rng.randint(0, gh - 1)
+            # Concentra mais poeira de ouro nas bordas para manter o centro limpo
+            if 0.28 < (px_g / float(max(1, gw))) < 0.72 and 0.22 < (py_g / float(max(1, gh))) < 0.78:
+                if rng.random() < 0.65:
+                    continue
+            for dy_g in (-1, 0, 1):
+                for dx_g in (-1, 0, 1):
+                    ny_g, nx_g = py_g + dy_g, px_g + dx_g
+                    if 0 <= ny_g < gh and 0 <= nx_g < gw:
+                        peso_g = 0.75 if (dx_g == 0 and dy_g == 0) else 0.28
+                        canvas[ny_g, nx_g] = canvas[ny_g, nx_g] * (1.0 - peso_g) + cor_ouro * peso_g
+    else:
+        # Microtextura editorial padrão para não ficar chapado
+        canvas = canvas + ruido_fino * (2.4 if padrao_cor == "branco" else 2.9)
+
     arr_u8 = np.clip(np.round(canvas), 0, 255).astype(np.uint8)
     img_malha = Image.fromarray(arr_u8, mode="RGB")
-    if tipo == "abstrato":
-        img_malha = img_malha.filter(ImageFilter.GaussianBlur(1.4))
+    if tipo == "abstrato" and not textura_cap:
+        img_malha = img_malha.filter(ImageFilter.GaussianBlur(1.1))
     filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
     saida = img_malha.resize((W, H), filtro_redim)
 
@@ -1163,17 +1225,17 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
 
 
 ESTILOS_MOLDURA = (
-    ("simples", "Simples Clássica"),
-    ("dupla", "Dupla Clássica"),
-    ("pontilhada", "Pontilhada Geométrica"),
-    ("royal", "Royal Imperial (Cantos Nobres)"),
+    ("simples", "Filete Fino Clássico"),
+    ("dupla", "Vitral Luminoso (Glass Glow)"),
+    ("pontilhada", "Costura Editorial (Pontilhada)"),
+    ("royal", "Royal Imperial (Cantoneiras)"),
     ("degrade", "Degradê Linear Bicolor"),
-    ("degrade_real", "Degradê Metálico Ouro/Prata"),
+    ("degrade_real", "Ouro Imperial (Reflexo 5 Paradas)"),
     ("cantoneira", "Cantoneira Clássica em L"),
     ("chanfrada", "Chanfrada 3D (Bisel)"),
-    ("passepartout", "Passe-partout Galeria"),
-    ("tripla", "Filete Triplo Editorial"),
-    ("cruzada", "Cruzada Vintage nos Cantos"),
+    ("passepartout", "Galeria Slim (Passe-partout Fino)"),
+    ("tripla", "Diamante Imperial (Cantos 45°)"),
+    ("cruzada", "Arquitetônica (Cruzada nos Cantos)"),
     ("halo", "Halo Suave Interno"),
 )
 
@@ -1304,10 +1366,23 @@ def aplicar_moldura(imagem, moldura, px_por_mm=None):
         desenho.rectangle(caixa, outline=cor1, width=largura)
 
     elif estilo == "dupla":
-        desenho.rectangle(caixa, outline=cor1, width=largura)
-        recuo = max(largura + 2, largura * 3)
-        if W > recuo * 2 and H > recuo * 2:
-            desenho.rectangle((recuo, recuo, W - 1 - recuo, H - 1 - recuo), outline=cor1, width=max(1, round(largura * 0.75)))
+        # Vitral Luminoso (Glass Glow): brilho translúcido interno + linha única fina + pérolas nos 4 cantos
+        esp_glow = max(3, round(largura * 2.6))
+        camada_v = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        dv = ImageDraw.Draw(camada_v)
+        for i in range(esp_glow):
+            alfa_v = int(round(95 * ((1.0 - (i / float(esp_glow))) ** 1.5)))
+            dv.rectangle((i, i, W - 1 - i, H - 1 - i), outline=cor2 + (alfa_v,), width=1)
+        dv.rectangle(caixa, outline=cor1 + (230,), width=max(1, round(largura * 0.75)))
+        r_ponto = max(2, round(largura * 1.1))
+        rec_p = max(3, round(largura * 2.0))
+        for px_c, py_c in ((rec_p, rec_p), (W - 1 - rec_p, rec_p), (rec_p, H - 1 - rec_p), (W - 1 - rec_p, H - 1 - rec_p)):
+            dv.ellipse((px_c - r_ponto, py_c - r_ponto, px_c + r_ponto, py_c + r_ponto), fill=cor1 + (245,))
+        if imagem.mode == "RGBA":
+            imagem.alpha_composite(camada_v)
+        else:
+            comp_v = Image.alpha_composite(imagem.convert("RGBA"), camada_v)
+            imagem.paste(comp_v.convert(imagem.mode))
 
     elif estilo == "pontilhada":
         passo = max(4, largura * 3)
@@ -1403,23 +1478,25 @@ def aplicar_moldura(imagem, moldura, px_por_mm=None):
             desenho.line((W - 1 - i, i, W - 1 - i, H - 1 - i), fill=escura, width=1)
 
     elif estilo == "passepartout":
-        esp_galeria = max(4, round(largura * 3.6))
+        # Galeria Slim: passe-partout fino que não ocupa o espaço útil da foto
+        esp_galeria = max(2, min(6, round(largura * 1.35)))
         if W > esp_galeria * 3 and H > esp_galeria * 3:
             desenho.rectangle(caixa, outline=cor1, width=esp_galeria)
-            rec_in = esp_galeria + max(1, largura // 2)
-            desenho.rectangle((rec_in, rec_in, W - 1 - rec_in, H - 1 - rec_in), outline=cor2, width=max(1, round(largura * 0.6)))
+            rec_in = esp_galeria
+            desenho.rectangle((rec_in, rec_in, W - 1 - rec_in, H - 1 - rec_in), outline=cor2, width=1)
         else:
             desenho.rectangle(caixa, outline=cor1, width=largura)
 
     elif estilo == "tripla":
-        esp_f = max(1, round(largura * 0.55))
-        esp_c = max(1, largura)
-        desenho.rectangle(caixa, outline=cor2, width=esp_f)
-        r1 = esp_f + max(2, round(largura * 1.4))
-        r2 = r1 + esp_c + max(2, round(largura * 1.4))
-        if W > r2 * 2 and H > r2 * 2:
-            desenho.rectangle((r1, r1, W - 1 - r1, H - 1 - r1), outline=cor1, width=esp_c)
-            desenho.rectangle((r2, r2, W - 1 - r2, H - 1 - r2), outline=cor2, width=esp_f)
+        # Diamante Imperial (Cantos 45°): filete único fino + losangos nos 4 cantos (sem empilhar linhas)
+        esp_f = max(1, round(largura * 0.75))
+        desenho.rectangle(caixa, outline=cor1, width=esp_f)
+        r_diam = max(3, round(largura * 2.0))
+        rec_d = max(r_diam + 1, round(largura * 2.2))
+        if W > rec_d * 3 and H > rec_d * 3:
+            for cx_d, cy_d in ((rec_d, rec_d), (W - 1 - rec_d, rec_d), (rec_d, H - 1 - rec_d), (W - 1 - rec_d, H - 1 - rec_d)):
+                pts = [(cx_d, cy_d - r_diam), (cx_d + r_diam, cy_d), (cx_d, cy_d + r_diam), (cx_d - r_diam, cy_d)]
+                desenho.polygon(pts, fill=cor2, outline=cor1)
 
     elif estilo == "cruzada":
         rec = max(3, round(largura * 2.5))
@@ -1455,19 +1532,20 @@ CATALOGO_TEMAS = (
         "id": "colacao_royal",
         "nome": "🎓 Colação 1 / Estúdio — Gradiente Royal Sutil",
         "curto": "Colação 1 · Royal",
-        "descricao": "Gradiente azul royal profundo (#0b1938) e roxo nobre (#1e1035) com textura sutil de concreto e vinheta suave de estúdio (centro limpo 2:1).",
+        "descricao": "Gradiente azul royal profundo (#0b1938) e roxo nobre (#1e1035) com microtextura de cimento queimado e vinheta suave de estúdio (centro limpo 2:1).",
         "cor_base": "#0b152c",
         "fundo_espec": {
             "id": "cap_colacao_royal",
             "titulo": "Lâmina Gradiente Royal Sutil · Colação 1",
             "categoria": "degrade",
             "subtipo": "linear_diagonal",
+            "textura": "concreto_royal",
             "padrao_cor": "preto",
             "cores": ["#091326", "#102142", "#1e1238", "#3b82f6"],
             "angulo": 32,
             "seed": 2026,
         },
-        "moldura": {"estilo": "royal", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.65},
+        "moldura": {"estilo": "royal", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.50},
         "sombra": {"ativa": True, "preset": "profunda", "cor": "#000000", "opacidade": 64, "desfoque_mm": 3.2, "offset_x_mm": 1.6, "offset_y_mm": 2.0, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.02, "contraste": 1.06, "saturacao": 1.04, "matiz": 0.0, "colorir_cor": "#60a5fa", "colorir_int": 3.0},
     },
@@ -1475,18 +1553,19 @@ CATALOGO_TEMAS = (
         "id": "estudio_dark_bokeh",
         "nome": "📸 Colação 2 / Estúdio — Studio Backdrop & Dark Bokeh",
         "curto": "Colação 2 · Bokeh",
-        "descricao": "Fundo escuro texturizado de estúdio com pontos de luz bokeh desfocados nas bordas periféricas, diferenciando a Colação 2 da Colação 1.",
+        "descricao": "Fundo escuro com textura de lona de estúdio e pontos de luz bokeh desfocados nas bordas periféricas, diferenciando a Colação 2 da Colação 1.",
         "cor_base": "#0d1017",
         "fundo_espec": {
             "id": "cap_estudio_bokeh",
             "titulo": "Lâmina Studio Backdrop / Dark Bokeh · Colação 2",
             "categoria": "abstrato",
             "subtipo": "bokeh_luz",
+            "textura": "lona_bokeh",
             "padrao_cor": "preto",
             "cores": ["#0c0f16", "#161f30", "#1f293d", "#93c5fd"],
             "seed": 2027,
         },
-        "moldura": {"estilo": "dupla", "cor": "#cbd5e1", "cor_secundaria": "#475569", "espessura_mm": 0.6},
+        "moldura": {"estilo": "dupla", "cor": "#cbd5e1", "cor_secundaria": "#475569", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 60, "desfoque_mm": 3.0, "offset_x_mm": 1.4, "offset_y_mm": 1.8, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.02, "contraste": 1.05, "saturacao": 1.03, "matiz": 0.0, "colorir_cor": "#93c5fd", "colorir_int": 3.0},
     },
@@ -1494,18 +1573,19 @@ CATALOGO_TEMAS = (
         "id": "jaleco_fine_art",
         "nome": "🩺 Cerimônia do Jaleco — Fine Art / Mármore Clean",
         "curto": "Jaleco · Fine Art",
-        "descricao": "Textura mineral de gesso e mármore off-white/cinza claro, limpa e luminosa, ideal para Medicina, Enfermagem, Odonto e área da saúde.",
+        "descricao": "Textura mineral de gesso e veios suaves de mármore Carrara off-white/cinza claro, ideal para Medicina, Enfermagem, Odonto e área da saúde.",
         "cor_base": "#f8f9fa",
         "fundo_espec": {
             "id": "cap_jaleco_fine_art",
             "titulo": "Lâmina Fine Art / Mármore Clean · Jaleco",
             "categoria": "abstrato",
             "subtipo": "aquarela_nuvens",
+            "textura": "gesso_marmore",
             "padrao_cor": "branco",
             "cores": ["#faf9f6", "#f1f3f5", "#e5e9f0", "#cbd5e1"],
             "seed": 412,
         },
-        "moldura": {"estilo": "passepartout", "cor": "#ffffff", "cor_secundaria": "#cbd5e1", "espessura_mm": 0.7},
+        "moldura": {"estilo": "passepartout", "cor": "#ffffff", "cor_secundaria": "#cbd5e1", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "suave", "cor": "#1e293b", "opacidade": 30, "desfoque_mm": 2.2, "offset_x_mm": 0.8, "offset_y_mm": 1.2, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.04, "contraste": 1.01, "saturacao": 1.0, "matiz": 0.0, "colorir_cor": "#e2e8f0", "colorir_int": 2.0},
     },
@@ -1513,18 +1593,19 @@ CATALOGO_TEMAS = (
         "id": "externas_botanica",
         "nome": "🌿 Fotos Externas — Minimalista Botânica (Sombras)",
         "curto": "Externas · Botânica",
-        "descricao": "Fundo claro em tons areia e bege suave com projeções realistas de sombras de folhas nas bordas e textura de papel fine-art.",
+        "descricao": "Fundo claro em tons areia e bege suave com projeções realistas de sombras de folhas nas bordas e trama de papel algodão fine-art.",
         "cor_base": "#f5f0e6",
         "fundo_espec": {
             "id": "cap_externas_botanica",
             "titulo": "Lâmina Minimalista Botânica (Sombras) · Externas",
             "categoria": "abstrato",
             "subtipo": "ondas_sedosas",
+            "textura": "papel_botanico",
             "padrao_cor": "branco",
             "cores": ["#f7f3eb", "#ede4d3", "#dfd3be", "#a39681"],
             "seed": 707,
         },
-        "moldura": {"estilo": "simples", "cor": "#fffdf9", "cor_secundaria": "#d6c7b2", "espessura_mm": 0.65},
+        "moldura": {"estilo": "simples", "cor": "#fffdf9", "cor_secundaria": "#d6c7b2", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "suave", "cor": "#292524", "opacidade": 34, "desfoque_mm": 2.4, "offset_x_mm": 1.0, "offset_y_mm": 1.4, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.03, "contraste": 1.02, "saturacao": 1.04, "matiz": 0.0, "colorir_cor": "#fde68a", "colorir_int": 4.0},
     },
@@ -1532,18 +1613,19 @@ CATALOGO_TEMAS = (
         "id": "baile_dark_luxury",
         "nome": "🥂 Grande Baile de Gala — Dark Luxury (Poeira de Ouro)",
         "curto": "Baile · Dark Luxury",
-        "descricao": "Fundo grafite carvão escuro (#111215) com explosão sutil de poeira de ouro e partículas bokeh douradas suaves nas bordas.",
+        "descricao": "Fundo grafite carvão escuro (#111215) com textura de veludo escovado, explosão sutil de poeira de ouro e partículas bokeh douradas.",
         "cor_base": "#111215",
         "fundo_espec": {
             "id": "cap_baile_dark_luxury",
             "titulo": "Lâmina Dark Luxury · Poeira de Ouro (Baile)",
             "categoria": "abstrato",
             "subtipo": "bokeh_luz",
+            "textura": "veludo_ouro",
             "padrao_cor": "preto",
             "cores": ["#0f1014", "#18171c", "#241e14", "#eab308"],
             "seed": 1225,
         },
-        "moldura": {"estilo": "degrade_real", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.7},
+        "moldura": {"estilo": "degrade_real", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.50},
         "sombra": {"ativa": True, "preset": "profunda", "cor": "#000000", "opacidade": 68, "desfoque_mm": 3.5, "offset_x_mm": 1.8, "offset_y_mm": 2.2, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.02, "contraste": 1.08, "saturacao": 1.06, "matiz": 0.0, "colorir_cor": "#f59e0b", "colorir_int": 5.0},
     },
@@ -1551,18 +1633,19 @@ CATALOGO_TEMAS = (
         "id": "culto_solenidade",
         "nome": "🕯️ Culto Ecumênico / Colação 3 — Gala Obsidiana",
         "curto": "Colação 3 / Culto",
-        "descricao": "Obsidiana profundo com feixes sutis de luz esmeralda e dourado imperial para solenidades ou 3ª Colação.",
+        "descricao": "Obsidiana profundo com textura escovada e feixes sutis de luz esmeralda e dourado imperial para solenidades ou 3ª Colação.",
         "cor_base": "#0b0f12",
         "fundo_espec": {
             "id": "cap_culto_solenidade",
             "titulo": "Lâmina Gala Obsidiana · Solenidade / Colação 3",
             "categoria": "abstrato",
             "subtipo": "prisma_geometrico",
+            "textura": "veludo_ouro",
             "padrao_cor": "preto",
             "cores": ["#0b0d13", "#0f241f", "#141d2f", "#d4af37"],
             "seed": 909,
         },
-        "moldura": {"estilo": "cantoneira", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.6},
+        "moldura": {"estilo": "cantoneira", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 58, "desfoque_mm": 2.8, "offset_x_mm": 1.4, "offset_y_mm": 1.8, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.01, "contraste": 1.06, "saturacao": 1.03, "matiz": 0.0, "colorir_cor": "#fbbf24", "colorir_int": 4.0},
     },
@@ -1577,12 +1660,13 @@ CATALOGO_TEMAS = (
             "titulo": "Lâmina Linho Editorial · Ensaio & Família",
             "categoria": "degrade",
             "subtipo": "linear_diagonal",
+            "textura": "papel_botanico",
             "padrao_cor": "branco",
             "cores": ["#f8f5ee", "#efe7d6", "#e2d4b7", "#c5a059"],
             "angulo": 38,
             "seed": 5050,
         },
-        "moldura": {"estilo": "tripla", "cor": "#c5a059", "cor_secundaria": "#faf0ca", "espessura_mm": 0.6},
+        "moldura": {"estilo": "tripla", "cor": "#c5a059", "cor_secundaria": "#faf0ca", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "deslocada", "cor": "#1e293b", "opacidade": 38, "desfoque_mm": 1.8, "offset_x_mm": 1.4, "offset_y_mm": 1.4, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.02, "contraste": 1.03, "saturacao": 0.98, "matiz": 0.0, "colorir_cor": "#d97706", "colorir_int": 4.0},
     },
@@ -1590,18 +1674,19 @@ CATALOGO_TEMAS = (
         "id": "casamento_perola",
         "nome": "💍 Casamento & Bodas — Seda Pérola & Champanhe",
         "curto": "Casamento · Pérola",
-        "descricao": "Seda branca pérola e champanhe clássico com luz difusa Fine-Art, ideal para álbuns de casamento e bodas.",
+        "descricao": "Seda branca pérola e champanhe clássico com textura mineral suave, ideal para álbuns de casamento e bodas.",
         "cor_base": "#faf8f5",
         "fundo_espec": {
             "id": "cap_casamento_perola",
             "titulo": "Lâmina Seda Pérola & Champanhe · Casamento",
             "categoria": "abstrato",
             "subtipo": "ondas_sedosas",
+            "textura": "gesso_marmore",
             "padrao_cor": "branco",
             "cores": ["#faf8f5", "#f3ede2", "#e7dac6", "#d4af37"],
             "seed": 303,
         },
-        "moldura": {"estilo": "royal", "cor": "#c5a880", "cor_secundaria": "#ffffff", "espessura_mm": 0.55},
+        "moldura": {"estilo": "royal", "cor": "#c5a880", "cor_secundaria": "#ffffff", "espessura_mm": 0.45},
         "sombra": {"ativa": True, "preset": "suave", "cor": "#0f172a", "opacidade": 36, "desfoque_mm": 2.2, "offset_x_mm": 1.0, "offset_y_mm": 1.4, "sincronizar_moldura": True},
         "edicao_foto": {"brilho": 1.02, "contraste": 1.03, "saturacao": 0.97, "matiz": 0.0, "colorir_cor": "#fde68a", "colorir_int": 4.0},
     },

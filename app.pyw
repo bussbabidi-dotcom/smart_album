@@ -2622,24 +2622,28 @@ class Aplicativo:
             box_op,
             text="🖼 Fundo Temático (salvo em pasta temp para editar)",
             variable=self.tema_aplicar_fundo,
+            command=lambda: self.executar_tema_laminas(modo="atual"),
         ).pack(anchor="w", pady=1)
         ttk.Checkbutton(
             box_op,
-            text="▭ Moldura Especial do Tema (Royal / Degradê / Galeria)",
+            text="▭ Moldura Especial do Tema (Vitral / Diamante / Galeria Slim)",
             variable=self.tema_aplicar_moldura,
+            command=lambda: self.executar_tema_laminas(modo="atual"),
         ).pack(anchor="w", pady=1)
         ttk.Checkbutton(
             box_op,
             text="❒ Sombra Projetada Coordenada",
             variable=self.tema_aplicar_sombra,
+            command=lambda: self.executar_tema_laminas(modo="atual"),
         ).pack(anchor="w", pady=1)
         ttk.Checkbutton(
             box_op,
             text="✨ Edição e Tom das Fotos (Color Grading do Tema)",
             variable=self.tema_aplicar_edicao,
+            command=lambda: self.executar_tema_laminas(modo="atual"),
         ).pack(anchor="w", pady=1)
 
-        box_cat = ttk.LabelFrame(quadro, text="2. Escolha o Tema (Ocasião)", padding=6)
+        box_cat = ttk.LabelFrame(quadro, text="2. Escolha o Tema / Capítulo (Atualiza na Hora)", padding=6)
         box_cat.pack(fill="x", pady=(0, 6))
         grade_t = ttk.Frame(box_cat)
         grade_t.pack(fill="x")
@@ -2650,7 +2654,7 @@ class Aplicativo:
                 value=t_info["id"],
                 variable=self.tema_selecionado_var,
                 style="Filtro.TRadiobutton",
-                command=self._atualizar_temas_ui,
+                command=lambda: (self._atualizar_temas_ui(), self.executar_tema_laminas(modo="atual")),
             )
             rb_t.grid(row=idx_t // 2, column=idx_t % 2, sticky="ew", padx=1, pady=1)
             tema.dica(rb_t, t_info["descricao"])
@@ -6011,6 +6015,19 @@ class Aplicativo:
                 "fotos": [dict(f) for f in self.projeto.get("fotos", [])],
                 "recolhido": False,
             }]
+        # Se houver apenas 1 grupo inicial com várias fotos, separa automaticamente por evento/momento
+        if len(estado_grupos) == 1 and len(estado_grupos[0].get("fotos") or []) >= 2:
+            fotos_enriq_ini = []
+            for f_ini in estado_grupos[0]["fotos"]:
+                ch_ini = normalizar_caminho(f_ini["caminho"])
+                dados_ini = self.info.get(ch_ini) or {}
+                copia_ini = dict(f_ini)
+                if dados_ini.get("cenario"):
+                    copia_ini["cenario"] = dados_ini["cenario"]
+                fotos_enriq_ini.append(copia_ini)
+            grupos_auto_ev = diagramar.separar_fotos_por_evento_automatico(fotos_enriq_ini)
+            if len(grupos_auto_ev) > 1:
+                estado_grupos = grupos_auto_ev
 
         grupo_ativo_idx = [0]
         fotos_sel_chaves = set()
@@ -6082,6 +6099,12 @@ class Aplicativo:
 
         tk.Frame(barra_acoes, bg=tema.BORDA, width=1, height=18).pack(side="left", padx=4)
 
+        ttk.Button(
+            barra_acoes,
+            text="⚡ Separar p/ Evento",
+            style="PrimarioCompacto.TButton",
+            command=lambda: _separar_por_evento_automatico(),
+        ).pack(side="left", padx=1)
         ttk.Button(
             barra_acoes,
             text="🎨 Ordenar p/ Cenário no Grupo",
@@ -6858,6 +6881,29 @@ class Aplicativo:
             ]
             estado_grupos[idx:idx + 1] = novos_sub
             _redesenhar_canvas()
+
+        def _separar_por_evento_automatico():
+            todas_ev = []
+            for g_ev in estado_grupos:
+                for f_ev in g_ev["fotos"]:
+                    ch_ev = normalizar_caminho(f_ev["caminho"])
+                    dados_ev = self.info.get(ch_ev) or {}
+                    copia_ev = dict(f_ev)
+                    if dados_ev.get("cenario"):
+                        copia_ev["cenario"] = dados_ev["cenario"]
+                    todas_ev.append(copia_ev)
+            if not todas_ev:
+                return
+            novos_ev = diagramar.separar_fotos_por_evento_automatico(todas_ev)
+            if novos_ev:
+                estado_grupos.clear()
+                estado_grupos.extend(novos_ev)
+                grupo_ativo_idx[0] = 0
+                _redesenhar_canvas()
+                self.registrar(
+                    "Fotos separadas automaticamente em %d evento(s)/capítulo(s): %s"
+                    % (len(novos_ev), ", ".join(g["nome"] for g in novos_ev))
+                )
 
         def _dividir_por_pastas():
             todas = [f for g in estado_grupos for f in g["fotos"]]
