@@ -58,6 +58,21 @@ def configuracao(produto, projeto_cfg=None):
         "excluir_repetidas": False,
         "auto_salvar_minutos": 5,
         "fundo": "#ffffff",
+        # 1. Função Independente de Fundos Automáticos (Ativada por padrão)
+        "auto_fundos": True,
+        "modo_auto_fundos": "misturar",  # "misturar" | "gerados" | "pasta"
+        "estilo_fundo_gerado": "degrade_e_abstrato",  # "degrade_e_abstrato" | "degrade" | "abstrato"
+        "escopo_auto_fundos": "adaptativo",  # "adaptativo" | "lamina" | "pagina"
+        # 2. Função Independente de Degradê Automático (Ativada por padrão)
+        "auto_degrade": True,
+        "regra_auto_degrade": "destaque_e_fusao",  # "destaque_e_fusao" | "somente_destaque" | "somente_fusao"
+        "intensidade_auto_degrade": "suave",  # "suave" | "medio" | "forte"
+        # 3. Função Independente de Molduras Automáticas (Ativada por padrão)
+        "auto_molduras": True,
+        "regra_auto_molduras": "grades_com_margem",  # "grades_com_margem" | "todas_com_margem" | "secundarias"
+        "estilo_auto_molduras": "simples",  # "simples" | "dupla"
+        "cor_auto_molduras": "contraste_automatico",  # "contraste_automatico" | "branca" | "paleta"
+        "espessura_auto_molduras_mm": 1.2,
     }
     for chave, valor in (projeto_cfg or {}).items():
         if valor is not None:
@@ -2397,7 +2412,7 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         for f in fotos
         if isinstance(f, dict) and f.get("caminho") and f.get("edicao")
     }
-    for lamina in laminas:
+    for idx_lam, lamina in enumerate(laminas):
         for espaco in lamina["espacos"]:
             edicao = espaco.setdefault("edicao", {})
             cam_esp = str(espaco.get("foto") or "")
@@ -2407,4 +2422,409 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
                         edicao[ch_ed] = val_ed
             if not cfg.get("reconhecer_rostos", True):
                 edicao["ignorar_rosto"] = True
+
+        # Executa os 3 motores de acabamento de forma 100% independente conforme suas regras próprias
+        fotos_desta_lamina = grupos[idx_lam] if idx_lam < len(grupos) else []
+        if cfg.get("auto_fundos", True):
+            aplicar_fundos_automaticos(lamina, fotos_desta_lamina, produto, cfg, indice_lamina=idx_lam)
+        if cfg.get("auto_degrade", True):
+            aplicar_degrade_automatico(lamina, fotos_desta_lamina, produto, cfg)
+        if cfg.get("auto_molduras", True):
+            aplicar_molduras_automaticas(lamina, fotos_desta_lamina, produto, cfg)
+
     return laminas, [f["caminho"] for f in sobras]
+
+
+# ==============================================================================
+# Três Motores Independentes de Acabamento: (1) Fundos, (2) Degradê, (3) Molduras
+# ==============================================================================
+
+def _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto):
+    """
+    Separa os caminhos e metadados das fotos que estão na Página Esquerda (x + w/2 < 0.5),
+    na Página Direita (x + w/2 >= 0.5) e na Lâmina Inteira, além de indicar se alguma foto
+    atravessa a dobra central.
+    """
+    mapa_f = {str(f.get("caminho")): f for f in (fotos_lamina or []) if isinstance(f, dict) and f.get("caminho")}
+    esq_caminhos, dir_caminhos, todos_caminhos = [], [], []
+    esq_meta, dir_meta = [], []
+    atravessa_meio = False
+    paginas = int(produto.get("paginas_por_lamina", 1))
+
+    for esp in lamina.get("espacos") or []:
+        cam = esp.get("foto")
+        if not cam:
+            continue
+        cam_s = str(cam)
+        todos_caminhos.append(cam_s)
+        x0 = float(esp.get("x", 0.0))
+        w = float(esp.get("w", 0.0))
+        x1 = x0 + w
+        if paginas > 1 and x0 < 0.485 and x1 > 0.515:
+            atravessa_meio = True
+        centro_x = x0 + w * 0.5
+        meta = mapa_f.get(cam_s, {"caminho": cam_s})
+        if paginas < 2 or centro_x < 0.5:
+            esq_caminhos.append(cam_s)
+            esq_meta.append(meta)
+        else:
+            dir_caminhos.append(cam_s)
+            dir_meta.append(meta)
+
+    return {
+        "todos": todos_caminhos,
+        "esquerda": esq_caminhos,
+        "direita": dir_caminhos,
+        "meta_esquerda": esq_meta,
+        "meta_direita": dir_meta,
+        "atravessa_meio": atravessa_meio,
+    }
+
+
+def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0):
+    """
+    Analisa as fotos do alvo (uma página ou a lâmina inteira) e devolve `(cor_hex_base, dados_fundo_imagem, paleta)`:
+    - Se a origem permitir usar a Pasta de Fundos do usuário e houver arquivos nela, sugere com base
+      na harmonia com as fotos + padrão/histórico de uso do usuário (`sugerir_fundos_da_pasta`).
+    - Caso contrário (ou ao alternar no modo 'misturar'), gera na hora um fundo Degradê ou Abstrato
+      baseado nas cores das fotos com aleatoriedade controlada (`seed`).
+    """
+    import time
+    from composicao import extrair_paleta_fotos, fundo_imagem_padrao, gerar_galeria_fundos_procedurais
+    from fundos import listar_fundos, sugerir_fundos_da_pasta
+
+    paleta = extrair_paleta_fotos(caminhos_fotos)
+    cor_base = paleta.get("cor_base") or "#f4efea"
+
+    modo_origem = str(cfg.get("modo_auto_fundos", "misturar") or "misturar").strip().lower()
+    estilo_gerado = str(cfg.get("estilo_fundo_gerado", "degrade_e_abstrato") or "degrade_e_abstrato").strip().lower()
+    pasta_fundos = str(cfg.get("pasta_fundos") or "")
+    arquivo_cfg_fundos = cfg.get("_arquivo_fundos")
+    lista_pasta = cfg.get("_lista_fundos_pasta")
+    if lista_pasta is None and pasta_fundos:
+        try:
+            lista_pasta = listar_fundos(pasta_fundos)
+        except Exception:
+            lista_pasta = []
+
+    usar_da_pasta = False
+    if lista_pasta:
+        if modo_origem == "pasta":
+            usar_da_pasta = True
+        elif modo_origem == "misturar":
+            # Alterna entre fundos gerados pelas fotos e sugestões da pasta do usuário
+            usar_da_pasta = (int(indice_seed) % 2 == 1)
+
+    if usar_da_pasta and lista_pasta:
+        sugeridos = sugerir_fundos_da_pasta(arquivo_cfg_fundos, lista_pasta, paleta, limite=6)
+        if sugeridos:
+            escolhido = sugeridos[int(indice_seed) % len(sugeridos)]
+            dados_pasta = fundo_imagem_padrao(escolhido)
+            # Aplica leve harmonização cromática (16%) com a paleta das fotos sem descaracterizar o fundo padrão
+            dados_pasta["ajustes"] = {
+                "brilho": 0,
+                "contraste": 0,
+                "saturacao": 0,
+                "matiz": 0,
+                "tingir_cor": (paleta.get("tons_medios") or [cor_base])[0],
+                "tingir_forca": 16,
+            }
+            return cor_base, dados_pasta, paleta
+
+    seed_base = int(cfg.get("_seed_auto_fundos") or (int(time.time() * 1000) % 900000)) + int(indice_seed) * 7919
+    galeria = gerar_galeria_fundos_procedurais(paleta, estilo=estilo_gerado, seed_base=seed_base, quantidade=4)
+    dados_gerado = galeria[int(indice_seed) % len(galeria)] if galeria else None
+    return cor_base, dados_gerado, paleta
+
+
+def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0):
+    """
+    FUNÇÃO 1 (Independente): Motor de Fundos Automáticos.
+    - Analisa as cores das fotos da lâmina inteira ou de cada página separadamente.
+    - Gera fundos Degradês e Abstratos suaves baseados nas cores das fotos (com aleatoriedade controlada)
+      e/ou seleciona os fundos sugeridos da Pasta de Fundos que o usuário mais usa por padrão.
+    """
+    if not lamina:
+        return False
+    cfg = cfg or {}
+    if not bool(cfg.get("auto_fundos", True)):
+        return False
+    produto = produto or {"paginas_por_lamina": 2}
+    divisao = _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto)
+    if not divisao["todos"]:
+        return False
+
+    paginas = int(produto.get("paginas_por_lamina", 1))
+    escopo = str(cfg.get("escopo_auto_fundos", "adaptativo") or "adaptativo").strip().lower()
+    tipo_layout = str(lamina.get("tipo_layout") or "")
+
+    separar_paginas = False
+    if paginas >= 2 and divisao["esquerda"] and divisao["direita"] and not divisao["atravessa_meio"]:
+        if escopo == "pagina":
+            separar_paginas = True
+        elif escopo == "adaptativo":
+            cen_esq = {f.get("cenario_subgrupo") for f in divisao["meta_esquerda"] if f.get("cenario_subgrupo") is not None}
+            cen_dir = {f.get("cenario_subgrupo") for f in divisao["meta_direita"] if f.get("cenario_subgrupo") is not None}
+            if (cen_esq and cen_dir and cen_esq.isdisjoint(cen_dir)) or tipo_layout in ("meio_termo_esq", "meio_termo_dir"):
+                separar_paginas = True
+
+    if separar_paginas:
+        cor_e, img_e, pal_e = _escolher_ou_gerar_fundo_para_fotos(
+            divisao["esquerda"], cfg, indice_seed=indice_lamina * 2
+        )
+        cor_d, img_d, pal_d = _escolher_ou_gerar_fundo_para_fotos(
+            divisao["direita"], cfg, indice_seed=indice_lamina * 2 + 1
+        )
+        lamina["fundo"] = cor_e
+        lamina["fundo_esquerda"] = cor_e
+        lamina["fundo_direita"] = cor_d
+        if img_e:
+            lamina["fundo_imagem_esquerda"] = img_e
+        if img_d:
+            lamina["fundo_imagem_direita"] = img_d
+        lamina["_paleta_esquerda"] = pal_e
+        lamina["_paleta_direita"] = pal_d
+        return True
+
+    cor_l, img_l, pal_l = _escolher_ou_gerar_fundo_para_fotos(
+        divisao["todos"], cfg, indice_seed=indice_lamina
+    )
+    lamina["fundo"] = cor_l
+    lamina.pop("fundo_esquerda", None)
+    lamina.pop("fundo_direita", None)
+    lamina.pop("fundo_imagem_esquerda", None)
+    lamina.pop("fundo_imagem_direita", None)
+    if img_l:
+        lamina["fundo_imagem"] = img_l
+    lamina["_paleta_lamina"] = pal_l
+    return True
+
+
+def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None):
+    """
+    FUNÇÃO 2 (Independente): Motor de Degradê Automático nas Fotos e na Fusão de Páginas.
+    Regras próprias:
+    - Atua em fotos de Destaque Lateral, Meio-Termo ('meio_termo_esq', 'meio_termo_dir') e
+      Transpasses ('transpasse_60_40', 'transpasse_70_30'), aplicando transição suave na borda
+      voltada para o interior da lâmina.
+    - Nunca aplica degradê nas bordas de fotos em grade ('safe_zone' / 'sem_corte').
+    - Protege os rostos/pessoas detectados na foto para que o esfumaçado nunca atinja ninguém.
+    - Quando a lâmina possui fundos separados por página, ativa fusão suave no centro ('fundo_fusao').
+    """
+    if not lamina:
+        return False
+    cfg = cfg or {}
+    if not bool(cfg.get("auto_degrade", True)):
+        return False
+
+    from composicao import tem_fundo_por_pagina
+
+    regra = str(cfg.get("regra_auto_degrade", "destaque_e_fusao") or "destaque_e_fusao").strip().lower()
+    intensidade = str(cfg.get("intensidade_auto_degrade", "suave") or "suave").strip().lower()
+    mapa_inicio = {"suave": 68, "medio": 56, "forte": 44}
+    inicio_base = mapa_inicio.get(intensidade, 68)
+    alterou = False
+
+    # Regra A: Fusão central suave entre páginas quando esquerda e direita têm fundos próprios
+    if regra in ("destaque_e_fusao", "somente_fusao") and tem_fundo_por_pagina(lamina):
+        lamina["fundo_fusao"] = {"suave": 36, "medio": 50, "forte": 66}.get(intensidade, 36)
+        alterou = True
+
+    if regra == "somente_fusao":
+        return alterou
+
+    # Regra B: Degradê na borda livre de fotos de Destaque / Meio-Termo / Transpasse
+    espacos = lamina.get("espacos") or []
+    com_foto = [e for e in espacos if e.get("foto")]
+    if len(com_foto) < 2:
+        # Se houver apenas 1 foto em 1 página isolada ao lado de uma página vazia com fundo, suaviza a borda interna
+        if len(com_foto) == 1:
+            e0 = com_foto[0]
+            x0, w0, h0 = float(e0.get("x", 0.0)), float(e0.get("w", 0.0)), float(e0.get("h", 0.0))
+            if h0 >= 0.88 and w0 <= 0.62 and (x0 <= 0.02 or x0 + w0 >= 0.98):
+                direcao_u = "direita" if x0 <= 0.02 else "esquerda"
+                ed = e0.setdefault("edicao", {})
+                ed["degrade"] = {
+                    "ativo": True,
+                    "direcao": direcao_u,
+                    "inicio": inicio_base,
+                    "fim": 100,
+                    "opacidade_fim": 0,
+                }
+                ed.pop("moldura", None)
+                return True
+        return alterou
+
+    mapa_rostos = {}
+    for f in fotos_lamina or []:
+        if isinstance(f, dict) and f.get("caminho") and isinstance(f.get("rosto"), dict):
+            mapa_rostos[str(f["caminho"])] = f["rosto"]
+
+    tipo_layout = str(lamina.get("tipo_layout") or "")
+    for esp in com_foto:
+        ex = float(esp.get("x", 0.0))
+        ey = float(esp.get("y", 0.0))
+        ew = float(esp.get("w", 0.0))
+        eh = float(esp.get("h", 0.0))
+        ex1 = ex + ew
+
+        direcao_deg = None
+        if tipo_layout == "meio_termo_esq" and ex <= 0.02 and abs(ew - 0.5) <= 0.05 and eh >= 0.90:
+            direcao_deg = "direita"
+        elif tipo_layout == "meio_termo_dir" and ex >= 0.45 and ex1 >= 0.98 and eh >= 0.90:
+            direcao_deg = "esquerda"
+        elif tipo_layout in ("transpasse_60_40", "transpasse_70_30") and ex < 0.48 and ex1 > 0.52 and eh >= 0.85:
+            if ex <= 0.02 and ex1 < 0.85:
+                direcao_deg = "direita"
+            elif ex1 >= 0.98 and ex > 0.15:
+                direcao_deg = "esquerda"
+        elif eh >= 0.92 and 0.44 <= ew <= 0.72:
+            # Destaque sangrado em uma das laterais enquanto o lado oposto tem composição em grade
+            if ex <= 0.015 and ex1 <= 0.72:
+                direcao_deg = "direita"
+            elif ex1 >= 0.985 and ex >= 0.28:
+                direcao_deg = "esquerda"
+
+        if not direcao_deg:
+            continue
+
+        # Proteção inteligente da caixa de rostos/pessoas: o degradê nunca começa sobre alguém
+        ini_seguro = inicio_base
+        rosto = mapa_rostos.get(str(esp.get("foto") or ""))
+        if isinstance(rosto, dict):
+            if direcao_deg == "direita" and rosto.get("x1") is not None:
+                limite_rosto = int(round(float(rosto["x1"]) * 100.0)) + 6
+                ini_seguro = max(ini_seguro, min(90, limite_rosto))
+            elif direcao_deg == "esquerda" and rosto.get("x0") is not None:
+                limite_rosto = int(round((1.0 - float(rosto["x0"])) * 100.0)) + 6
+                ini_seguro = max(ini_seguro, min(90, limite_rosto))
+
+        ed = esp.setdefault("edicao", {})
+        ed["degrade"] = {
+            "ativo": True,
+            "direcao": direcao_deg,
+            "inicio": int(ini_seguro),
+            "fim": 100,
+            "opacidade_fim": 0,
+        }
+        # Regra de exclusão mútua: foto com degradê de borda nunca recebe linha de moldura por cima
+        ed.pop("moldura", None)
+        alterou = True
+
+    return alterou
+
+
+def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=None):
+    """
+    FUNÇÃO 3 (Independente): Motor de Molduras Automáticas nas Fotos.
+    Regras próprias:
+    - Aplica moldura apenas em quadros em grade / com margem ('safe_zone', 'sem_corte', quadros compostos).
+    - Nunca aplica moldura em fotos 100% sangradas ('sangria_total', 'panoramico_meio') nem em fotos que
+      possuam degradê de borda ativo.
+    - Calcula a cor da moldura pelo contraste com o fundo da página (branca/marfim em fundos médios/escuros,
+      ou tom elegante da paleta em fundos muito claros).
+    """
+    if not lamina:
+        return False
+    cfg = cfg or {}
+    if not bool(cfg.get("auto_molduras", True)):
+        return False
+
+    from comum import cor_rgb
+    from composicao import extrair_paleta_fotos
+
+    regra = str(cfg.get("regra_auto_molduras", "grades_com_margem") or "grades_com_margem").strip().lower()
+    estilo = str(cfg.get("estilo_auto_molduras", "simples") or "simples").strip().lower()
+    if estilo not in ("simples", "dupla", "pontilhada"):
+        estilo = "simples"
+    cor_modo = str(cfg.get("cor_auto_molduras", "contraste_automatico") or "contraste_automatico").strip().lower()
+    try:
+        espessura_mm = max(0.3, min(3.0, float(cfg.get("espessura_auto_molduras_mm", 1.2) or 1.2)))
+    except (TypeError, ValueError):
+        espessura_mm = 1.2
+
+    espacos = [e for e in (lamina.get("espacos") or []) if e.get("foto")]
+    if not espacos:
+        return False
+
+    caminhos_todos = [str(e["foto"]) for e in espacos if e.get("foto")]
+    paleta = lamina.get("_paleta_lamina") or extrair_paleta_fotos(caminhos_todos)
+
+    def _cor_moldura_para_espaco(esp):
+        if cor_modo == "branca":
+            return "#ffffff"
+        if cor_modo == "paleta":
+            return (paleta.get("tons_medios") or ["#d4c5b4"])[0]
+        # Contraste automático com o fundo da página onde a foto está posicionada
+        centro_x = float(esp.get("x", 0.0)) + float(esp.get("w", 0.0)) * 0.5
+        cor_fundo_hex = (
+            (lamina.get("fundo_esquerda") if centro_x < 0.5 else lamina.get("fundo_direita"))
+            or lamina.get("fundo")
+            or "#ffffff"
+        )
+        r, g, b = cor_rgb(cor_fundo_hex)
+        lum_fundo = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        # Se o fundo gerado for escuro/noturno, usa moldura clara marfim/branca
+        dados_img = (
+            (lamina.get("fundo_imagem_esquerda") if centro_x < 0.5 else lamina.get("fundo_imagem_direita"))
+            or lamina.get("fundo_imagem")
+            or {}
+        )
+        sub_g = str(((dados_img.get("gerado") or {}).get("subtipo")) or "")
+        if "noturn" in sub_g or lum_fundo < 0.78:
+            return paleta.get("cor_moldura_clara") or "#faf8f5"
+        return paleta.get("cor_moldura_escura") or "#52483e"
+
+    # Conta quantas fotos existem em cada página para identificar grades
+    qtd_esq = sum(1 for e in espacos if (float(e.get("x", 0.0)) + float(e.get("w", 0.0)) * 0.5) < 0.5)
+    qtd_dir = len(espacos) - qtd_esq
+    maior_area = max(float(e.get("w", 0.0)) * float(e.get("h", 0.0)) for e in espacos)
+
+    alterou = False
+    for esp in espacos:
+        ed = esp.setdefault("edicao", {})
+        # Regra 1: Nunca coloca moldura se a foto tem degradê ativo
+        if (ed.get("degrade") or {}).get("ativo"):
+            continue
+
+        ex = float(esp.get("x", 0.0))
+        ey = float(esp.get("y", 0.0))
+        ew = float(esp.get("w", 0.0))
+        eh = float(esp.get("h", 0.0))
+        area_e = ew * eh
+
+        # Regra 2: Nunca coloca moldura em foto sangrada nas bordas da lâmina ou página inteira cheia
+        sangrada_borda = (
+            ex <= 0.008
+            or ey <= 0.008
+            or (ex + ew) >= 0.992
+            or (ey + eh) >= 0.992
+            or (ew >= 0.485 and eh >= 0.95)
+        )
+        if sangrada_borda:
+            continue
+
+        centro_x = ex + ew * 0.5
+        qtd_na_pagina = qtd_esq if centro_x < 0.5 else qtd_dir
+
+        elegivel = False
+        if regra == "todas_com_margem":
+            elegivel = True
+        elif regra == "secundarias":
+            elegivel = len(espacos) >= 2 and area_e < maior_area * 0.85
+        else:
+            # "grades_com_margem" (padrão): quadros em grade (2+ fotos na página) ou quadros com margem ampla
+            elegivel = (qtd_na_pagina >= 2) or (len(espacos) >= 2) or (area_e <= 0.36)
+
+        if not elegivel:
+            continue
+
+        ed["moldura"] = {
+            "estilo": estilo,
+            "espessura_mm": round(espessura_mm, 2),
+            "cor": _cor_moldura_para_espaco(esp),
+        }
+        alterou = True
+
+    return alterou
+

@@ -53,7 +53,9 @@ import janela_exportar
 import janela_tratamento
 from composicao import (
     DIRECOES_DEGRADE, MODOS_FUNDO, acabar_fundo, aplicar_moldura, compor_fundo_completo,
-    degrade_padrao, fundo_imagem_padrao, fundo_posicionado, gerar_mascara_degrade, rosto_de, tem_degrade_ativo,
+    criar_dados_fundo_gerado, degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos,
+    fundo_imagem_padrao, fundo_posicionado, gerar_galeria_fundos_procedurais,
+    gerar_mascara_degrade, rosto_de, tem_degrade_ativo,
 )
 from editor_foto import EditorFoto
 from observador import Observador
@@ -1482,7 +1484,68 @@ class Aplicativo:
             "Compacto.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        pasta = ttk.LabelFrame(quadro, text="Pasta de fundos", padding=6)
+        # --- Gerador pelas Fotos (Degradê & Abstrato) ---
+        gerador = ttk.LabelFrame(quadro, text="Gerar pelas Fotos (Degradê & Abstrato)", padding=6)
+        gerador.pack(side="top", fill="x", pady=(2, 4))
+        self.estilo_gerador_fundo = tk.StringVar(value="ambos")
+        self._seed_fundos_gerados = 1
+        self._chave_cache_gerados = None
+
+        linha_g1 = ttk.Frame(gerador)
+        linha_g1.pack(fill="x", pady=(0, 3))
+        self.rotulo_escopo_gerador = ttk.Label(
+            linha_g1, text="Analisando: Lâmina inteira", style="Fraco.TLabel"
+        )
+        self.rotulo_escopo_gerador.pack(side="left")
+        combo_est_ger = ttk.Combobox(
+            linha_g1,
+             state="readonly",
+            width=16,
+            values=("Degradê + Abstrato", "Só Degradê", "Só Abstrato"),
+        )
+        combo_est_ger.set("Degradê + Abstrato")
+        combo_est_ger.pack(side="right")
+
+        def _mudou_estilo_gerador(_e=None):
+            mapa = {
+                "Degradê + Abstrato": "ambos",
+                "Só Degradê": "degrade",
+                "Só Abstrato": "abstrato",
+            }
+            self.estilo_gerador_fundo.set(mapa.get(combo_est_ger.get(), "ambos"))
+            self._chave_cache_gerados = None
+            self._atualizar_galeria_gerados(forcar=True)
+
+        combo_est_ger.bind("<<ComboboxSelected>>", _mudou_estilo_gerador)
+
+        linha_g2 = ttk.Frame(gerador)
+        linha_g2.pack(fill="x", pady=(0, 4))
+        self._botao(
+            linha_g2,
+            "🎲 Novas Variações",
+            self.sortear_fundos_gerados,
+            "Gera novas variações aleatórias de fundos Degradê e Abstrato baseados na paleta das fotos da página/lâmina",
+            "PrimarioCompacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_g2,
+            "✨ Auto Fundos (Álbum)",
+            lambda: self.executar_auto_fundos(apenas_atual=False),
+            "Executa a Função 1 (Motor de Fundos) em todo o álbum combinando fundos gerados pelas fotos e sugestões da pasta",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        self.galeria_fundos_gerados = fundos.Galeria(
+            gerador,
+            self._fundo_atual_normalizado,
+            self._galeria_gerados_pressionou,
+            lambda _c: self.abrir_editor_fundo(),
+            self._galeria_gerados_menu,
+        )
+        self.galeria_fundos_gerados.canvas.configure(height=118)
+        self.galeria_fundos_gerados.pack(side="top", fill="x")
+
+        pasta = ttk.LabelFrame(quadro, text="Pasta de fundos (Sugestões & Padrões)", padding=6)
         pasta.pack(side="top", fill="both", expand=True, pady=(2, 0))
         linha = ttk.Frame(pasta)
         linha.pack(side="top", fill="x")
@@ -1494,12 +1557,29 @@ class Aplicativo:
         self.botao_recentes_fundos.pack(side="left", padx=4)
         self._botao(linha, "Atualizar", lambda: self.atualizar_fundos(forcar=True),
                     "Ler a pasta de novo (imagens novas ou apagadas)").pack(side="right")
+
+        linha_sug = ttk.Frame(pasta)
+        linha_sug.pack(side="top", fill="x", pady=(4, 2))
+        self.filtro_sugeridos_pasta = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            linha_sug,
+            text="Ordenar por sugestão (cores das fotos + meus padrões ★)",
+            variable=self.filtro_sugeridos_pasta,
+            command=lambda: self.atualizar_fundos(forcar=True),
+        ).pack(side="left")
+
         self.rotulo_pasta_fundos = ttk.Label(pasta, text="", style="Fraco.TLabel", wraplength=300, justify="left")
-        self.rotulo_pasta_fundos.pack(side="top", anchor="w", pady=(4, 2))
-        ttk.Label(pasta, text="Clique aplica na lâmina · duplo clique ajusta a cor · arraste para uma lâmina",
+        self.rotulo_pasta_fundos.pack(side="top", anchor="w", pady=(2, 2))
+        ttk.Label(pasta, text="Clique aplica · botão direito marca ★ Fundo Padrão · arraste para uma lâmina",
                   style="Fraco.TLabel", wraplength=300, justify="left").pack(side="bottom", anchor="w", pady=(4, 0))
-        self.galeria_fundos = fundos.Galeria(pasta, self._fundo_atual_normalizado, self._galeria_pressionou,
-                                             self.abrir_editor_fundo, self._galeria_menu)
+        self.galeria_fundos = fundos.Galeria(
+            pasta,
+            self._fundo_atual_normalizado,
+            self._galeria_pressionou,
+            self.abrir_editor_fundo,
+            self._galeria_menu,
+            eh_favorito=lambda c: fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, c),
+        )
         self.galeria_fundos.pack(side="top", fill="both", expand=True)
         self.galeria_fundos.canvas.bind("<B1-Motion>", self._mover_arrasto)
         self.galeria_fundos.canvas.bind("<ButtonRelease-1>", self._soltar_arrasto)
@@ -1554,6 +1634,33 @@ class Aplicativo:
         ttk.Button(quadro, text="Aplicar às fotos selecionadas",
                    command=self._moldura_em_todas).pack(fill="x", pady=(10, 4))
         ttk.Button(quadro, text="Remover moldura", command=self._remover_moldura).pack(fill="x")
+
+        auto_m = ttk.LabelFrame(quadro, text="Função 3: Molduras Automáticas (Regras)", padding=6)
+        auto_m.pack(fill="x", pady=(12, 0))
+        ttk.Label(
+            auto_m,
+            text="Aplica moldura automaticamente nas fotos em grade/margem (nunca em fotos sangradas ou com degradê).",
+            style="Fraco.TLabel",
+            wraplength=280,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+        linha_am = ttk.Frame(auto_m)
+        linha_am.pack(fill="x")
+        self._botao(
+            linha_am,
+            "✨ Nesta Lâmina",
+            lambda: self.executar_auto_molduras(apenas_atual=True),
+            "Aplica a regra de molduras automáticas apenas na lâmina aberta",
+            "PrimarioCompacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_am,
+            "✨ No Álbum Inteiro",
+            lambda: self.executar_auto_molduras(apenas_atual=False),
+            "Aplica a regra de molduras automáticas em todas as lâminas do álbum",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
         self._controles_moldura = [self.check_moldura, self.combo_moldura, self.botao_cor_moldura,
                                    self.escala_moldura]
 
@@ -1791,6 +1898,32 @@ class Aplicativo:
         ttk.Button(botoes_acao, text="Remover degradê", command=self._remover_degrade).pack(
             side="left", fill="x", expand=True
         )
+
+        auto_d = ttk.LabelFrame(quadro, text="Função 2: Degradê Automático (Regras)", padding=6)
+        auto_d.pack(fill="x", pady=(8, 0))
+        ttk.Label(
+            auto_d,
+            text="Aplica degradê de transição apenas em fotos de destaque/meio-termo, protegendo rostos e sem aplicar em grades.",
+            style="Fraco.TLabel",
+            wraplength=280,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 4))
+        linha_ad = ttk.Frame(auto_d)
+        linha_ad.pack(fill="x")
+        self._botao(
+            linha_ad,
+            "✨ Nesta Lâmina",
+            lambda: self.executar_auto_degrade(apenas_atual=True),
+            "Aplica as regras de degradê automático na lâmina aberta",
+            "PrimarioCompacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_ad,
+            "✨ No Álbum Inteiro",
+            lambda: self.executar_auto_degrade(apenas_atual=False),
+            "Aplica as regras de degradê automático em todas as lâminas do álbum",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
     def _atualizar_rotulos_degrade(self):
         if not hasattr(self, "_rotulos_degrade"):
@@ -4239,7 +4372,147 @@ class Aplicativo:
                 width=8,
             ).pack(side="right")
 
-        # --- 5. Prévia ao Vivo da Diagramação ---
+        # --- 5. Função 1: Fundos Automáticos (Degradê, Abstrato e Pasta) ---
+        quadro_f1 = ttk.LabelFrame(
+            quadro,
+            text="5. Função 1 — Fundos Automáticos (Degradê, Abstrato e Pasta de Fundos)",
+            padding=10,
+        )
+        quadro_f1.pack(fill="x", pady=(0, 8))
+        auto_fundos_var = tk.BooleanVar(value=bool(cfg.get("auto_fundos", True)))
+        modo_auto_fundos_var = tk.StringVar(value=str(cfg.get("modo_auto_fundos", "misturar")))
+        estilo_fundo_gerado_var = tk.StringVar(value=str(cfg.get("estilo_fundo_gerado", "ambos")))
+        escopo_auto_fundos_var = tk.StringVar(value=str(cfg.get("escopo_auto_fundos", "auto")))
+
+        ttk.Checkbutton(
+            quadro_f1,
+            text="Ativar Fundos Automáticos na diagramação (opcional, ativado por padrão)",
+            variable=auto_fundos_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        linha_f1_modo = ttk.Frame(quadro_f1)
+        linha_f1_modo.pack(fill="x", pady=2)
+        ttk.Label(linha_f1_modo, text="Origem dos fundos:").pack(side="left")
+        for val_m, txt_m in (
+            ("misturar", "Misturar Gerados pelas Fotos + Pasta Sugerida"),
+            ("gerados", "Só Gerados pelas Fotos"),
+            ("pasta", "Só Pasta de Fundos"),
+        ):
+            ttk.Radiobutton(
+                linha_f1_modo, text=txt_m, value=val_m, variable=modo_auto_fundos_var
+            ).pack(side="left", padx=(8, 0))
+
+        linha_f1_est = ttk.Frame(quadro_f1)
+        linha_f1_est.pack(fill="x", pady=2)
+        ttk.Label(linha_f1_est, text="Motor de geração pelas cores das fotos:").pack(side="left")
+        for val_e, txt_e in (
+            ("ambos", "Degradê + Abstrato (com variação aleatória)"),
+            ("degrade", "Só Degradê Suave"),
+            ("abstrato", "Só Abstrato Suave"),
+        ):
+            ttk.Radiobutton(
+                linha_f1_est, text=txt_e, value=val_e, variable=estilo_fundo_gerado_var
+            ).pack(side="left", padx=(8, 0))
+
+        linha_f1_esc = ttk.Frame(quadro_f1)
+        linha_f1_esc.pack(fill="x", pady=2)
+        ttk.Label(linha_f1_esc, text="Análise de cores:").pack(side="left")
+        for val_sc, txt_sc in (
+            ("auto", "Automático (por página ou lâmina inteira)"),
+            ("lamina", "Analisar lâmina inteira"),
+            ("pagina", "Analisar cada página separada (Esq. / Dir.)"),
+        ):
+            ttk.Radiobutton(
+                linha_f1_esc, text=txt_sc, value=val_sc, variable=escopo_auto_fundos_var
+            ).pack(side="left", padx=(8, 0))
+
+        # --- 6. Função 2: Degradê Automático nas Fotos ---
+        quadro_f2 = ttk.LabelFrame(
+            quadro,
+            text="6. Função 2 — Degradê Automático de Transição (Regras Próprias)",
+            padding=10,
+        )
+        quadro_f2.pack(fill="x", pady=(0, 8))
+        auto_degrade_var = tk.BooleanVar(value=bool(cfg.get("auto_degrade", True)))
+        regra_auto_degrade_var = tk.StringVar(value=str(cfg.get("regra_auto_degrade", "destaques")))
+        intensidade_auto_degrade_var = tk.StringVar(value=str(cfg.get("intensidade_auto_degrade", "suave")))
+
+        ttk.Checkbutton(
+            quadro_f2,
+            text="Ativar Degradê Automático em fotos de destaque/meio-termo (protege rostos, não aplica em grades)",
+            variable=auto_degrade_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        linha_f2 = ttk.Frame(quadro_f2)
+        linha_f2.pack(fill="x", pady=2)
+        ttk.Label(linha_f2, text="Regra de aplicação:").pack(side="left")
+        for val_rd, txt_rd in (
+            ("destaques", "Destaques, Meio-termo e Transpasses"),
+            ("meio_termo_apenas", "Apenas fotos Meio-termo"),
+        ):
+            ttk.Radiobutton(
+                linha_f2, text=txt_rd, value=val_rd, variable=regra_auto_degrade_var
+            ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(linha_f2, text="   Intensidade:").pack(side="left", padx=(12, 0))
+        for val_id, txt_id in (("suave", "Suave"), ("medio", "Médio"), ("forte", "Forte")):
+            ttk.Radiobutton(
+                linha_f2, text=txt_id, value=val_id, variable=intensidade_auto_degrade_var
+            ).pack(side="left", padx=(6, 0))
+
+        # --- 7. Função 3: Molduras Automáticas nas Fotos ---
+        quadro_f3 = ttk.LabelFrame(
+            quadro,
+            text="7. Função 3 — Molduras Automáticas nas Fotos (Regras Próprias)",
+            padding=10,
+        )
+        quadro_f3.pack(fill="x", pady=(0, 8))
+        auto_molduras_var = tk.BooleanVar(value=bool(cfg.get("auto_molduras", True)))
+        regra_auto_molduras_var = tk.StringVar(value=str(cfg.get("regra_auto_molduras", "grades_e_margem")))
+        cor_auto_molduras_var = tk.StringVar(value=str(cfg.get("cor_auto_molduras", "contraste_fundo")))
+        estilo_auto_molduras_var = tk.StringVar(value=str(cfg.get("estilo_auto_molduras", "simples")))
+        espessura_auto_molduras_var = tk.DoubleVar(value=float(cfg.get("espessura_auto_molduras_mm", 0.5)))
+
+        ttk.Checkbutton(
+            quadro_f3,
+            text="Ativar Molduras Automáticas em fotos de grade/margem (nunca em fotos sangradas ou com degradê)",
+            variable=auto_molduras_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        linha_f3 = ttk.Frame(quadro_f3)
+        linha_f3.pack(fill="x", pady=2)
+        ttk.Label(linha_f3, text="Regra:").pack(side="left")
+        for val_rm, txt_rm in (
+            ("grades_e_margem", "Grades (2+ fotos) e fotos com margem"),
+            ("apenas_grades", "Apenas em grades (2+ fotos na página)"),
+        ):
+            ttk.Radiobutton(
+                linha_f3, text=txt_rm, value=val_rm, variable=regra_auto_molduras_var
+            ).pack(side="left", padx=(8, 0))
+
+        linha_f3_b = ttk.Frame(quadro_f3)
+        linha_f3_b.pack(fill="x", pady=2)
+        ttk.Label(linha_f3_b, text="Cor da moldura:").pack(side="left")
+        for val_cm, txt_cm in (
+            ("contraste_fundo", "Contraste automático com o fundo"),
+            ("branca", "Branca clássica"),
+            ("paleta", "Tom suave da foto"),
+        ):
+            ttk.Radiobutton(
+                linha_f3_b, text=txt_cm, value=val_cm, variable=cor_auto_molduras_var
+            ).pack(side="left", padx=(8, 0))
+
+        ttk.Label(linha_f3_b, text="   Espessura (mm):").pack(side="left", padx=(10, 4))
+        ttk.Spinbox(
+            linha_f3_b,
+            from_=0.2,
+            to=2.5,
+            increment=0.1,
+            textvariable=espessura_auto_molduras_var,
+            width=6,
+        ).pack(side="left")
+
+        # --- 8. Prévia ao Vivo da Diagramação ---
         quadro_previa = ttk.LabelFrame(quadro, text="Prévia ao vivo do resultado", padding=10)
         quadro_previa.pack(fill="x", pady=(0, 6))
         lbl_previa_1 = ttk.Label(quadro_previa, text="", font=("Segoe UI", 9, "bold"), justify="left")
@@ -4299,6 +4572,11 @@ class Aplicativo:
             except (tk.TclError, ValueError):
                 lim_cen = float(cfg.get("limiar_cenario", 0.28))
 
+            try:
+                esp_mold = max(0.1, min(3.0, float(espessura_auto_molduras_var.get())))
+            except (tk.TclError, ValueError):
+                esp_mold = 0.5
+
             cfg_temp = dict(cfg)
             cfg_temp.update({
                 "laminas_desejadas": lam_des,
@@ -4322,6 +4600,18 @@ class Aplicativo:
                 "nao_cortar_pessoas": bool(nao_cortar_pessoas_var.get()),
                 "preencher_espacos_extras": bool(preencher_extras_var.get()),
                 "excluir_repetidas": bool(repetidas_var.get()),
+                "auto_fundos": bool(auto_fundos_var.get()),
+                "modo_auto_fundos": str(modo_auto_fundos_var.get() or "misturar"),
+                "estilo_fundo_gerado": str(estilo_fundo_gerado_var.get() or "ambos"),
+                "escopo_auto_fundos": str(escopo_auto_fundos_var.get() or "auto"),
+                "auto_degrade": bool(auto_degrade_var.get()),
+                "regra_auto_degrade": str(regra_auto_degrade_var.get() or "destaques"),
+                "intensidade_auto_degrade": str(intensidade_auto_degrade_var.get() or "suave"),
+                "auto_molduras": bool(auto_molduras_var.get()),
+                "regra_auto_molduras": str(regra_auto_molduras_var.get() or "grades_e_margem"),
+                "cor_auto_molduras": str(cor_auto_molduras_var.get() or "contraste_fundo"),
+                "estilo_auto_molduras": str(estilo_auto_molduras_var.get() or "simples"),
+                "espessura_auto_molduras_mm": esp_mold,
             })
             return cfg_temp
 
@@ -5661,6 +5951,9 @@ class Aplicativo:
         cfg = dict(self._cfg())
         if configuracao:
             cfg.update(configuracao)
+        cfg["pasta_fundos"] = self._pasta_fundos()
+        cfg["_arquivo_fundos"] = str(ARQUIVO_FUNDOS)
+        cfg["_lista_fundos_pasta"] = list(getattr(self, "_fundos_lista", None) or [])
         if escopo in ("pasta", "nao_usadas"):
             produto["laminas_min"] = 0
             cfg["laminas_desejadas"] = max(
@@ -10660,11 +10953,42 @@ class Aplicativo:
     def definir_imagem_fundo(self, caminho):
         self.aplicar_fundo_em(caminho, self.atual)
 
+    def aplicar_fundo_gerado_em(self, dados_gerado, item=None, alvo=None):
+        """Aplica um dicionário de fundo gerado proceduralmente (Degradê ou Abstrato) na lâmina/página."""
+        item = self.atual if item is None else item
+        dono = self._lamina(item)
+        if dono is None or not isinstance(dados_gerado, dict):
+            self.registrar("Escolha uma lâmina.")
+            return False
+        ch_cor, ch_img = self._chaves_fundo_alvo(alvo)
+        self.marcar_historico()
+        dono[ch_img] = proj.copia(dados_gerado)
+        espec = dados_gerado.get("gerado") or {}
+        cores = espec.get("cores") or []
+        if cores:
+            dono[ch_cor] = str(cores[0])
+        self._atualizar_fundo_ui()
+        self.atualizar_lamina_atual()
+        nome_alvo = {
+            "fundo_imagem": "lâmina %s" % (item + 1),
+            "fundo_imagem_esquerda": "lâmina %s (pág. esquerda)" % (item + 1),
+            "fundo_imagem_direita": "lâmina %s (pág. direita)" % (item + 1),
+        }[ch_img]
+        self.registrar("Fundo gerado na %s: %s" % (nome_alvo, dados_gerado.get("nome_exibicao") or "Fundo Gerado"))
+        return True
+
     def aplicar_fundo_em(self, caminho, item=None, alvo=None):
         """
         Põe a imagem como fundo do alvo selecionado (lâmina inteira, página esquerda ou página direita)
         com ajustes zerados exclusivos para este fundo (não herda ajustes de outros fundos).
         """
+        if isinstance(caminho, dict) and eh_fundo_gerado(caminho):
+            return self.aplicar_fundo_gerado_em(caminho, item=item, alvo=alvo)
+        if isinstance(caminho, str) and eh_fundo_gerado(caminho):
+            dados_g = getattr(self, "galeria_fundos_gerados", None) and self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+            if dados_g:
+                return self.aplicar_fundo_gerado_em(dados_g, item=item, alvo=alvo)
+            return False
         item = self.atual if item is None else item
         dono = self._lamina(item)
         if dono is None:
@@ -10678,6 +11002,7 @@ class Aplicativo:
         dados = fundo_imagem_padrao()
         dados["caminho"] = str(Path(caminho))
         dono[ch_img] = dados
+        fundos.registrar_uso_fundo(ARQUIVO_FUNDOS, caminho)
         self._fundos_avisados.discard(normalizar_caminho(caminho))
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
@@ -10693,25 +11018,47 @@ class Aplicativo:
             return
         self.marcar_historico()
         _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados_g = None
+        if isinstance(caminho, dict) and eh_fundo_gerado(caminho):
+            dados_g = caminho
+        elif isinstance(caminho, str) and eh_fundo_gerado(caminho) and hasattr(self, "galeria_fundos_gerados"):
+            dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
         for idx in alvos:
             lamina = self.projeto["laminas"][idx]
-            dados = fundo_imagem_padrao()
-            dados["caminho"] = str(Path(caminho))
-            lamina[ch_img] = dados
+            if dados_g:
+                lamina[ch_img] = proj.copia(dados_g)
+            else:
+                dados = fundo_imagem_padrao()
+                dados["caminho"] = str(Path(caminho))
+                lamina[ch_img] = dados
+        if not dados_g and isinstance(caminho, str):
+            fundos.registrar_uso_fundo(ARQUIVO_FUNDOS, caminho)
         self.atualizar_tudo()
-        self.registrar("Fundo %s aplicado em %s lâmina(s) selecionada(s)." % (Path(caminho).name, len(alvos)))
+        nome_f = (dados_g.get("nome_exibicao") if dados_g else Path(caminho).name) or "Fundo"
+        self.registrar("Fundo %s aplicado em %s lâmina(s) selecionada(s)." % (nome_f, len(alvos)))
 
     def aplicar_fundo_em_todas(self, caminho):
         if not self.projeto["laminas"]:
             return
         self.marcar_historico()
         _ch_cor, ch_img = self._chaves_fundo_alvo()
+        dados_g = None
+        if isinstance(caminho, dict) and eh_fundo_gerado(caminho):
+            dados_g = caminho
+        elif isinstance(caminho, str) and eh_fundo_gerado(caminho) and hasattr(self, "galeria_fundos_gerados"):
+            dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
         for lamina in self.projeto["laminas"]:
-            dados = fundo_imagem_padrao()
-            dados["caminho"] = str(Path(caminho))
-            lamina[ch_img] = dados
+            if dados_g:
+                lamina[ch_img] = proj.copia(dados_g)
+            else:
+                dados = fundo_imagem_padrao()
+                dados["caminho"] = str(Path(caminho))
+                lamina[ch_img] = dados
+        if not dados_g and isinstance(caminho, str):
+            fundos.registrar_uso_fundo(ARQUIVO_FUNDOS, caminho)
         self.atualizar_tudo()
-        self.registrar("Fundo %s em todas as %s lâminas." % (Path(caminho).name, len(self.projeto["laminas"])))
+        nome_f = (dados_g.get("nome_exibicao") if dados_g else Path(caminho).name) or "Fundo"
+        self.registrar("Fundo %s em todas as %s lâminas." % (nome_f, len(self.projeto["laminas"])))
 
     def fundo_imagem_em_todas(self):
         """A imagem e todos os ajustes do fundo aberto copiados para as lâminas."""
@@ -10763,26 +11110,208 @@ class Aplicativo:
             menu.add_separator()
             menu.add_command(label="Usar a pasta padrão (esquecer a deste álbum)", command=self.esquecer_pasta_fundos_do_album)
 
+    def _fotos_alvo_fundo_atual(self):
+        """Retorna os caminhos das fotos do alvo atual (lâmina inteira, página esquerda ou página direita)."""
+        lamina = self._lamina()
+        if not lamina:
+            return []
+        alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
+        espacos = lamina.get("espacos") or []
+        if alvo == "esquerda":
+            fotos = [
+                e["foto"] for e in espacos
+                if e.get("foto") and (float(e.get("x", 0.0)) + float(e.get("w", 0.0)) * 0.5) <= 0.52
+            ]
+            if fotos:
+                return fotos
+        elif alvo == "direita":
+            fotos = [
+                e["foto"] for e in espacos
+                if e.get("foto") and (float(e.get("x", 0.0)) + float(e.get("w", 0.0)) * 0.5) >= 0.48
+            ]
+            if fotos:
+                return fotos
+        return [e["foto"] for e in espacos if e.get("foto")]
+
+    def sortear_fundos_gerados(self):
+        """Gera novas variações aleatórias de fundos Degradê e Abstrato baseados nas fotos da página/lâmina."""
+        self._seed_fundos_gerados = int(getattr(self, "_seed_fundos_gerados", 1)) + random.randint(7, 97)
+        self._chave_cache_gerados = None
+        self._atualizar_galeria_gerados(forcar=True)
+        if getattr(self, "_lista_gerados_atuais", None):
+            escolhido = random.choice(self._lista_gerados_atuais)
+            self.aplicar_fundo_gerado_em(escolhido)
+
+    def _atualizar_galeria_gerados(self, forcar=False):
+        if not hasattr(self, "galeria_fundos_gerados"):
+            return
+        alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
+        fotos_alvo = self._fotos_alvo_fundo_atual()
+        estilo = self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo") else "ambos"
+        seed_atual = int(getattr(self, "_seed_fundos_gerados", 1))
+        chave = (self.atual, alvo, tuple(fotos_alvo), estilo, seed_atual)
+        if hasattr(self, "rotulo_escopo_gerador"):
+            txt_alvo = {
+                "lamina": "Lâmina inteira (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+                "esquerda": "Pág. Esquerda (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+                "direita": "Pág. Direita (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+            }.get(alvo, "Lâmina inteira")
+            self.rotulo_escopo_gerador.configure(text="Analisando: %s" % txt_alvo)
+        if not forcar and chave == getattr(self, "_chave_cache_gerados", None):
+            self.galeria_fundos_gerados._agendar()
+            return
+        self._chave_cache_gerados = chave
+        paleta = extrair_paleta_fotos(fotos_alvo, self.info)
+        self._paleta_fundo_atual = paleta
+        gerados = gerar_galeria_fundos_procedurais(
+            paleta, estilo=estilo, seed_base=seed_atual + (self.atual + 1) * 19, quantidade=8
+        )
+        self._lista_gerados_atuais = gerados
+        self.galeria_fundos_gerados.definir(gerados)
+
+    def _galeria_gerados_pressionou(self, caminho, _evento):
+        dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+        if dados_g:
+            self.aplicar_fundo_gerado_em(dados_g)
+
+    def _galeria_gerados_menu(self, caminho, evento):
+        dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+        if not dados_g:
+            return
+        qtd_sel = len(self._indices_laminas_selecionadas())
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="Aplicar no alvo atual (%s)" % self.fundo_alvo.get(),
+            command=lambda: self.aplicar_fundo_gerado_em(dados_g),
+        )
+        menu.add_command(
+            label="Aplicar na Lâmina inteira",
+            command=lambda: (self.fundo_alvo.set("lamina"), self.aplicar_fundo_gerado_em(dados_g, alvo="lamina")),
+        )
+        menu.add_command(
+            label="Aplicar na Página Esquerda",
+            command=lambda: (self.fundo_alvo.set("esquerda"), self.aplicar_fundo_gerado_em(dados_g, alvo="esquerda")),
+        )
+        menu.add_command(
+            label="Aplicar na Página Direita",
+            command=lambda: (self.fundo_alvo.set("direita"), self.aplicar_fundo_gerado_em(dados_g, alvo="direita")),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Aplicar nas %d lâmina(s) selecionada(s)" % max(1, qtd_sel),
+            command=lambda: self.aplicar_fundo_em_selecionadas(dados_g),
+        )
+        menu.add_command(
+            label="Aplicar em todas as lâminas",
+            command=lambda: self.aplicar_fundo_em_todas(dados_g),
+        )
+        menu.add_command(
+            label="Ajustar cor / Tingir...",
+            command=lambda: (self.aplicar_fundo_gerado_em(dados_g), self.abrir_editor_fundo()),
+        )
+        menu.tk_popup(evento.x_root, evento.y_root)
+
+    def executar_auto_fundos(self, apenas_atual=False):
+        """Executa a Função 1 (Motor de Fundos) de forma independente."""
+        laminas = [self._lamina()] if apenas_atual and self._lamina() else self.projeto.get("laminas", [])
+        if not laminas:
+            return
+        self.marcar_historico()
+        cfg = dict(self._cfg())
+        cfg["auto_fundos"] = True
+        cfg["estilo_fundo_gerado"] = (
+            self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo") else cfg.get("estilo_fundo_gerado", "ambos")
+        )
+        alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
+        if apenas_atual and alvo in ("esquerda", "direita"):
+            cfg["escopo_auto_fundos"] = "pagina"
+        diagramar.aplicar_fundos_automaticos(
+            laminas,
+            self.info,
+            cfg,
+            pasta_fundos=self._pasta_fundos(),
+            arquivo_cfg_fundos=str(ARQUIVO_FUNDOS),
+            caminhos_pasta=list(getattr(self, "_fundos_lista", None) or []),
+            seed_extra=random.randint(1, 9999),
+        )
+        self.atualizar_tudo()
+        self.registrar(
+            "Função 1 (Fundos Automáticos) aplicada %s."
+            % ("nesta lâmina" if apenas_atual else "em todas as lâminas do álbum")
+        )
+
+    def executar_auto_degrade(self, apenas_atual=False):
+        """Executa a Função 2 (Motor de Degradê Automático) de forma independente."""
+        laminas = [self._lamina()] if apenas_atual and self._lamina() else self.projeto.get("laminas", [])
+        if not laminas:
+            return
+        self.marcar_historico()
+        cfg = dict(self._cfg())
+        cfg["auto_degrade"] = True
+        diagramar.aplicar_degrade_automatico(laminas, self.info, cfg, self.produto)
+        self._atualizar_degrade_ui()
+        self.atualizar_tudo()
+        self.registrar(
+            "Função 2 (Degradê Automático) aplicada %s."
+            % ("nesta lâmina" if apenas_atual else "em todas as lâminas do álbum")
+        )
+
+    def executar_auto_molduras(self, apenas_atual=False):
+        """Executa a Função 3 (Motor de Molduras Automáticas) de forma independente."""
+        laminas = [self._lamina()] if apenas_atual and self._lamina() else self.projeto.get("laminas", [])
+        if not laminas:
+            return
+        self.marcar_historico()
+        cfg = dict(self._cfg())
+        cfg["auto_molduras"] = True
+        if hasattr(self, "moldura_espessura"):
+            cfg["espessura_auto_molduras_mm"] = float(self.moldura_espessura.get() or 0.5)
+        if hasattr(self, "moldura_estilo"):
+            cfg["estilo_auto_molduras"] = str(self.moldura_estilo.get() or "simples")
+        diagramar.aplicar_molduras_automaticas(laminas, self.info, cfg)
+        self._atualizar_moldura_ui()
+        self.atualizar_tudo()
+        self.registrar(
+            "Função 3 (Molduras Automáticas) aplicada %s."
+            % ("nesta lâmina" if apenas_atual else "em todas as lâminas do álbum")
+        )
+
     def atualizar_fundos(self, forcar=False):
         """Lê a pasta de fundos (a do álbum ou a padrão) e atualiza a galeria se algo mudou."""
         if not hasattr(self, "galeria_fundos"):
             return
         pasta = self._pasta_fundos()
-        lista = fundos.listar_fundos(pasta)
-        if forcar or pasta != self._fundos_pasta or lista != self._fundos_lista:
-            self._fundos_pasta, self._fundos_lista = pasta, lista
-            self.galeria_fundos.definir(lista)
+        lista_bruta = fundos.listar_fundos(pasta)
+        self._fundos_pasta = pasta
+        self._fundos_lista = lista_bruta
+        lista_exibir = list(lista_bruta)
+        if lista_exibir and getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
+            paleta = getattr(self, "_paleta_fundo_atual", None) or extrair_paleta_fotos(self._fotos_alvo_fundo_atual(), self.info)
+            sugeridos = fundos.sugerir_fundos_da_pasta(
+                ARQUIVO_FUNDOS, lista_exibir, paleta_fotos=paleta, limite=len(lista_exibir)
+            )
+            if sugeridos:
+                lista_exibir = sugeridos
+        self.galeria_fundos.definir(lista_exibir)
         if not pasta:
             texto = "Nenhuma pasta escolhida."
         elif not Path(pasta).is_dir():
             texto = "Pasta não encontrada: %s" % pasta
         else:
-            texto = "%s · %s imagem(ns)%s" % (Path(pasta).name, len(lista),
-                                             " · deste álbum" if self.projeto.get("pasta_fundos") else "")
+            qtd_fav = sum(1 for c in lista_bruta if fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, c))
+            extra_fav = (" · ★ %d padrão" % qtd_fav) if qtd_fav else ""
+            texto = "%s · %s imagem(ns)%s%s" % (
+                Path(pasta).name,
+                len(lista_bruta),
+                extra_fav,
+                " · deste álbum" if self.projeto.get("pasta_fundos") else "",
+            )
         self.rotulo_pasta_fundos.configure(text=texto)
 
     def _fundo_atual_normalizado(self):
         dados = self._dados_fundo_imagem_ativo() or {}
+        if eh_fundo_gerado(dados):
+            return str(dados.get("caminho") or "")
         return normalizar_caminho(dados["caminho"]) if dados.get("caminho") else None
 
     def _galeria_pressionou(self, caminho, evento):
@@ -10803,9 +11332,23 @@ class Aplicativo:
             if item is not None:
                 self.aplicar_fundo_em(a["caminho"], item)
 
+    def _alternar_favorito_pasta(self, caminho):
+        marcado = fundos.alternar_favorito_fundo(ARQUIVO_FUNDOS, caminho)
+        self.atualizar_fundos(forcar=True)
+        self.registrar(
+            "%s %s como Fundo Padrão ★."
+            % (Path(caminho).name, "marcado" if marcado else "removido")
+        )
+
     def _galeria_menu(self, caminho, evento):
         qtd_sel = len(self._indices_laminas_selecionadas())
+        eh_fav = fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, caminho)
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(
+            label="★ Remover de Fundo Padrão" if eh_fav else "★ Marcar como Fundo Padrão (Favorito)",
+            command=lambda: self._alternar_favorito_pasta(caminho),
+        )
+        menu.add_separator()
         menu.add_command(label="Aplicar no alvo atual (%s)" % self.fundo_alvo.get(), command=lambda: self.aplicar_fundo_em(caminho))
         menu.add_command(label="Aplicar na Lâmina inteira", command=lambda: (self.fundo_alvo.set("lamina"), self.aplicar_fundo_em(caminho, alvo="lamina")))
         menu.add_command(label="Aplicar na Página Esquerda", command=lambda: (self.fundo_alvo.set("esquerda"), self.aplicar_fundo_em(caminho, alvo="esquerda")))
@@ -10998,8 +11541,12 @@ class Aplicativo:
             if dados and dados.get("caminho"):
                 base = fundo_imagem_padrao()
                 base.update(dados)
-                faltando = not Path(base["caminho"]).is_file()
-                self.rotulo_fundo_imagem.configure(text=Path(base["caminho"]).name + ("  (arquivo não encontrado)" if faltando else ""))
+                if eh_fundo_gerado(base):
+                    nome_g = base.get("nome_exibicao") or (base.get("gerado") or {}).get("titulo") or "Fundo Gerado pelas Fotos"
+                    self.rotulo_fundo_imagem.configure(text="✨ " + str(nome_g))
+                else:
+                    faltando = not Path(base["caminho"]).is_file()
+                    self.rotulo_fundo_imagem.configure(text=Path(base["caminho"]).name + ("  (arquivo não encontrado)" if faltando else ""))
                 self.fundo_modo.set(base["modo"])
                 self.fundo_opacidade.set(base["opacidade"])
                 self.fundo_desfoque.set(base["desfoque"])
@@ -11034,7 +11581,11 @@ class Aplicativo:
             self._rotulos_fundo["Zoom"].configure(text="%d%%" % round(self.fundo_escala.get()))
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
-        self.galeria_fundos._agendar()
+        self._atualizar_galeria_gerados(forcar=False)
+        if getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
+            self.atualizar_fundos(forcar=False)
+        else:
+            self.galeria_fundos._agendar()
         if self.editor_fundo is not None:
             self.editor_fundo.mostrar()
 
@@ -11044,7 +11595,7 @@ class Aplicativo:
             return
         for ch_img in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
             dados = dono.get(ch_img)
-            if not dados or not dados.get("caminho"):
+            if not dados or not dados.get("caminho") or eh_fundo_gerado(dados):
                 continue
             chave = normalizar_caminho(dados["caminho"])
             if chave not in self._fundos_avisados and not Path(dados["caminho"]).is_file():

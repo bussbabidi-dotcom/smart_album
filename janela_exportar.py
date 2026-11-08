@@ -131,8 +131,9 @@ def conferir(projeto, indices):
             elif not Path(espaco["foto"]).is_file():
                 faltam_fotos.add(normalizar_caminho(espaco["foto"]))
         for ch_f in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
-            fundo = (lamina.get(ch_f) or {}).get("caminho")
-            if fundo and not Path(fundo).is_file():
+            dados_f = lamina.get(ch_f) or {}
+            fundo = dados_f.get("caminho")
+            if fundo and not str(fundo).startswith("__gerado__:") and not dados_f.get("gerado") and not Path(fundo).is_file():
                 faltam_fundos.add(normalizar_caminho(fundo))
     avisos = []
     if vazios:

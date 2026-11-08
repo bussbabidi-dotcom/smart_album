@@ -8,6 +8,7 @@ daquela lâmina/página (fundo_imagem["ajustes"]) e não passam para outros fund
 ao trocar a imagem, a menos que o usuário clique em Aplicar nas Selecionadas / Todas.
 """
 
+import math
 import threading
 import tkinter as tk
 from collections import OrderedDict
@@ -19,10 +20,18 @@ from PIL import ImageTk
 import analise
 import tema
 from comum import cor_hex, cor_rgb, gravar_json, ler_json, normalizar_caminho
-from composicao import AJUSTES_FUNDO_PADRAO
+from composicao import (
+    AJUSTES_FUNDO_PADRAO,
+    eh_fundo_gerado,
+    extrair_paleta_fotos,
+    gerar_galeria_fundos_procedurais,
+    renderizar_fundo_gerado,
+)
 
 LIMITE_RECENTES = 8
-LARGURA_MINIMA_CELULA = 96
+LARGURA_MINIMA_CELULA = 92
+_CACHE_COR_FUNDO_PASTA = OrderedDict()
+_TRAVA_COR_FUNDO = threading.Lock()
 
 
 def ler_config(arquivo):
@@ -31,6 +40,13 @@ def ler_config(arquivo):
         dados = {}
     dados.setdefault("pasta", "")
     dados["recentes"] = [p for p in dados.get("recentes") or [] if isinstance(p, str)]
+    dados["favoritos"] = [normalizar_caminho(p) for p in (dados.get("favoritos") or []) if isinstance(p, str) and p]
+    usos_brutos = dados.get("usos") if isinstance(dados.get("usos"), dict) else {}
+    dados["usos"] = {
+        normalizar_caminho(k): max(0, int(v))
+        for k, v in usos_brutos.items()
+        if isinstance(k, str) and isinstance(v, (int, float))
+    }
     return dados
 
 
@@ -48,6 +64,128 @@ def lembrar_pasta(arquivo, pasta):
     return dados
 
 
+def registrar_uso_fundo(arquivo, caminho):
+    """Incrementa o contador de uso de um fundo da pasta para aprender quais fundos o usuário usa por padrão."""
+    if not arquivo or not caminho or eh_fundo_gerado(caminho):
+        return
+    ch = normalizar_caminho(caminho)
+    dados = ler_config(arquivo)
+    usos = dados.setdefault("usos", {})
+    usos[ch] = int(usos.get(ch) or 0) + 1
+    try:
+        gravar_json(arquivo, dados)
+    except OSError:
+        pass
+
+
+def eh_favorito_fundo(arquivo, caminho):
+    if not arquivo or not caminho or eh_fundo_gerado(caminho):
+        return False
+    ch = normalizar_caminho(caminho)
+    return ch in set(ler_config(arquivo).get("favoritos") or [])
+
+
+def alternar_favorito_fundo(arquivo, caminho):
+    """Marca ou desmarca um arquivo da pasta como '★ Fundo Padrão / Favorito' do usuário."""
+    if not arquivo or not caminho or eh_fundo_gerado(caminho):
+        return False
+    ch = normalizar_caminho(caminho)
+    dados = ler_config(arquivo)
+    favs = list(dados.get("favoritos") or [])
+    if ch in favs:
+        favs = [f for f in favs if f != ch]
+        ativo = False
+    else:
+        favs.insert(0, ch)
+        ativo = True
+    dados["favoritos"] = favs
+    try:
+        gravar_json(arquivo, dados)
+    except OSError:
+        pass
+    return ativo
+
+
+def _assinatura_cor_fundo_pasta(caminho):
+    """Extrai de forma rápida (com cache em RAM) o matiz, saturação e brilho médios de um fundo da pasta."""
+    import colorsys
+
+    ch = normalizar_caminho(caminho)
+    with _TRAVA_COR_FUNDO:
+        guardado = _CACHE_COR_FUNDO_PASTA.get(ch)
+        if guardado is not None:
+            _CACHE_COR_FUNDO_PASTA.move_to_end(ch)
+            return guardado
+    try:
+        mini = analise.miniatura(caminho, 96).convert("RGB").resize((24, 24))
+        pxs = list(mini.getdata())
+        r_m = sum(p[0] for p in pxs) / (255.0 * max(1, len(pxs)))
+        g_m = sum(p[1] for p in pxs) / (255.0 * max(1, len(pxs)))
+        b_m = sum(p[2] for p in pxs) / (255.0 * max(1, len(pxs)))
+        h, s, v = colorsys.rgb_to_hsv(r_m, g_m, b_m)
+        res = (h * 360.0, s, v)
+    except Exception:
+        res = (32.0, 0.12, 0.85)
+    with _TRAVA_COR_FUNDO:
+        _CACHE_COR_FUNDO_PASTA[ch] = res
+        while len(_CACHE_COR_FUNDO_PASTA) > 500:
+            _CACHE_COR_FUNDO_PASTA.popitem(last=False)
+    return res
+
+
+def sugerir_fundos_da_pasta(arquivo_cfg, caminhos_pasta, paleta_fotos, limite=8):
+    """
+    Sugere os melhores fundos da pasta do usuário combinando:
+    1. O padrão de uso do usuário (fundos marcados como ★ Favorito/Padrão e frequência de uso no histórico)
+    2. A harmonia cromática e de tom com as fotos analisadas (da página ou da lâmina inteira).
+    Devolve lista ordenada dos caminhos sugeridos (sem aleatoriedade destrutiva).
+    """
+    lista = [str(c) for c in (caminhos_pasta or []) if c and not eh_fundo_gerado(c)]
+    if not lista:
+        return []
+    cfg_f = ler_config(arquivo_cfg) if arquivo_cfg else {"favoritos": [], "usos": {}}
+    favoritos = set(cfg_f.get("favoritos") or [])
+    usos = cfg_f.get("usos") or {}
+
+    pal = paleta_fotos or extrair_paleta_fotos([])
+    matizes_alvo = pal.get("matizes") or [32.0, 205.0]
+    lum_alvo = float(pal.get("luminosidade", 0.54))
+
+    avaliados = []
+    # Avalia até 160 arquivos da pasta para resposta instantânea na UI
+    amostra_pasta = lista[:160]
+    for idx_orig, cam in enumerate(amostra_pasta):
+        ch = normalizar_caminho(cam)
+        eh_fav = ch in favoritos
+        qtd_uso = int(usos.get(ch) or 0)
+        h_bg, s_bg, v_bg = _assinatura_cor_fundo_pasta(cam)
+
+        # Harmonia de matiz (fundos neutros suaves também pontuam bem com qualquer foto)
+        if s_bg < 0.08:
+            harmonia_matiz = 0.82
+        else:
+            dist_min = min(min(abs(h_bg - m), 360.0 - abs(h_bg - m)) for m in matizes_alvo)
+            # Máxima pontuação para tons análogos (0..45°) ou complementares suaves (150..180°)
+            if dist_min <= 50.0:
+                harmonia_matiz = 1.0 - (dist_min / 90.0)
+            elif 145.0 <= dist_min <= 180.0:
+                harmonia_matiz = 0.78
+            else:
+                harmonia_matiz = max(0.25, 1.0 - (dist_min / 180.0))
+
+        # Harmonia de luminosidade (prefere fundos suaves elegantes)
+        harmonia_lum = 1.0 - min(0.6, abs(v_bg - max(0.35, min(0.88, lum_alvo * 1.1))) * 0.7)
+        score_cor = harmonia_matiz * 0.70 + harmonia_lum * 0.30
+
+        # Peso forte para os fundos que o usuário já usa por padrão
+        bonus_padrao = (0.48 if eh_fav else 0.0) + min(0.42, math.log1p(qtd_uso) * 0.16)
+        score_total = score_cor * 0.55 + bonus_padrao
+        avaliados.append((score_total, eh_fav, qtd_uso, -idx_orig, cam))
+
+    avaliados.sort(reverse=True)
+    return [item[4] for item in avaliados[: max(1, int(limite))]]
+
+
 def listar_fundos(pasta):
     """Imagens da pasta e das subpastas, em ordem natural."""
     if not pasta or not Path(pasta).is_dir():
@@ -57,21 +195,31 @@ def listar_fundos(pasta):
 
 class Galeria:
     """
-    Grade de miniaturas com rolagem. Só desenha as linhas visíveis; as miniaturas
-    são feitas numa thread (cache de miniaturas do programa) e guardadas prontas.
+    Grade de miniaturas com rolagem. Suporta tanto caminhos de arquivos da Pasta de Fundos
+    (exibindo estrela ★ nos fundos padrão/favoritos) quanto Fundos Gerados na Hora pelo
+    programa (Degradês e Abstratos baseados nas cores das fotos).
     """
 
-    def __init__(self, pai, atual, ao_pressionar, ao_duplo, ao_menu):
+    def __init__(self, pai, atual, ao_pressionar, ao_duplo, ao_menu, altura_canvas=150, texto_vazio=None, eh_favorito=None):
         self.atual = atual
         self.ao_pressionar = ao_pressionar
         self.ao_duplo = ao_duplo
         self.ao_menu = ao_menu
+        self.eh_favorito = eh_favorito
+        self.texto_vazio = texto_vazio or "Escolha uma pasta com imagens de fundo (botão 'Pasta de fundos...')."
         self.caminhos = []
+        self._mapa_gerados = {}
         self.quadro = ttk.Frame(pai)
         barra = ttk.Scrollbar(self.quadro, orient="vertical")
         barra.pack(side="right", fill="y")
-        self.canvas = tk.Canvas(self.quadro, bg=tema.FUNDO, highlightthickness=1, highlightbackground=tema.BORDA,
-                                height=150, yscrollincrement=20)
+        self.canvas = tk.Canvas(
+            self.quadro,
+            bg=tema.FUNDO,
+            highlightthickness=1,
+            highlightbackground=tema.BORDA,
+            height=altura_canvas,
+            yscrollincrement=20,
+        )
         self.canvas.pack(side="left", fill="both", expand=True)
         barra.configure(command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=lambda a, b: (barra.set(a, b), self._agendar()))
@@ -92,19 +240,33 @@ class Galeria:
     def pack(self, **opcoes):
         self.quadro.pack(**opcoes)
 
-    def definir(self, caminhos):
-        self.caminhos = list(caminhos)
+    def definir(self, itens):
+        """Aceita lista de caminhos (str) ou lista de dicts `fundo_imagem` gerados pelo programa."""
+        novos_caminhos = []
+        novo_mapa = {}
+        for item in itens or []:
+            if isinstance(item, dict) and item.get("caminho"):
+                ch = str(item["caminho"])
+                novos_caminhos.append(ch)
+                novo_mapa[ch] = dict(item)
+            elif isinstance(item, str) and item:
+                novos_caminhos.append(item)
+        self.caminhos = novos_caminhos
+        self._mapa_gerados = novo_mapa
         with self._trava:
             self._pendentes.clear()
         self.canvas.yview_moveto(0)
         self.desenhar()
+
+    def dados_gerado_de(self, caminho):
+        return self._mapa_gerados.get(str(caminho or ""))
 
     def medidas(self):
         """(colunas, largura da célula, altura da célula, altura da miniatura)."""
         largura = max(LARGURA_MINIMA_CELULA * 2, self.canvas.winfo_width())
         colunas = max(2, min(4, largura // LARGURA_MINIMA_CELULA))
         cw = largura // colunas
-        th = int(cw * 0.66)
+        th = int(cw * 0.64)
         return colunas, cw, th + 22, th
 
     def _agendar(self):
@@ -119,8 +281,14 @@ class Galeria:
         linhas = (len(self.caminhos) + colunas - 1) // colunas
         c.configure(scrollregion=(0, 0, colunas * cw, max(1, linhas * ch)))
         if not self.caminhos:
-            c.create_text(10, 16, anchor="nw", fill=tema.TEXTO_FRACO, width=max(120, c.winfo_width() - 20),
-                          text="Escolha uma pasta com imagens de fundo (botão 'Pasta de fundos...').")
+            c.create_text(
+                10,
+                12,
+                anchor="nw",
+                fill=tema.TEXTO_FRACO,
+                width=max(120, c.winfo_width() - 20),
+                text=self.texto_vazio,
+            )
             return
         y0 = c.canvasy(0)
         primeira = max(0, int(y0 // ch))
@@ -134,9 +302,19 @@ class Galeria:
                     break
                 caminho = self.caminhos[indice]
                 x, y = coluna * cw, linha * ch
-                if atual and normalizar_caminho(caminho) == atual:
-                    c.create_rectangle(x + 1, y + 1, x + cw - 1, y + ch - 1, fill=tema.DESTAQUE_ESCURO,
-                                       outline=tema.DESTAQUE, width=2, tags="atual")
+                ch_comp = caminho if eh_fundo_gerado(caminho) else normalizar_caminho(caminho)
+                eh_atual = bool(atual and ch_comp == atual)
+                if eh_atual:
+                    c.create_rectangle(
+                        x + 1,
+                        y + 1,
+                        x + cw - 1,
+                        y + ch - 1,
+                        fill=tema.DESTAQUE_ESCURO,
+                        outline=tema.DESTAQUE,
+                        width=2,
+                        tags="atual",
+                    )
                 imagem = self._tk.get((caminho, cw))
                 cx, cy = x + cw // 2, y + 4 + th // 2
                 if imagem is not None:
@@ -146,10 +324,24 @@ class Galeria:
                     c.create_rectangle(x + 6, y + 4, x + cw - 6, y + 4 + th, fill=tema.PAINEL_2, outline=tema.BORDA)
                     c.create_text(cx, cy, text="...", fill=tema.TEXTO_FRACO)
                     self._pedir(caminho, cw - 10, th)
-                nome = Path(caminho).name
-                c.create_text(cx, y + th + 13, text=nome if len(nome) <= letras else nome[:letras - 1] + "…",
-                              fill=tema.TEXTO if atual and normalizar_caminho(caminho) == atual else tema.TEXTO_FRACO,
-                              font=tema.FONTE_PEQUENA)
+
+                # Estrela dourada quando for fundo padrão/favorito da pasta
+                if self.eh_favorito and not eh_fundo_gerado(caminho) and self.eh_favorito(caminho):
+                    c.create_rectangle(x + cw - 20, y + 5, x + cw - 6, y + 18, fill="#18181b", outline="#f59e0b")
+                    c.create_text(x + cw - 13, y + 11, text="★", fill="#fbbf24", font=tema.FONTE_PEQUENA)
+
+                dados_g = self._mapa_gerados.get(caminho)
+                if dados_g:
+                    nome = str(dados_g.get("nome_exibicao") or (dados_g.get("gerado") or {}).get("titulo") or "Gerado")
+                else:
+                    nome = Path(caminho).name
+                c.create_text(
+                    cx,
+                    y + th + 13,
+                    text=nome if len(nome) <= letras else nome[: letras - 1] + "…",
+                    fill=tema.TEXTO if eh_atual else tema.TEXTO_FRACO,
+                    font=tema.FONTE_PEQUENA,
+                )
 
     def indice_em(self, x, y):
         colunas, cw, ch, _th = self.medidas()
@@ -165,23 +357,24 @@ class Galeria:
 
     def _pressionou(self, evento):
         caminho = self.caminho_em(evento.x, evento.y)
-        if caminho:
+        if caminho and self.ao_pressionar:
             self.ao_pressionar(caminho, evento)
 
     def _duplo(self, evento):
         caminho = self.caminho_em(evento.x, evento.y)
-        if caminho:
+        if caminho and self.ao_duplo:
             self.ao_duplo(caminho)
 
     def _menu(self, evento):
         caminho = self.caminho_em(evento.x, evento.y)
-        if caminho:
+        if caminho and self.ao_menu:
             self.ao_menu(caminho, evento)
 
     def _pedir(self, caminho, largura, altura):
+        dados_g = self._mapa_gerados.get(caminho)
         with self._trava:
             self._pendentes.pop(caminho, None)
-            self._pendentes[caminho] = (largura, altura)
+            self._pendentes[caminho] = (largura, altura, dados_g)
             self._trava.notify()
 
     def _trabalhar(self):
@@ -189,10 +382,13 @@ class Galeria:
             with self._trava:
                 while not self._pendentes:
                     self._trava.wait()
-                caminho, (largura, altura) = self._pendentes.popitem(last=True)
+                caminho, (largura, altura, dados_g) = self._pendentes.popitem(last=True)
             try:
-                img = analise.miniatura(caminho).copy()
-                img.thumbnail((largura, altura))
+                if dados_g and dados_g.get("gerado"):
+                    img = renderizar_fundo_gerado(dados_g["gerado"], (max(32, largura), max(24, altura)), rapido=True)
+                else:
+                    img = analise.miniatura(caminho).copy()
+                    img.thumbnail((largura, altura))
             except Exception:
                 continue
             with self._trava:
@@ -507,7 +703,12 @@ class EditorFundo(tk.Toplevel):
             cor_t = cor_hex(ajustes["tingir_cor"])
             self.amostra.configure(bg=cor_t)
             self.rotulo_hex.configure(text=cor_t.upper())
-            if dados and dados.get("caminho"):
+            if dados and eh_fundo_gerado(dados):
+                nome_g = dados.get("nome_exibicao") or (dados.get("gerado") or {}).get("titulo") or "Fundo Gerado pelas Fotos"
+                self.rotulo_arquivo.configure(
+                    text="Fundo gerado: %s  (ajustes exclusivos deste fundo)" % nome_g
+                )
+            elif dados and dados.get("caminho"):
                 self.rotulo_arquivo.configure(
                     text="Arquivo: %s  (edições salvas somente neste fundo)" % Path(dados["caminho"]).name
                 )
