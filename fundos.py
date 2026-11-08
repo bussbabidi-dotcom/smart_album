@@ -259,7 +259,19 @@ class Galeria:
         self.desenhar()
 
     def dados_gerado_de(self, caminho):
-        return self._mapa_gerados.get(str(caminho or ""))
+        if not caminho:
+            return None
+        s = str(caminho)
+        if s in self._mapa_gerados:
+            return self._mapa_gerados[s]
+        ch_n = normalizar_caminho(s)
+        for k, v in self._mapa_gerados.items():
+            if normalizar_caminho(k) == ch_n:
+                return v
+        return None
+
+    def obter_dados_gerado(self, caminho):
+        return self.dados_gerado_de(caminho)
 
     def medidas(self):
         """(colunas, largura da célula, altura da célula, altura da miniatura)."""
@@ -302,8 +314,9 @@ class Galeria:
                     break
                 caminho = self.caminhos[indice]
                 x, y = coluna * cw, linha * ch
-                ch_comp = caminho if eh_fundo_gerado(caminho) else normalizar_caminho(caminho)
-                eh_atual = bool(atual and ch_comp == atual)
+                ch_comp = caminho if str(caminho).startswith("__gerado__:") else normalizar_caminho(caminho)
+                atual_comp = atual if (not atual or str(atual).startswith("__gerado__:")) else normalizar_caminho(atual)
+                eh_atual = bool(atual_comp and ch_comp == atual_comp)
                 if eh_atual:
                     c.create_rectangle(
                         x + 1,
@@ -332,6 +345,14 @@ class Galeria:
 
                 dados_g = self._mapa_gerados.get(caminho)
                 if dados_g:
+                    padrao_c = str(dados_g.get("padrao_cor") or (dados_g.get("gerado") or {}).get("padrao_cor") or "").lower()
+                    if padrao_c in ("preto", "branco"):
+                        bg_tag = "#111318" if padrao_c == "preto" else "#f4f3ef"
+                        fg_tag = "#e4e4e7" if padrao_c == "preto" else "#18181b"
+                        bd_tag = "#52525b" if padrao_c == "preto" else "#a1a1aa"
+                        txt_tag = "PRETO" if padrao_c == "preto" else "BRANCO"
+                        c.create_rectangle(x + 7, y + 5, x + 48, y + 18, fill=bg_tag, outline=bd_tag)
+                        c.create_text(x + 27, y + 11, text=txt_tag, fill=fg_tag, font=("Segoe UI", 7, "bold"))
                     nome = str(dados_g.get("nome_exibicao") or (dados_g.get("gerado") or {}).get("titulo") or "Gerado")
                 else:
                     nome = Path(caminho).name
@@ -705,8 +726,9 @@ class EditorFundo(tk.Toplevel):
             self.rotulo_hex.configure(text=cor_t.upper())
             if dados and eh_fundo_gerado(dados):
                 nome_g = dados.get("nome_exibicao") or (dados.get("gerado") or {}).get("titulo") or "Fundo Gerado pelas Fotos"
+                arq_temp = Path(str(dados.get("caminho") or "")).name if dados.get("caminho") else "temp.png"
                 self.rotulo_arquivo.configure(
-                    text="Fundo gerado: %s  (ajustes exclusivos deste fundo)" % nome_g
+                    text="Fundo temporário: %s (%s · livre para alterar)" % (nome_g, arq_temp)
                 )
             elif dados and dados.get("caminho"):
                 self.rotulo_arquivo.configure(

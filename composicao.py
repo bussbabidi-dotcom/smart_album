@@ -6,8 +6,9 @@ from collections import OrderedDict
 import math
 import threading
 
+from pathlib import Path
 import analise
-from comum import cor_rgb, normalizar_caminho
+from comum import cor_rgb, normalizar_caminho, pasta_fundos_temporarios
 from produtos import caixa_px
 from recorte import foto_no_espaco
 
@@ -142,9 +143,24 @@ def eh_fundo_gerado(dados_ou_caminho):
         if isinstance(dados_ou_caminho.get("gerado"), dict) and dados_ou_caminho["gerado"]:
             return True
         cam = str(dados_ou_caminho.get("caminho") or "")
-        return cam.startswith("__gerado__:")
+        if cam.startswith("__gerado__:"):
+            return True
+        try:
+            p = Path(cam)
+            if p.name.startswith("di_fundo_") and normalizar_caminho(p.parent) == normalizar_caminho(pasta_fundos_temporarios()):
+                return True
+        except Exception:
+            pass
+        return False
     if isinstance(dados_ou_caminho, str):
-        return dados_ou_caminho.startswith("__gerado__:")
+        if dados_ou_caminho.startswith("__gerado__:"):
+            return True
+        try:
+            p = Path(dados_ou_caminho)
+            if p.name.startswith("di_fundo_") and normalizar_caminho(p.parent) == normalizar_caminho(pasta_fundos_temporarios()):
+                return True
+        except Exception:
+            pass
     return False
 
 
@@ -174,15 +190,33 @@ def _rgb_para_hsv_deg(rgb):
     return h * 360.0, s, v
 
 
+def _misturar_rgb_hex(rgb_base, rgb_cor, fator_cor):
+    """Mistura `rgb_base` (Preto ou Branco) com `rgb_cor` (cor extraída da foto) na proporção `fator_cor` (ex.: 0.15 a 0.25)."""
+    f = max(0.0, min(1.0, float(fator_cor)))
+    r = int(round(rgb_base[0] * (1.0 - f) + rgb_cor[0] * f))
+    g = int(round(rgb_base[1] * (1.0 - f) + rgb_cor[1] * f))
+    b = int(round(rgb_base[2] * (1.0 - f) + rgb_cor[2] * f))
+    return _rgb_para_hex((r, g, b))
+
+
 def extrair_paleta_fotos(caminhos_fotos, info=None):
     """
-    Analisa as fotos informadas (de uma página específica ou da lâmina inteira) e extrai
-    tons suaves e elegantes para fundos degradês/abstratos, além da cor ideal de moldura.
+    Analisa as fotos informadas (de uma página específica ou da lâmina inteira), detecta se há
+    predominância de tonalidades escuras/pretas ou claras/brancas e extrai as cores reais das fotos
+    ancoradas nos DOIS PADRÕES SÓBRIOS (com toque sutil e elegante de 15% a 25% das cores das fotos):
+      1. Padrão Preto + Cores da Foto (`tons_preto_cores`)
+      2. Padrão Branco + Cores da Foto (`tons_branco_cores`)
     Devolve dict com:
-      - 'tons_suaves': [hex1, hex2, hex3, hex4]
-      - 'tons_medios': [hex1, hex2, hex3]
-      - 'tons_escuros': [hex1, hex2]
-      - 'cor_base': hex
+      - 'padrao_sugerido': 'preto' | 'branco'
+      - 'proporcao_preto': float (0..1)
+      - 'proporcao_branco': float (0..1)
+      - 'tons_preto_cores': [hex0, hex1, hex2, hex3] (Preto + 8% a 25% das cores das fotos)
+      - 'tons_branco_cores': [hex0, hex1, hex2, hex3] (Branco + 8% a 25% das cores das fotos)
+      - 'cores_destaque_fotos': [hex_f1, hex_f2, hex_f3]
+      - 'tons_suaves': alias p/ tons_branco_cores
+      - 'tons_medios': cores de destaque suavizadas
+      - 'tons_escuros': alias p/ tons_preto_cores
+      - 'cor_base': hex base do padrão sugerido
       - 'cor_moldura_clara': hex
       - 'cor_moldura_escura': hex
       - 'matizes': [h1, h2, h3]
@@ -195,25 +229,30 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
     matizes_pesos = [0.0] * 18  # bins de 20 graus (0..360)
     somas_lum = []
     somas_sat = []
+    somas_preto = []
+    somas_branco = []
 
     for cam in lista[:10]:
         ch_norm = normalizar_caminho(cam)
         with _TRAVA_COMP_CACHE:
             cached = _CACHE_PALETA_FOTO.get(ch_norm)
-        if cached is not None:
-            h_bins, lum_m, sat_m = cached
+        if cached is not None and len(cached) == 5:
+            h_bins, lum_m, sat_m, p_preto, p_branco = cached
             for idx_b, val_b in enumerate(h_bins):
                 matizes_pesos[idx_b] += val_b
             somas_lum.append(lum_m)
             somas_sat.append(sat_m)
+            somas_preto.append(p_preto)
+            somas_branco.append(p_branco)
             continue
 
         try:
             mini = analise.miniatura(cam, 96).convert("RGB").resize((48, 48), Image.BILINEAR)
             arr = np.asarray(mini, dtype=np.float32) / 255.0
-            # Prioriza o anel externo (fundo/ambiente da foto) com peso 1.8x e o centro com 0.7x
+            # Prioriza o anel externo (fundo/ambiente/roupas da foto) com peso 1.8x e o centro com 0.7x
             pesos_esp = np.ones((48, 48), dtype=np.float32) * 1.8
             pesos_esp[12:36, 12:36] = 0.7
+            soma_pesos_esp = float(np.sum(pesos_esp))
 
             r = arr[:, :, 0]
             g = arr[:, :, 1]
@@ -222,27 +261,34 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
             cmin = np.minimum(np.minimum(r, g), b)
             delta = cmax - cmin
 
-            lum_m = float(np.mean(0.299 * r + 0.587 * g + 0.114 * b))
+            lum_map = 0.299 * r + 0.587 * g + 0.114 * b
+            lum_m = float(np.mean(lum_map))
             sat_map = np.where(cmax > 1e-4, delta / np.maximum(1e-4, cmax), 0.0)
             sat_m = float(np.mean(sat_map))
+
+            # Detecta presença de tons pretos/escuros vs brancos/claros ponderada pelo ambiente da foto
+            mascara_preto = ((cmax < 0.28) | ((lum_map < 0.34) & (sat_map < 0.32))).astype(np.float32)
+            mascara_branco = ((lum_map > 0.78) | ((cmax > 0.74) & (sat_map < 0.24))).astype(np.float32)
+            p_preto = float(np.sum(mascara_preto * pesos_esp)) / max(1.0, soma_pesos_esp)
+            p_branco = float(np.sum(mascara_branco * pesos_esp)) / max(1.0, soma_pesos_esp)
 
             h_bins = [0.0] * 18
             for y in range(0, 48, 2):
                 for x in range(0, 48, 2):
                     rv, gv, bv = float(r[y, x]), float(g[y, x]), float(b[y, x])
                     hv, sv, vv = colorsys.rgb_to_hsv(rv, gv, bv)
-                    if vv < 0.08 or vv > 0.96 or sv < 0.06:
+                    if vv < 0.07 or vv > 0.97 or sv < 0.05:
                         continue
                     ang = (hv * 360.0) % 360.0
-                    peso = float(pesos_esp[y, x]) * (0.4 + sv * 0.6)
-                    # Suaviza peso de tons de pele muito saturados no centro para preferir cenário/roupa
+                    peso = float(pesos_esp[y, x]) * (0.35 + sv * 0.65)
+                    # Suaviza peso de tons de pele no centro para capturar melhor roupas, luzes e cenário
                     if 12.0 <= ang <= 36.0 and pesos_esp[y, x] < 1.0 and 0.22 <= sv <= 0.65:
                         peso *= 0.45
                     idx_b = int(ang // 20.0) % 18
                     h_bins[idx_b] += peso
 
             with _TRAVA_COMP_CACHE:
-                _CACHE_PALETA_FOTO[ch_norm] = (h_bins, lum_m, sat_m)
+                _CACHE_PALETA_FOTO[ch_norm] = (h_bins, lum_m, sat_m, p_preto, p_branco)
                 while len(_CACHE_PALETA_FOTO) > 400:
                     _CACHE_PALETA_FOTO.popitem(last=False)
 
@@ -250,8 +296,9 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
                 matizes_pesos[idx_b] += val_b
             somas_lum.append(lum_m)
             somas_sat.append(sat_m)
+            somas_preto.append(p_preto)
+            somas_branco.append(p_branco)
         except Exception:
-            # Fallback para assinatura de cenário no dict info se o arquivo for virtual/teste
             dados_f = (info or {}).get(ch_norm) if isinstance(info, dict) else None
             cen = (dados_f or {}).get("cenario") if isinstance(dados_f, dict) else None
             if isinstance(cen, (list, tuple)) and len(cen) >= 8:
@@ -259,53 +306,90 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
                     idx_b = int((i_c * 45.0) // 20.0) % 18
                     matizes_pesos[idx_b] += float(cen[i_c]) * 10.0
 
-    # Escolhe os 3 matizes mais fortes com separação mínima de 35 graus para riqueza cromática
+    # Escolhe os 3 matizes mais presentes nas fotos com separação mínima de 30 graus
     ordenados = sorted(range(18), key=lambda i: matizes_pesos[i], reverse=True)
     escolhidos = []
     for idx_b in ordenados:
         if matizes_pesos[idx_b] <= 1e-5 and escolhidos:
             break
         ang = idx_b * 20.0 + 10.0
-        if all(min(abs(ang - a), 360.0 - abs(ang - a)) >= 35.0 for a in escolhidos):
+        if all(min(abs(ang - a), 360.0 - abs(ang - a)) >= 30.0 for a in escolhidos):
             escolhidos.append(ang)
         if len(escolhidos) >= 3:
             break
 
     if not escolhidos:
-        escolhidos = [32.0, 210.0, 155.0]  # Marfim dourado, azul sereno e sálvia suave
+        escolhidos = [32.0, 210.0, 155.0]
     while len(escolhidos) < 3:
-        novo_ang = (escolhidos[-1] + (42.0 if len(escolhidos) == 1 else 135.0)) % 360.0
+        novo_ang = (escolhidos[-1] + (38.0 if len(escolhidos) == 1 else 120.0)) % 360.0
         escolhidos.append(novo_ang)
 
-    lum_media = sum(somas_lum) / float(len(somas_lum)) if somas_lum else 0.54
+    lum_media = sum(somas_lum) / float(len(somas_lum)) if somas_lum else 0.46
     sat_media = sum(somas_sat) / float(len(somas_sat)) if somas_sat else 0.28
-    s_suave = max(0.12, min(0.28, sat_media * 0.62 + 0.08))
-    s_medio = max(0.18, min(0.38, sat_media * 0.78 + 0.12))
+    prop_preto = sum(somas_preto) / float(len(somas_preto)) if somas_preto else 0.32
+    prop_branco = sum(somas_branco) / float(len(somas_branco)) if somas_branco else 0.24
+
+    # Define se as fotos puxam mais para o padrão Preto + Cores ou Branco + Cores
+    if prop_preto >= prop_branco * 0.92 or lum_media < 0.50:
+        padrao_sugerido = "preto"
+    else:
+        padrao_sugerido = "branco"
 
     h1, h2, h3 = escolhidos[0], escolhidos[1], escolhidos[2]
-    tons_suaves = [
-        _rgb_para_hex(_hsv_para_rgb_tupla(h1, s_suave * 0.78, 0.94)),
-        _rgb_para_hex(_hsv_para_rgb_tupla(h2, s_suave * 0.92, 0.88)),
-        _rgb_para_hex(_hsv_para_rgb_tupla(h3, s_suave * 0.85, 0.91)),
-        _rgb_para_hex(_hsv_para_rgb_tupla((h1 + 18.0) % 360.0, s_suave * 1.05, 0.83)),
+    # Cores vivas extraídas das fotos que servirão apenas como toque de 15% a 25% sobre o Preto ou Branco
+    sat_ref = max(0.38, min(0.72, sat_media * 1.35 + 0.22))
+    rgb_foto_1 = _hsv_para_rgb_tupla(h1, sat_ref, 0.78)
+    rgb_foto_2 = _hsv_para_rgb_tupla(h2, sat_ref * 0.92, 0.74)
+    rgb_foto_3 = _hsv_para_rgb_tupla(h3, sat_ref * 0.88, 0.76)
+
+    cores_destaque_fotos = [
+        _rgb_para_hex(rgb_foto_1),
+        _rgb_para_hex(rgb_foto_2),
+        _rgb_para_hex(rgb_foto_3),
     ]
+
+    # PADRÃO 1: Base Preta (#0b0c0f .. #14161b) + 15% a 25% das cores das fotos
+    base_preta_0 = (11, 12, 15)
+    base_preta_1 = (15, 16, 20)
+    base_preta_2 = (18, 20, 25)
+    tons_preto_cores = [
+        _misturar_rgb_hex(base_preta_0, rgb_foto_1, 0.08),  # Preto profundo ancorado (8%)
+        _misturar_rgb_hex(base_preta_1, rgb_foto_1, 0.17),  # Preto + 17% Cor 1 da foto
+        _misturar_rgb_hex(base_preta_2, rgb_foto_2, 0.21),  # Preto + 21% Cor 2 da foto
+        _misturar_rgb_hex(base_preta_2, rgb_foto_3, 0.24),  # Preto + 24% Cor 3 da foto
+    ]
+
+    # PADRÃO 2: Base Branca (#fcfbf9 .. #f2f0ec) + 15% a 25% das cores das fotos
+    base_branca_0 = (252, 251, 249)
+    base_branca_1 = (248, 247, 244)
+    base_branca_2 = (244, 242, 238)
+    tons_branco_cores = [
+        _misturar_rgb_hex(base_branca_0, rgb_foto_1, 0.08),  # Branco editorial ancorado (8%)
+        _misturar_rgb_hex(base_branca_1, rgb_foto_1, 0.16),  # Branco + 16% Cor 1 da foto
+        _misturar_rgb_hex(base_branca_2, rgb_foto_2, 0.20),  # Branco + 20% Cor 2 da foto
+        _misturar_rgb_hex(base_branca_2, rgb_foto_3, 0.23),  # Branco + 23% Cor 3 da foto
+    ]
+
     tons_medios = [
-        _rgb_para_hex(_hsv_para_rgb_tupla(h1, s_medio, 0.78)),
-        _rgb_para_hex(_hsv_para_rgb_tupla(h2, s_medio * 0.95, 0.68)),
-        _rgb_para_hex(_hsv_para_rgb_tupla(h3, s_medio * 0.90, 0.73)),
+        _misturar_rgb_hex((128, 128, 128), rgb_foto_1, 0.45),
+        _misturar_rgb_hex((128, 128, 128), rgb_foto_2, 0.42),
+        _misturar_rgb_hex((128, 128, 128), rgb_foto_3, 0.40),
     ]
-    tons_escuros = [
-        _rgb_para_hex(_hsv_para_rgb_tupla(h1, min(0.42, s_medio * 1.1), 0.26)),
-        _rgb_para_hex(_hsv_para_rgb_tupla(h2, min(0.38, s_medio), 0.18)),
-    ]
-    cor_moldura_clara = _rgb_para_hex(_hsv_para_rgb_tupla(h1, 0.05, 0.98))
-    cor_moldura_escura = _rgb_para_hex(_hsv_para_rgb_tupla(h1, 0.22, 0.34))
+    cor_moldura_clara = _misturar_rgb_hex((252, 251, 249), rgb_foto_1, 0.08)
+    cor_moldura_escura = _misturar_rgb_hex((24, 25, 30), rgb_foto_1, 0.18)
+    cor_base = tons_preto_cores[0] if padrao_sugerido == "preto" else tons_branco_cores[0]
 
     return {
-        "tons_suaves": tons_suaves,
+        "padrao_sugerido": padrao_sugerido,
+        "proporcao_preto": round(prop_preto, 3),
+        "proporcao_branco": round(prop_branco, 3),
+        "tons_preto_cores": tons_preto_cores,
+        "tons_branco_cores": tons_branco_cores,
+        "cores_destaque_fotos": cores_destaque_fotos,
+        "tons_suaves": tons_branco_cores,
         "tons_medios": tons_medios,
-        "tons_escuros": tons_escuros,
-        "cor_base": tons_suaves[0],
+        "tons_escuros": tons_preto_cores,
+        "cor_base": cor_base,
         "cor_moldura_clara": cor_moldura_clara,
         "cor_moldura_escura": cor_moldura_escura,
         "matizes": [round(h1, 1), round(h2, 1), round(h3, 1)],
@@ -313,29 +397,91 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
     }
 
 
-def criar_dados_fundo_gerado(espec):
-    """Cria um dicionário `fundo_imagem` válido a partir de uma especificação procedural (`espec`)."""
+def materializar_fundo_gerado_em_arquivo(espec, tamanho=(1440, 810), caminho_destino=None):
+    """
+    Salva um fundo gerado pelo programa como arquivo `.png` real dentro da pasta temporária
+    (`pasta_fundos_temporarios()`), permitindo que ele seja livremente alterado, ajustado,
+    colorido, rotacionado ou editado externamente como qualquer fundo de imagem.
+    """
     import hashlib
     import json
 
     esp = dict(espec or {})
     assinatura = hashlib.sha1(json.dumps(esp, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    caminho_virtual = "__gerado__:%s_%s_%s" % (
-        esp.get("tipo", "degrade"),
-        esp.get("subtipo", "suave"),
-        assinatura,
-    )
-    dados = fundo_imagem_padrao(caminho_virtual)
+    padrao_c = str(esp.get("padrao_cor") or ("preto" if "noturn" in str(esp.get("subtipo", "")) else "branco")).lower()
+    tipo_c = str(esp.get("tipo") or "degrade").lower()
+    sub_c = str(esp.get("subtipo") or "suave").lower()
+    nome_arq = "di_fundo_%s_%s_%s_%s.png" % (padrao_c, tipo_c, sub_c, assinatura)
+
+    if caminho_destino and not str(caminho_destino).startswith("__gerado__:"):
+        destino = Path(caminho_destino)
+    else:
+        destino = pasta_fundos_temporarios() / nome_arq
+
+    try:
+        if destino.is_file() and destino.stat().st_size > 128:
+            return str(destino)
+    except OSError:
+        pass
+
+    try:
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        img = renderizar_fundo_gerado(esp, tamanho, rapido=False)
+        tmp = destino.with_name("%s.%s.tmp" % (destino.name, threading.get_ident()))
+        try:
+            img.save(str(tmp), format="PNG", compress_level=3)
+            import os
+            os.replace(str(tmp), str(destino))
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return str(destino)
+
+
+def criar_dados_fundo_gerado(espec, materializar=True):
+    """
+    Cria um dicionário `fundo_imagem` válido a partir de uma especificação procedural (`espec`)
+    e salva imediatamente o arquivo `.png` correspondente na pasta temporária para que
+    possa ser alterado sem restrições.
+    """
+    import hashlib
+    import json
+
+    esp = dict(espec or {})
+    if materializar:
+        caminho_real = materializar_fundo_gerado_em_arquivo(esp)
+    else:
+        assinatura = hashlib.sha1(json.dumps(esp, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        caminho_real = str(
+            pasta_fundos_temporarios()
+            / (
+                "di_fundo_%s_%s_%s_%s.png"
+                % (
+                    esp.get("padrao_cor", "preto"),
+                    esp.get("tipo", "degrade"),
+                    esp.get("subtipo", "suave"),
+                    assinatura,
+                )
+            )
+        )
+    dados = fundo_imagem_padrao(caminho_real)
     dados["gerado"] = esp
+    dados["padrao_cor"] = esp.get("padrao_cor", "preto")
     dados["nome_exibicao"] = esp.get("titulo") or "Fundo Gerado pelas Fotos"
     return dados
 
 
-def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8):
+def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8, padrao_filtro="ambos"):
     """
-    Gera na hora uma galeria com `quantidade` variações de fundos baseados na paleta das fotos,
-    combinando Degradês Suaves e Fundos Abstratos com aleatoriedade controlada (`seed_base`).
-    A aleatoriedade afeta exclusivamente estes fundos gerados pelo programa.
+    Gera uma galeria de fundos ancorados nos DOIS PADRÕES SÓBRIOS:
+      - Padrão Preto + Cores da Foto (15% a 25% de presença das cores das fotos sobre base preta)
+      - Padrão Branco + Cores da Foto (15% a 25% de presença das cores das fotos sobre base branca)
+    Salva cada fundo gerado na pasta temporária (`pasta_fundos_temporarios()`) para edição livre.
     """
     import random
     import time
@@ -345,51 +491,109 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
         seed_base = int((time.time() * 1000) % 999983)
     rng = random.Random(int(seed_base))
 
-    suaves = list(pal.get("tons_suaves") or ["#f4efeA", "#e6dfd5", "#dde5e9", "#eadce2"])
-    medios = list(pal.get("tons_medios") or ["#cbb8a0", "#a7b8c4", "#bfa5b2"])
-    escuros = list(pal.get("tons_escuros") or ["#2d3138", "#1e2229"])
+    pretos = list(pal.get("tons_preto_cores") or pal.get("tons_escuros") or ["#0c0d11", "#181520", "#151e24", "#211916"])
+    while len(pretos) < 4:
+        pretos.append(pretos[-1])
+    brancos = list(pal.get("tons_branco_cores") or pal.get("tons_suaves") or ["#faf9f6", "#f0eae3", "#e8eef2", "#efe7eb"])
+    while len(brancos) < 4:
+        brancos.append(brancos[-1])
+
+    destaques = list(pal.get("cores_destaque_fotos") or pal.get("tons_medios") or ["#c08a4a", "#5c8096", "#8c6d79"])
+    while len(destaques) < 3:
+        destaques.append(destaques[-1])
+
     h_base = (pal.get("matizes") or [32.0, 205.0, 150.0])[0]
+    padrao_sugerido = str(pal.get("padrao_sugerido") or "preto").lower()
 
-    def _variar_cor(hex_cor, dh_max=16.0, ds_max=0.07, dv_max=0.06):
-        h, s, v = _rgb_para_hsv_deg(cor_rgb(hex_cor))
-        nh = (h + rng.uniform(-dh_max, dh_max)) % 360.0
-        ns = max(0.06, min(0.45, s + rng.uniform(-ds_max, ds_max)))
-        nv = max(0.14, min(0.97, v + rng.uniform(-dv_max, dv_max)))
-        return _rgb_para_hex(_hsv_para_rgb_tupla(nh, ns, nv))
+    def _variar_cor_ancorada(hex_cor_destaque, padrao_alvo, fator_min=0.15, fator_max=0.25):
+        """Varia levemente o matiz da cor da foto e mistura de 15% a 25% na base Preta ou Branca."""
+        h, s, v = _rgb_para_hsv_deg(cor_rgb(hex_cor_destaque))
+        nh = (h + rng.uniform(-12.0, 12.0)) % 360.0
+        ns = max(0.32, min(0.75, s + rng.uniform(-0.06, 0.06)))
+        nv = max(0.65, min(0.88, v + rng.uniform(-0.05, 0.05)))
+        rgb_cor = _hsv_para_rgb_tupla(nh, ns, nv)
+        fator = rng.uniform(fator_min, fator_max)
+        if padrao_alvo == "preto":
+            base_rgb = (rng.randint(10, 16), rng.randint(11, 17), rng.randint(14, 21))
+        else:
+            base_rgb = (rng.randint(245, 253), rng.randint(244, 252), rng.randint(240, 250))
+        return _misturar_rgb_hex(base_rgb, rgb_cor, fator)
 
-    templates_degrade = [
-        ("degrade", "linear_diagonal", "Degradê Seda Diagonal", [suaves[0], suaves[1], medios[0]]),
-        ("degrade", "radial_suave", "Degradê Luz Central", [suaves[0], suaves[2 % len(suaves)], medios[1 % len(medios)]]),
-        ("degrade", "tres_tons_suave", "Degradê Três Tons", [suaves[1 % len(suaves)], suaves[0], suaves[3 % len(suaves)]]),
-        ("degrade", "linear_horizontal", "Degradê Editorial Suave", [suaves[2 % len(suaves)], suaves[0], medios[2 % len(medios)]]),
-        ("degrade", "noturno_elegante", "Degradê Sóbrio Elegante", [escuros[0], escuros[1 % len(escuros)], medios[0]]),
+    # Templates Padrão Preto + Cores das Fotos (15% a 25%)
+    templates_preto_degrade = [
+        ("preto", "degrade", "linear_diagonal", "Preto + Cores · Seda Diagonal", [pretos[0], pretos[1], pretos[2]]),
+        ("preto", "degrade", "radial_suave", "Preto + Cores · Luz Sutil", [pretos[1], pretos[0], pretos[3]]),
+        ("preto", "degrade", "tres_tons_suave", "Preto + Cores · Três Tons", [pretos[0], pretos[2], pretos[1]]),
+        ("preto", "degrade", "linear_horizontal", "Preto + Cores · Editorial", [pretos[0], pretos[3], pretos[1]]),
     ]
-    templates_abstrato = [
-        ("abstrato", "ondas_sedosas", "Abstrato Ondas de Seda", [suaves[0], suaves[1], medios[0], medios[1 % len(medios)]]),
-        ("abstrato", "bokeh_luz", "Abstrato Bokeh de Luz", [suaves[1 % len(suaves)], suaves[2 % len(suaves)], medios[0], "#ffffff"]),
-        ("abstrato", "aquarela_nuvens", "Abstrato Aquarela Suave", [suaves[0], suaves[3 % len(suaves)], medios[1 % len(medios)], suaves[2 % len(suaves)]]),
-        ("abstrato", "prisma_geometrico", "Abstrato Feixes de Luz", [suaves[2 % len(suaves)], suaves[0], medios[2 % len(medios)], "#ffffff"]),
-        ("abstrato", "ondas_noturnas", "Abstrato Sóbrio Iluminado", [escuros[0], escuros[1 % len(escuros)], medios[0], suaves[0]]),
+    templates_preto_abstrato = [
+        ("preto", "abstrato", "ondas_noturnas", "Preto + Cores · Ondas Sóbrias", [pretos[0], pretos[1], pretos[2], pretos[3]]),
+        ("preto", "abstrato", "bokeh_luz", "Preto + Cores · Bokeh Escuro", [pretos[0], pretos[2], pretos[1], pretos[3]]),
+        ("preto", "abstrato", "aquarela_nuvens", "Preto + Cores · Nuvens Noturnas", [pretos[0], pretos[1], pretos[3], pretos[2]]),
+        ("preto", "abstrato", "prisma_geometrico", "Preto + Cores · Feixes Sóbrios", [pretos[0], pretos[2], pretos[3], pretos[1]]),
+    ]
+
+    # Templates Padrão Branco + Cores das Fotos (15% a 25%)
+    templates_branco_degrade = [
+        ("branco", "degrade", "linear_diagonal", "Branco + Cores · Seda Diagonal", [brancos[0], brancos[1], brancos[2]]),
+        ("branco", "degrade", "radial_suave", "Branco + Cores · Luz Central", [brancos[0], brancos[2], brancos[3]]),
+        ("branco", "degrade", "tres_tons_suave", "Branco + Cores · Três Tons", [brancos[1], brancos[0], brancos[2]]),
+        ("branco", "degrade", "linear_horizontal", "Branco + Cores · Editorial", [brancos[0], brancos[3], brancos[1]]),
+    ]
+    templates_branco_abstrato = [
+        ("branco", "abstrato", "ondas_sedosas", "Branco + Cores · Ondas de Seda", [brancos[0], brancos[1], brancos[2], brancos[3]]),
+        ("branco", "abstrato", "bokeh_luz", "Branco + Cores · Bokeh Suave", [brancos[0], brancos[2], brancos[1], "#ffffff"]),
+        ("branco", "abstrato", "aquarela_nuvens", "Branco + Cores · Aquarela Clara", [brancos[0], brancos[1], brancos[3], brancos[2]]),
+        ("branco", "abstrato", "prisma_geometrico", "Branco + Cores · Feixes Claros", [brancos[0], brancos[2], brancos[3], "#ffffff"]),
     ]
 
     est = str(estilo or "degrade_e_abstrato").lower()
-    sequencia = []
     if est == "degrade":
-        sequencia = templates_degrade * 2
+        lista_preto = templates_preto_degrade
+        lista_branco = templates_branco_degrade
     elif est == "abstrato":
-        sequencia = templates_abstrato * 2
+        lista_preto = templates_preto_abstrato
+        lista_branco = templates_branco_abstrato
     else:
-        for d_item, a_item in zip(templates_degrade, templates_abstrato):
-            sequencia.append(d_item)
-            sequencia.append(a_item)
+        lista_preto = []
+        lista_branco = []
+        for dp, ap in zip(templates_preto_degrade, templates_preto_abstrato):
+            lista_preto.extend([dp, ap])
+        for db, ab in zip(templates_branco_degrade, templates_branco_abstrato):
+            lista_branco.extend([db, ab])
+
+    filtro_p = str(padrao_filtro or "ambos").lower()
+    sequencia = []
+    if filtro_p == "preto":
+        sequencia = lista_preto * 2
+    elif filtro_p == "branco":
+        sequencia = lista_branco * 2
+    else:
+        # Coloca o padrão detectado pelas fotos na frente e intercala Preto+Cores e Branco+Cores na galeria
+        primaria = lista_preto if padrao_sugerido == "preto" else lista_branco
+        secundaria = lista_branco if padrao_sugerido == "preto" else lista_preto
+        for item_p, item_s in zip(primaria, secundaria):
+            sequencia.append(item_p)
+            sequencia.append(item_s)
 
     galeria = []
     for idx in range(quantidade):
-        tipo, subtipo, titulo_base, cores_base = sequencia[idx % len(sequencia)]
+        padrao_cor, tipo, subtipo, titulo_base, cores_base = sequencia[idx % len(sequencia)]
         seed_item = rng.randint(1000, 999999)
-        cores_var = [_variar_cor(c) if idx >= 2 or rng.random() > 0.25 else c for c in cores_base]
+        if idx < 2:
+            cores_var = list(cores_base)
+        else:
+            # Mantém a primeira cor como âncora pura (8%) e varia sutilmente as cores da foto entre 15% e 25%
+            ancora = pretos[0] if padrao_cor == "preto" else brancos[0]
+            cores_var = [
+                ancora,
+                _variar_cor_ancorada(destaques[0], padrao_cor, 0.15, 0.21),
+                _variar_cor_ancorada(destaques[1], padrao_cor, 0.18, 0.24),
+                _variar_cor_ancorada(destaques[2], padrao_cor, 0.16, 0.25),
+            ][: len(cores_base)]
         angulo = rng.choice([25, 45, 65, 115, 135, 155, 0, 90])
         espec = {
+            "padrao_cor": padrao_cor,
             "tipo": tipo,
             "subtipo": subtipo,
             "titulo": "%s #%d" % (titulo_base, idx + 1),
@@ -398,14 +602,16 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
             "matiz_base": round(h_base, 1),
             "seed": seed_item,
         }
-        galeria.append(criar_dados_fundo_gerado(espec))
+        galeria.append(criar_dados_fundo_gerado(espec, materializar=True))
     return galeria
 
 
 def renderizar_fundo_gerado(espec, tamanho, rapido=False):
     """
-    Sintetiza em alta qualidade uma imagem RGB/RGBA de tamanho (W, H) para um fundo
-    gerado pelo programa (Degradê ou Abstrato) usando as cores extraídas das fotos.
+    Sintetiza em alta qualidade uma imagem RGB de tamanho (W, H) para um fundo
+    gerado pelo programa (Degradê ou Abstrato) respeitando rigorosamente os dois padrões:
+      - 'preto': Base preta/grafite com 15% a 25% das cores das fotos (sem embranquecer!)
+      - 'branco': Base branca/off-white com 15% a 25% das cores das fotos (sem escurecer!)
     """
     import json
     import random
@@ -420,7 +626,6 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
             _CACHE_FUNDO_GERADO.move_to_end(chave_cache)
             return guardado.copy()
 
-    # Sintetiza numa malha intermediária otimizada e interpola com LANCZOS/BILINEAR para 60fps e zero serrilhado
     escala_malha = 220 if rapido else min(520, max(260, max(W, H) // 3))
     aspecto = W / float(max(1, H))
     if aspecto >= 1.0:
@@ -430,13 +635,15 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
         gh = min(H, escala_malha)
         gw = max(16, int(round(gh * aspecto)))
 
-    cores_hex = esp.get("cores") or ["#f4efea", "#e4dcd3", "#cbd5dc"]
+    subtipo = str(esp.get("subtipo") or "linear_diagonal").lower()
+    padrao_cor = str(esp.get("padrao_cor") or ("preto" if "noturn" in subtipo else "branco")).lower()
+    cores_padrao = ["#0c0d11", "#191622", "#162026"] if padrao_cor == "preto" else ["#faf9f6", "#f0eae3", "#e8eef2"]
+    cores_hex = esp.get("cores") or cores_padrao
     cores = [np.array(cor_rgb(c), dtype=np.float32) for c in cores_hex]
     while len(cores) < 3:
         cores.append(cores[-1].copy())
 
     tipo = str(esp.get("tipo") or "degrade").lower()
-    subtipo = str(esp.get("subtipo") or "linear_diagonal").lower()
     seed = int(esp.get("seed") or 42)
     angulo_rad = math.radians(float(esp.get("angulo") or 45.0))
     rng = random.Random(seed)
@@ -462,7 +669,6 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
         p_min, p_max = float(np.min(proj)), float(np.max(proj))
         t = (proj - p_min) / max(1e-5, p_max - p_min)
 
-    # Curva S suave (smoothstep) com 3 paradas cromáticas
     t_suave = t * t * (3.0 - 2.0 * t)
     m1 = np.clip(t_suave * 2.0, 0.0, 1.0)[..., None]
     m2 = np.clip((t_suave - 0.5) * 2.0, 0.0, 1.0)[..., None]
@@ -470,37 +676,40 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
     canvas = canvas * (1.0 - m2) + cores[2] * m2
 
     if tipo == "abstrato":
-        c_extra = cores[3] if len(cores) > 3 else np.clip(cores[0] * 1.08, 0, 255)
+        c_extra = cores[3] if len(cores) > 3 else cores[1]
         if "ondas" in subtipo:
-            # Ondas sedosas orgânicas suaves
             for idx_w in range(3):
-                freq_u = rng.uniform(1.4, 3.2)
-                freq_v = rng.uniform(1.0, 2.4)
+                freq_u = rng.uniform(1.4, 3.0)
+                freq_v = rng.uniform(1.0, 2.2)
                 fase = rng.uniform(0.0, math.pi * 2.0)
-                amp = rng.uniform(0.10, 0.22)
+                amp = rng.uniform(0.10, 0.20)
                 curva = np.sin(u * math.pi * freq_u + fase) * amp + np.cos(v * math.pi * freq_v - fase * 0.6) * (amp * 0.6)
                 centro_v = 0.25 + idx_w * 0.25 + curva
-                largura_faixa = rng.uniform(0.14, 0.26)
+                largura_faixa = rng.uniform(0.15, 0.26)
                 onda = np.exp(-((v - centro_v) ** 2) / (2.0 * (largura_faixa ** 2)))[..., None]
                 cor_onda = cores[(idx_w + 1) % len(cores)] if idx_w % 2 == 0 else c_extra
-                op_onda = rng.uniform(0.22, 0.42)
+                op_onda = rng.uniform(0.22, 0.38)
                 canvas = canvas * (1.0 - onda * op_onda) + cor_onda * (onda * op_onda)
         elif "bokeh" in subtipo:
-            # Bokeh artístico de luz suave (círculos difusos translúcidos)
-            qtd_orbes = rng.randint(7, 12)
+            qtd_orbes = rng.randint(6, 11)
             for _ in range(qtd_orbes):
-                bx = rng.uniform(0.05, 0.95)
+                bx = rng.uniform(0.06, 0.94)
                 by = rng.uniform(0.08, 0.92)
-                raio = rng.uniform(0.08, 0.26)
-                suavidade = rng.uniform(0.03, 0.09)
+                raio = rng.uniform(0.09, 0.25)
+                suavidade = rng.uniform(0.04, 0.09)
                 dist_b = np.sqrt(((u - bx) * max(1.0, aspecto * 0.85)) ** 2 + (v - by) ** 2)
                 anel = np.clip(1.0 - (dist_b - raio) / max(0.01, suavidade), 0.0, 1.0)
                 anel = (anel * anel * (3.0 - 2.0 * anel))[..., None]
-                cor_luz = np.clip(cores[rng.randint(0, len(cores) - 1)] * 0.55 + 255.0 * 0.45, 0, 255)
-                op_b = rng.uniform(0.12, 0.28)
+                cor_ref = cores[rng.randint(1, len(cores) - 1)]
+                if padrao_cor == "preto":
+                    # No padrão preto, o bokeh é um reflexo sutil da cor da foto sem embranquecer o fundo
+                    cor_luz = np.clip(cor_ref * 1.35 + 14.0, 0, 78)
+                    op_b = rng.uniform(0.16, 0.30)
+                else:
+                    cor_luz = np.clip(cor_ref * 0.65 + 255.0 * 0.35, 215, 255)
+                    op_b = rng.uniform(0.18, 0.32)
                 canvas = canvas * (1.0 - anel * op_b) + cor_luz * (anel * op_b)
         elif "aquarela" in subtipo:
-            # Manchas suaves estilo nuvem/aquarela orgânica
             for idx_m in range(5):
                 mx = rng.uniform(0.1, 0.9)
                 my = rng.uniform(0.1, 0.9)
@@ -511,19 +720,23 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
                 dv = -(u - mx) * math.sin(rot) + (v - my) * math.cos(rot)
                 ond = 0.04 * np.sin(u * 9.0 + idx_m) * np.cos(v * 9.0 - idx_m)
                 mancha = np.exp(-((du / rx) ** 2 + (dv / ry) ** 2) + ond)[..., None]
-                cor_m = cores[idx_m % len(cores)]
-                op_m = rng.uniform(0.24, 0.45)
+                cor_m = cores[(idx_m % (len(cores) - 1)) + 1]
+                op_m = rng.uniform(0.24, 0.42)
                 canvas = canvas * (1.0 - mancha * op_m) + cor_m * (mancha * op_m)
         else:
-            # Feixes de luz / prisma suave diagonal
             for idx_p in range(4):
-                ang_p = angulo_rad + rng.uniform(-0.45, 0.45)
+                ang_p = angulo_rad + rng.uniform(-0.42, 0.42)
                 coord = (u - 0.5) * math.cos(ang_p) + (v - 0.5) * math.sin(ang_p)
                 pos_p = rng.uniform(-0.35, 0.35)
-                larg_p = rng.uniform(0.08, 0.18)
+                larg_p = rng.uniform(0.09, 0.18)
                 feixe = np.exp(-((coord - pos_p) ** 2) / (2.0 * (larg_p ** 2)))[..., None]
-                cor_f = np.clip(cores[idx_p % len(cores)] * 0.70 + 255.0 * 0.30, 0, 255)
-                op_f = rng.uniform(0.16, 0.32)
+                cor_ref = cores[(idx_p % (len(cores) - 1)) + 1]
+                if padrao_cor == "preto":
+                    cor_f = np.clip(cor_ref * 1.28 + 10.0, 0, 72)
+                    op_f = rng.uniform(0.18, 0.32)
+                else:
+                    cor_f = np.clip(cor_ref * 0.72 + 255.0 * 0.28, 218, 255)
+                    op_f = rng.uniform(0.18, 0.32)
                 canvas = canvas * (1.0 - feixe * op_f) + cor_f * (feixe * op_f)
 
     arr_u8 = np.clip(np.round(canvas), 0, 255).astype(np.uint8)
@@ -620,15 +833,28 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
     esp_v = bool(dados.get("espelhar_v"))
     pb = bool(dados.get("pb"))
 
+    # Se for um fundo gerado cujo arquivo temporário ainda não existe em disco, materializa agora
     if eh_gerado:
+        cam_atual = str(dados.get("caminho") or "")
+        if not cam_atual or cam_atual.startswith("__gerado__:") or not Path(cam_atual).is_file():
+            espec = dados.get("gerado") or {"tipo": "degrade", "subtipo": "linear_diagonal"}
+            cam_real = materializar_fundo_gerado_em_arquivo(espec, caminho_destino=cam_atual if not cam_atual.startswith("__gerado__:") else None)
+            dados["caminho"] = cam_real
+            if isinstance(fundo_imagem, dict):
+                fundo_imagem["caminho"] = cam_real
+
+    caminho_arq = str(dados.get("caminho") or "")
+    tem_arquivo_real = bool(caminho_arq and not caminho_arq.startswith("__gerado__:") and Path(caminho_arq).is_file())
+
+    if not tem_arquivo_real and eh_gerado:
         espec = dados.get("gerado") or {"tipo": "degrade", "subtipo": "linear_diagonal"}
         nw_g = max(W, int(round(W * escala_zoom)))
         nh_g = max(H, int(round(H * escala_zoom)))
         fonte = renderizar_fundo_gerado(espec, (nw_g, nh_g), rapido=rapido)
     elif rapido:
-        fonte = analise.imagem_para(dados["caminho"], int(round(max(W, H) * max(1.0, min(2.0, escala_zoom)))))
+        fonte = analise.imagem_para(caminho_arq, int(round(max(W, H) * max(1.0, min(2.0, escala_zoom)))))
         chave_fp = (
-            normalizar_caminho(dados["caminho"]),
+            normalizar_caminho(caminho_arq),
             id(fonte),
             W,
             H,
@@ -647,7 +873,7 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
                 _CACHE_FUNDO_POS.move_to_end(chave_fp)
                 return guardado.copy()
     else:
-        fonte = analise.abrir_imagem(dados["caminho"])[0]
+        fonte = analise.abrir_imagem(caminho_arq)[0]
 
     if esp_h:
         fonte = ImageOps.mirror(fonte)
@@ -690,7 +916,7 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
         oy = max(0, min(nh - H, int(round((nh - H) * cy))))
         camada.paste(redim.crop((ox, oy, ox + W, oy + H)), (0, 0))
 
-    if rapido and not eh_gerado:
+    if rapido and (tem_arquivo_real or not eh_gerado):
         with _TRAVA_COMP_CACHE:
             _CACHE_FUNDO_POS[chave_fp] = camada
             while len(_CACHE_FUNDO_POS) > 48:

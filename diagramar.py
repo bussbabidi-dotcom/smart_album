@@ -2531,20 +2531,47 @@ def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0):
             return cor_base, dados_pasta, paleta
 
     seed_base = int(cfg.get("_seed_auto_fundos") or (int(time.time() * 1000) % 900000)) + int(indice_seed) * 7919
-    galeria = gerar_galeria_fundos_procedurais(paleta, estilo=estilo_gerado, seed_base=seed_base, quantidade=4)
+    padrao_det = str(cfg.get("padrao_fundo_gerado") or paleta.get("padrao_sugerido") or "preto").lower()
+    if padrao_det not in ("preto", "branco"):
+        padrao_det = str(paleta.get("padrao_sugerido") or "preto").lower()
+    galeria = gerar_galeria_fundos_procedurais(
+        paleta, estilo=estilo_gerado, seed_base=seed_base, quantidade=4, padrao_filtro=padrao_det
+    )
     dados_gerado = galeria[int(indice_seed) % len(galeria)] if galeria else None
+    if dados_gerado and isinstance(dados_gerado.get("gerado"), dict):
+        cores_g = dados_gerado["gerado"].get("cores") or []
+        if cores_g:
+            cor_base = str(cores_g[0])
     return cor_base, dados_gerado, paleta
 
 
-def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0):
+def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0, **kwargs):
     """
     FUNÇÃO 1 (Independente): Motor de Fundos Automáticos.
     - Analisa as cores das fotos da lâmina inteira ou de cada página separadamente.
-    - Gera fundos Degradês e Abstratos suaves baseados nas cores das fotos (com aleatoriedade controlada)
-      e/ou seleciona os fundos sugeridos da Pasta de Fundos que o usuário mais usa por padrão.
+    - Gera fundos Degradês e Abstratos suaves baseados nas cores das fotos nos padrões
+      Preto + Cores (15%-25%) ou Branco + Cores (15%-25%) e salva na pasta temporária.
     """
     if not lamina:
         return False
+    # Suporta chamada com lista de lâminas (como feita pela interface em app.pyw)
+    if isinstance(lamina, (list, tuple)):
+        cfg_eff = dict(produto if isinstance(produto, dict) and "paginas_por_lamina" not in produto else (cfg or {}))
+        if kwargs.get("pasta_fundos") is not None:
+            cfg_eff["pasta_fundos"] = kwargs["pasta_fundos"]
+        if kwargs.get("arquivo_cfg_fundos") is not None:
+            cfg_eff["_arquivo_fundos"] = kwargs["arquivo_cfg_fundos"]
+        if kwargs.get("caminhos_pasta") is not None:
+            cfg_eff["_lista_fundos_pasta"] = kwargs["caminhos_pasta"]
+        if kwargs.get("seed_extra") is not None:
+            cfg_eff["_seed_auto_fundos"] = int(kwargs["seed_extra"])
+        prod_eff = produto if (isinstance(produto, dict) and "paginas_por_lamina" in produto) else {"paginas_por_lamina": 2}
+        algum = False
+        for idx_l, lam_item in enumerate(lamina):
+            if aplicar_fundos_automaticos(lam_item, None, prod_eff, cfg_eff, indice_lamina=idx_l):
+                algum = True
+        return algum
+
     cfg = cfg or {}
     if not bool(cfg.get("auto_fundos", True)):
         return False
@@ -2612,6 +2639,14 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
     """
     if not lamina:
         return False
+    if isinstance(lamina, (list, tuple)):
+        cfg_eff = produto if (isinstance(produto, dict) and "paginas_por_lamina" not in produto) else (cfg or {})
+        prod_eff = cfg if (isinstance(cfg, dict) and "paginas_por_lamina" in cfg) else {"paginas_por_lamina": 2}
+        algum = False
+        for lam_item in lamina:
+            if aplicar_degrade_automatico(lam_item, None, prod_eff, cfg_eff):
+                algum = True
+        return algum
     cfg = cfg or {}
     if not bool(cfg.get("auto_degrade", True)):
         return False
@@ -2725,6 +2760,14 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
     """
     if not lamina:
         return False
+    if isinstance(lamina, (list, tuple)):
+        cfg_eff = produto if (isinstance(produto, dict) and "paginas_por_lamina" not in produto) else (cfg or {})
+        prod_eff = cfg if (isinstance(cfg, dict) and "paginas_por_lamina" in cfg) else {"paginas_por_lamina": 2}
+        algum = False
+        for lam_item in lamina:
+            if aplicar_molduras_automaticas(lam_item, None, prod_eff, cfg_eff):
+                algum = True
+        return algum
     cfg = cfg or {}
     if not bool(cfg.get("auto_molduras", True)):
         return False

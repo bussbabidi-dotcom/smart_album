@@ -48,7 +48,8 @@ import recorte
 import tema
 from comum import (
     EXTENSOES, apagar_pasta, cor_hex, cor_rgb, gravar_json, ler_json,
-    limpar_temporarios_disco, normalizar_caminho, pasta_dados,
+    limpar_fundos_temporarios, limpar_temporarios_disco, listar_fundos_temporarios,
+    normalizar_caminho, pasta_dados, pasta_fundos_temporarios,
 )
 import fundos
 import janela_exportar
@@ -57,7 +58,7 @@ from composicao import (
     DIRECOES_DEGRADE, MODOS_FUNDO, acabar_fundo, aplicar_moldura, compor_fundo_completo,
     criar_dados_fundo_gerado, degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos,
     fundo_imagem_padrao, fundo_posicionado, gerar_galeria_fundos_procedurais,
-    gerar_mascara_degrade, rosto_de, tem_degrade_ativo,
+    gerar_mascara_degrade, materializar_fundo_gerado_em_arquivo, rosto_de, tem_degrade_ativo,
 )
 from editor_foto import EditorFoto
 from observador import Observador
@@ -1803,10 +1804,11 @@ class Aplicativo:
             "Compacto.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        # --- Gerador pelas Fotos (Degradê & Abstrato) ---
-        gerador = ttk.LabelFrame(quadro, text="Gerar pelas Fotos (Degradê & Abstrato)", padding=6)
+        # --- Gerador pelas Fotos (Padrão Preto + Cores & Branco + Cores) ---
+        gerador = ttk.LabelFrame(quadro, text="Gerar pelas Fotos (Preto/Branco + Cores 15-25%)", padding=6)
         gerador.pack(side="top", fill="x", pady=(2, 4))
         self.estilo_gerador_fundo = tk.StringVar(value="ambos")
+        self.padrao_gerador_fundo = tk.StringVar(value="ambos")
         self._seed_fundos_gerados = 1
         self._chave_cache_gerados = None
 
@@ -1816,43 +1818,88 @@ class Aplicativo:
             linha_g1, text="Analisando: Lâmina inteira", style="Fraco.TLabel"
         )
         self.rotulo_escopo_gerador.pack(side="left")
+
+        linha_g_filtros = ttk.Frame(gerador)
+        linha_g_filtros.pack(fill="x", pady=(0, 3))
+        combo_pad_ger = ttk.Combobox(
+            linha_g_filtros,
+            state="readonly",
+            width=19,
+            values=("Preto + Branco (Auto)", "Padrão Preto + Cores", "Padrão Branco + Cores"),
+        )
+        combo_pad_ger.set("Preto + Branco (Auto)")
+        combo_pad_ger.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        tema.dica(
+            combo_pad_ger,
+            "Detecta se as fotos têm mais tons pretos ou brancos e mostra ambos os padrões na galeria (mistura sutil de 15% a 25% das cores das fotos)",
+        )
+
         combo_est_ger = ttk.Combobox(
-            linha_g1,
-             state="readonly",
-            width=16,
+            linha_g_filtros,
+            state="readonly",
+            width=15,
             values=("Degradê + Abstrato", "Só Degradê", "Só Abstrato"),
         )
         combo_est_ger.set("Degradê + Abstrato")
-        combo_est_ger.pack(side="right")
+        combo_est_ger.pack(side="right", fill="x", expand=True, padx=(2, 0))
 
         def _mudou_estilo_gerador(_e=None):
-            mapa = {
+            mapa_est = {
                 "Degradê + Abstrato": "ambos",
                 "Só Degradê": "degrade",
                 "Só Abstrato": "abstrato",
             }
-            self.estilo_gerador_fundo.set(mapa.get(combo_est_ger.get(), "ambos"))
+            mapa_pad = {
+                "Preto + Branco (Auto)": "ambos",
+                "Padrão Preto + Cores": "preto",
+                "Padrão Branco + Cores": "branco",
+            }
+            self.estilo_gerador_fundo.set(mapa_est.get(combo_est_ger.get(), "ambos"))
+            self.padrao_gerador_fundo.set(mapa_pad.get(combo_pad_ger.get(), "ambos"))
             self._chave_cache_gerados = None
             self._atualizar_galeria_gerados(forcar=True)
 
         combo_est_ger.bind("<<ComboboxSelected>>", _mudou_estilo_gerador)
+        combo_pad_ger.bind("<<ComboboxSelected>>", _mudou_estilo_gerador)
 
         linha_g2 = ttk.Frame(gerador)
-        linha_g2.pack(fill="x", pady=(0, 4))
+        linha_g2.pack(fill="x", pady=(0, 3))
         self._botao(
             linha_g2,
             "🎲 Novas Variações",
             self.sortear_fundos_gerados,
-            "Gera novas variações aleatórias de fundos Degradê e Abstrato baseados na paleta das fotos da página/lâmina",
+            "Gera novas variações de fundos nos padrões Preto + Cores (15-25%) e Branco + Cores (15-25%) e salva na pasta temporária",
             "PrimarioCompacto.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(0, 2))
         self._botao(
             linha_g2,
             "✨ Auto Fundos (Álbum)",
             lambda: self.executar_auto_fundos(apenas_atual=False),
-            "Executa a Função 1 (Motor de Fundos) em todo o álbum combinando fundos gerados pelas fotos e sugestões da pasta",
+            "Executa o Motor de Fundos em todo o álbum detectando automaticamente Preto + Cores ou Branco + Cores em cada lâmina",
             "Compacto.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        # Linha da Pasta Temporária de Fundos Gerados (permite editar os arquivos e limpar quando quiser)
+        linha_temp_g = ttk.Frame(gerador)
+        linha_temp_g.pack(fill="x", pady=(0, 4))
+        self.rotulo_temp_fundos = ttk.Label(
+            linha_temp_g, text="Temp: 0 salvos", style="Fraco.TLabel"
+        )
+        self.rotulo_temp_fundos.pack(side="left")
+        self._botao(
+            linha_temp_g,
+            "🗑 Limpar Temporários",
+            self.limpar_fundos_temporarios_ui,
+            "Remove os arquivos de fundos gerados acumulados na pasta temporária",
+            "Compacto.TButton",
+        ).pack(side="right", padx=(2, 0))
+        self._botao(
+            linha_temp_g,
+            "📂 Pasta Temp",
+            self.abrir_pasta_fundos_temporarios,
+            "Abre a pasta temporária onde os fundos gerados pelo programa são salvos como arquivos .png editáveis",
+            "Compacto.TButton",
+        ).pack(side="right")
 
         self.galeria_fundos_gerados = fundos.Galeria(
             gerador,
@@ -11283,7 +11330,10 @@ class Aplicativo:
         self.aplicar_fundo_em(caminho, self.atual)
 
     def aplicar_fundo_gerado_em(self, dados_gerado, item=None, alvo=None):
-        """Aplica um dicionário de fundo gerado proceduralmente (Degradê ou Abstrato) na lâmina/página."""
+        """
+        Aplica um dicionário de fundo gerado proceduralmente (Degradê ou Abstrato) na lâmina/página,
+        garantindo que esteja salvo como arquivo .png real na pasta temporária para edição livre.
+        """
         item = self.atual if item is None else item
         dono = self._lamina(item)
         if dono is None or not isinstance(dados_gerado, dict):
@@ -11291,11 +11341,16 @@ class Aplicativo:
             return False
         ch_cor, ch_img = self._chaves_fundo_alvo(alvo)
         self.marcar_historico()
-        dono[ch_img] = proj.copia(dados_gerado)
-        espec = dados_gerado.get("gerado") or {}
+        copia_dados = proj.copia(dados_gerado)
+        espec = copia_dados.get("gerado") or {}
+        if espec:
+            cam_real = materializar_fundo_gerado_em_arquivo(espec, caminho_destino=copia_dados.get("caminho"))
+            copia_dados["caminho"] = cam_real
+        dono[ch_img] = copia_dados
         cores = espec.get("cores") or []
         if cores:
             dono[ch_cor] = str(cores[0])
+        self._atualizar_rotulo_temp_fundos()
         self._atualizar_fundo_ui()
         self.atualizar_lamina_atual()
         nome_alvo = {
@@ -11303,7 +11358,7 @@ class Aplicativo:
             "fundo_imagem_esquerda": "lâmina %s (pág. esquerda)" % (item + 1),
             "fundo_imagem_direita": "lâmina %s (pág. direita)" % (item + 1),
         }[ch_img]
-        self.registrar("Fundo gerado na %s: %s" % (nome_alvo, dados_gerado.get("nome_exibicao") or "Fundo Gerado"))
+        self.registrar("Fundo gerado salvo em Temp e aplicado na %s: %s" % (nome_alvo, copia_dados.get("nome_exibicao") or "Fundo Gerado"))
         return True
 
     def aplicar_fundo_em(self, caminho, item=None, alvo=None):
@@ -11313,11 +11368,10 @@ class Aplicativo:
         """
         if isinstance(caminho, dict) and eh_fundo_gerado(caminho):
             return self.aplicar_fundo_gerado_em(caminho, item=item, alvo=alvo)
-        if isinstance(caminho, str) and eh_fundo_gerado(caminho):
-            dados_g = getattr(self, "galeria_fundos_gerados", None) and self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+        if isinstance(caminho, str) and hasattr(self, "galeria_fundos_gerados"):
+            dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
             if dados_g:
                 return self.aplicar_fundo_gerado_em(dados_g, item=item, alvo=alvo)
-            return False
         item = self.atual if item is None else item
         dono = self._lamina(item)
         if dono is None:
@@ -11462,13 +11516,50 @@ class Aplicativo:
                 return fotos
         return [e["foto"] for e in espacos if e.get("foto")]
 
+    def _atualizar_rotulo_temp_fundos(self):
+        if not hasattr(self, "rotulo_temp_fundos"):
+            return
+        arqs = listar_fundos_temporarios()
+        self.rotulo_temp_fundos.configure(
+            text="Pasta Temp: %d fundo(s) editável(is)" % len(arqs)
+        )
+
+    def abrir_pasta_fundos_temporarios(self):
+        """Abre a pasta temporária onde os fundos gerados pelo programa estão salvos como arquivos .png."""
+        pasta = pasta_fundos_temporarios()
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(pasta))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(pasta)])
+            else:
+                subprocess.Popen(["xdg-open", str(pasta)])
+        except Exception as e:
+            self.registrar("Pasta temporária de fundos: %s (%s)" % (pasta, e))
+
+    def limpar_fundos_temporarios_ui(self):
+        """Limpa os arquivos de fundos gerados na pasta temporária sob comando do usuário."""
+        removidos, bytes_lib = limpar_fundos_temporarios()
+        # Regera na pasta temporária apenas os fundos atualmente aplicados nas lâminas do projeto aberto e na galeria visível
+        for lam in self.projeto.get("laminas", []):
+            for ch in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
+                d_img = lam.get(ch)
+                if isinstance(d_img, dict) and isinstance(d_img.get("gerado"), dict):
+                    d_img["caminho"] = materializar_fundo_gerado_em_arquivo(d_img["gerado"])
+        self._chave_cache_gerados = None
+        self._atualizar_galeria_gerados(forcar=True)
+        self._atualizar_rotulo_temp_fundos()
+        mb = bytes_lib / (1024.0 * 1024.0)
+        self.registrar("Pasta temporária de fundos limpa: %d arquivo(s) removido(s) (%.1f MB liberados)." % (removidos, mb))
+
     def sortear_fundos_gerados(self):
-        """Gera novas variações aleatórias de fundos Degradê e Abstrato baseados nas fotos da página/lâmina."""
+        """Gera novas variações aleatórias de fundos (Preto+Cores e Branco+Cores) baseados nas fotos da página/lâmina."""
         self._seed_fundos_gerados = int(getattr(self, "_seed_fundos_gerados", 1)) + random.randint(7, 97)
         self._chave_cache_gerados = None
         self._atualizar_galeria_gerados(forcar=True)
         if getattr(self, "_lista_gerados_atuais", None):
-            escolhido = random.choice(self._lista_gerados_atuais)
+            # Escolhe preferencialmente o primeiro (que segue o padrão detectado Preto+Cores ou Branco+Cores)
+            escolhido = self._lista_gerados_atuais[0]
             self.aplicar_fundo_gerado_em(escolhido)
 
     def _atualizar_galeria_gerados(self, forcar=False):
@@ -11477,31 +11568,40 @@ class Aplicativo:
         alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
         fotos_alvo = self._fotos_alvo_fundo_atual()
         estilo = self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo") else "ambos"
+        padrao_f = self.padrao_gerador_fundo.get() if hasattr(self, "padrao_gerador_fundo") else "ambos"
         seed_atual = int(getattr(self, "_seed_fundos_gerados", 1))
-        chave = (self.atual, alvo, tuple(fotos_alvo), estilo, seed_atual)
-        if hasattr(self, "rotulo_escopo_gerador"):
-            txt_alvo = {
-                "lamina": "Lâmina inteira (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
-                "esquerda": "Pág. Esquerda (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
-                "direita": "Pág. Direita (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
-            }.get(alvo, "Lâmina inteira")
-            self.rotulo_escopo_gerador.configure(text="Analisando: %s" % txt_alvo)
-        if not forcar and chave == getattr(self, "_chave_cache_gerados", None):
-            self.galeria_fundos_gerados._agendar()
-            return
-        self._chave_cache_gerados = chave
+        chave = (self.atual, alvo, tuple(fotos_alvo), estilo, padrao_f, seed_atual)
         paleta = extrair_paleta_fotos(fotos_alvo, self.info)
         self._paleta_fundo_atual = paleta
+        pad_det = "Preto + Cores" if paleta.get("padrao_sugerido") == "preto" else "Branco + Cores"
+        if hasattr(self, "rotulo_escopo_gerador"):
+            txt_alvo = {
+                "lamina": "Lâmina (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+                "esquerda": "Pág. Esq. (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+                "direita": "Pág. Dir. (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
+            }.get(alvo, "Lâmina")
+            self.rotulo_escopo_gerador.configure(text="%s · Tom detectado: %s" % (txt_alvo, pad_det))
+        if not forcar and chave == getattr(self, "_chave_cache_gerados", None):
+            self.galeria_fundos_gerados._agendar()
+            self._atualizar_rotulo_temp_fundos()
+            return
+        self._chave_cache_gerados = chave
         gerados = gerar_galeria_fundos_procedurais(
-            paleta, estilo=estilo, seed_base=seed_atual + (self.atual + 1) * 19, quantidade=8
+            paleta,
+            estilo=estilo,
+            seed_base=seed_atual + (self.atual + 1 if isinstance(self.atual, int) else 0) * 19,
+            quantidade=8,
+            padrao_filtro=padrao_f,
         )
         self._lista_gerados_atuais = gerados
         self.galeria_fundos_gerados.definir(gerados)
+        self._atualizar_rotulo_temp_fundos()
 
-    def _galeria_gerados_pressionou(self, caminho, _evento):
+    def _galeria_gerados_pressionou(self, caminho, evento):
         dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
         if dados_g:
             self.aplicar_fundo_gerado_em(dados_g)
+            self._arrasto = {"tipo": "fundo", "caminho": dados_g.get("caminho") or caminho, "x": evento.x_root, "y": evento.y_root, "ativo": False}
 
     def _galeria_gerados_menu(self, caminho, evento):
         dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
@@ -11537,6 +11637,15 @@ class Aplicativo:
         menu.add_command(
             label="Ajustar cor / Tingir...",
             command=lambda: (self.aplicar_fundo_gerado_em(dados_g), self.abrir_editor_fundo()),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Abrir pasta temporária de fundos",
+            command=self.abrir_pasta_fundos_temporarios,
+        )
+        menu.add_command(
+            label="Limpar fundos temporários...",
+            command=self.limpar_fundos_temporarios_ui,
         )
         menu.tk_popup(evento.x_root, evento.y_root)
 
@@ -11639,9 +11748,12 @@ class Aplicativo:
 
     def _fundo_atual_normalizado(self):
         dados = self._dados_fundo_imagem_ativo() or {}
-        if eh_fundo_gerado(dados):
-            return str(dados.get("caminho") or "")
-        return normalizar_caminho(dados["caminho"]) if dados.get("caminho") else None
+        cam = dados.get("caminho")
+        if not cam:
+            return None
+        if str(cam).startswith("__gerado__:"):
+            return str(cam)
+        return normalizar_caminho(cam)
 
     def _galeria_pressionou(self, caminho, evento):
         self._arrasto = {"tipo": "fundo", "caminho": caminho, "x": evento.x_root, "y": evento.y_root, "ativo": False}
@@ -11871,8 +11983,12 @@ class Aplicativo:
                 base = fundo_imagem_padrao()
                 base.update(dados)
                 if eh_fundo_gerado(base):
+                    if isinstance(base.get("gerado"), dict) and (not base.get("caminho") or str(base["caminho"]).startswith("__gerado__:") or not Path(base["caminho"]).is_file()):
+                        base["caminho"] = materializar_fundo_gerado_em_arquivo(base["gerado"])
+                        dados["caminho"] = base["caminho"]
                     nome_g = base.get("nome_exibicao") or (base.get("gerado") or {}).get("titulo") or "Fundo Gerado pelas Fotos"
-                    self.rotulo_fundo_imagem.configure(text="✨ " + str(nome_g))
+                    arq_t = Path(str(base.get("caminho") or "")).name
+                    self.rotulo_fundo_imagem.configure(text="✨ %s (%s)" % (nome_g, arq_t))
                 else:
                     faltando = not Path(base["caminho"]).is_file()
                     self.rotulo_fundo_imagem.configure(text=Path(base["caminho"]).name + ("  (arquivo não encontrado)" if faltando else ""))

@@ -72,6 +72,66 @@ def pasta_dados():
     return pasta
 
 
+def pasta_fundos_temporarios():
+    """
+    Pasta temporária persistente onde os fundos gerados pelo Diagramador Inteligente
+    (Degradê e Abstrato nos padrões Preto+Cores e Branco+Cores) são salvos como arquivos
+    de imagem reais (.png) para permitir qualquer edição, ajuste ou abertura externa.
+    Os arquivos permanecem até o usuário clicar em 'Limpar Fundos Temporários'.
+    """
+    pasta = pasta_dados() / "fundos_temp"
+    pasta.mkdir(parents=True, exist_ok=True)
+    return pasta
+
+
+def listar_fundos_temporarios():
+    """Lista os arquivos de fundos gerados salvos na pasta temporária (mais recentes primeiro)."""
+    pasta = pasta_fundos_temporarios()
+    arquivos = []
+    try:
+        for item in pasta.iterdir():
+            if item.is_file() and item.suffix.lower() in EXTENSOES:
+                try:
+                    mtime = item.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                arquivos.append((mtime, str(item)))
+    except OSError:
+        return []
+    arquivos.sort(key=lambda x: x[0], reverse=True)
+    return [c for _m, c in arquivos]
+
+
+def limpar_fundos_temporarios(manter_caminhos=None):
+    """
+    Remove os arquivos de fundos gerados da pasta temporária quando solicitado pelo usuário.
+    Se `manter_caminhos` for informado, preserva esses arquivos.
+    Devolve `(qtd_removidos, bytes_liberados)`.
+    """
+    pasta = pasta_fundos_temporarios()
+    protegidos = {normalizar_caminho(c) for c in (manter_caminhos or ()) if c}
+    removidos = 0
+    bytes_liberados = 0
+    try:
+        for item in list(pasta.iterdir()):
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in EXTENSOES and not item.name.endswith(".tmp"):
+                continue
+            if normalizar_caminho(item) in protegidos:
+                continue
+            try:
+                tam = item.stat().st_size
+                item.unlink()
+                removidos += 1
+                bytes_liberados += tam
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removidos, bytes_liberados
+
+
 def modelo_rosto():
     """Modelo YuNet: no programa, em _internal, na raiz do projeto ou no album_molde."""
     nome = "face_detection_yunet_2023mar.onnx"
