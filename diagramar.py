@@ -3044,7 +3044,6 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
 
     for esp in com_foto:
         ex = float(esp.get("x", 0.0))
-        ey = float(esp.get("y", 0.0))
         ew = float(esp.get("w", 0.0))
         eh = float(esp.get("h", 0.0))
         ex1 = ex + ew

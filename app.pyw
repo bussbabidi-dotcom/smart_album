@@ -16,8 +16,9 @@ import json
 import math
 import os
 import queue
+import random
 import re
-import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,7 +29,7 @@ import urllib.request
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -55,13 +56,11 @@ import fundos
 import janela_exportar
 import janela_tratamento
 from composicao import (
-    CATALOGO_TEMAS, DIRECOES_DEGRADE, ESTILOS_MOLDURA, MAPA_TEMAS, MODOS_FUNDO,
-    NOMES_ESTILOS_MOLDURA, PRESETS_SOMBRA_PROJETADA, acabar_fundo, aplicar_moldura,
-    aplicar_sombra_projetada, compor_fundo_completo, criar_dados_fundo_gerado,
-    degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos, fundo_imagem_padrao,
-    fundo_posicionado, gerar_fundo_de_tema, gerar_galeria_fundos_procedurais,
-    gerar_mascara_degrade, materializar_fundo_gerado_em_arquivo, rosto_de,
-    sombra_padrao, tem_degrade_ativo,
+    CATALOGO_TEMAS, ESTILOS_MOLDURA, MAPA_TEMAS, MODOS_FUNDO,
+    NOMES_ESTILOS_MOLDURA, PRESETS_SOMBRA_PROJETADA, aplicar_moldura,
+    compor_fundo_completo, degrade_padrao, eh_fundo_gerado, extrair_paleta_fotos,
+    fundo_imagem_padrao, gerar_galeria_fundos_procedurais,
+    materializar_fundo_gerado_em_arquivo, rosto_de, sombra_padrao,
 )
 from editor_foto import EditorFoto
 from observador import Observador
@@ -137,6 +136,8 @@ ARRANJO_PADRAO = {
     "altura_fotos": 118,
     "largura_fotos": 290,
     "largura_lateral": 310,
+    "lateral_conteudo_aberto": True,
+    "secoes_recolhidas": {},
 }
 LADOS_TIMELINE = ("esquerda", "direita", "cima", "baixo")
 CHAVES_TIMELINE_V1 = ("timeline", "altura_timeline", "largura_timeline", "altura_fotos", "largura_fotos", "largura_lateral")
@@ -314,6 +315,7 @@ class Aplicativo:
         self.filtro = tk.StringVar(value="todas")
         self.pasta_filtro = tk.StringVar(value="todas")
         self.pastas_recolhidas = set()
+        self._lista_fotos = []
         self._itens_painel_fotos = []
         self._xs_painel_fotos = []
         self._miniaturas_pendentes = set()
@@ -418,7 +420,12 @@ class Aplicativo:
 
         tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
 
-        barra_abas_albuns = tk.Frame(self.root, bg=tema.PAINEL_2, padx=8, pady=3)
+        self.barra_opcoes = tk.Frame(self.root, bg=tema.CABECALHO, height=24)
+        self.barra_opcoes.pack(side="top", fill="x")
+        self._montar_barra_opcoes()
+        tk.Frame(self.root, bg=tema.BORDA, height=1).pack(side="top", fill="x")
+
+        barra_abas_albuns = tk.Frame(self.root, bg=tema.PAINEL, padx=6, pady=2)
         barra_abas_albuns.pack(side="top", fill="x")
         self.barra_abas_albuns = barra_abas_albuns
         self._atualizar_barra_abas_albuns()
@@ -433,13 +440,13 @@ class Aplicativo:
         corpo = ttk.Frame(self.root)
         corpo.pack(side="top", fill="both", expand=True)
 
-        # Barra vertical esquerda de ferramentas estilo Adobe Photoshop CC (igual à demonstração)
-        self.barra_ferramentas = tk.Frame(corpo, bg=tema.PAINEL, width=40, padx=4, pady=6)
+        # Barra vertical esquerda de ferramentas estilo Adobe Photoshop CC
+        self.barra_ferramentas = tk.Frame(corpo, bg=tema.PAINEL, width=34, padx=2, pady=4)
         self.barra_ferramentas.pack(side="left", fill="y")
         self._montar_ferramentas_esquerda(self.barra_ferramentas)
         tk.Frame(corpo, bg=tema.BORDA, width=1).pack(side="left", fill="y")
 
-        opcoes = dict(bg=tema.BORDA, bd=0, sashwidth=4, sashrelief="flat", showhandle=False, opaqueresize=True)
+        opcoes = dict(bg=tema.BORDA, bd=0, sashwidth=2, sashrelief="flat", showhandle=False, opaqueresize=True)
         self.painel_v = tk.PanedWindow(corpo, orient="vertical", **opcoes)
         self.painel_v.pack(side="left", fill="both", expand=True)
         self.painel_h = tk.PanedWindow(self.painel_v, orient="horizontal", **opcoes)
@@ -561,7 +568,7 @@ class Aplicativo:
         self.rotulo_lamina.pack(side="left", padx=(4, 4))
 
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
-                                          "Exportar álbum (JPG, PSD ou PDF)", "Compacto.TButton")
+                                          "Exportar álbum (JPG, PSD ou PDF)", "PrimarioCompacto.TButton")
         self.botao_exportar.pack(side="right", padx=(2, 0))
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
                                       "Abrir programa de capas", "Compacto.TButton")
@@ -617,6 +624,69 @@ class Aplicativo:
 
         rot_alb = ttk.Label(topo, text="Álbum:", style="Fraco.TLabel")
         rot_alb.pack(side="right", padx=(4, 3))
+
+    def _montar_barra_opcoes(self):
+        barra = self.barra_opcoes
+        self._quadro_opcoes_normal = tk.Frame(barra, bg=tema.CABECALHO)
+        self._quadro_opcoes_layout = tk.Frame(barra, bg=tema.CABECALHO)
+        ttk.Label(self._quadro_opcoes_normal, text="Visualização:", style="BarraOpcoes.TLabel").pack(
+            side="left", padx=(8, 4), pady=2)
+        self._botao(self._quadro_opcoes_normal, "−", lambda: self.mudar_zoom(1 / 1.12),
+                    "Diminuir zoom (roda do mouse)", "Icone.TButton", width=2).pack(side="left", padx=1)
+        self.rotulo_zoom_opcoes = ttk.Label(self._quadro_opcoes_normal, text="100%", style="BarraOpcoes.TLabel", width=5)
+        self.rotulo_zoom_opcoes.pack(side="left")
+        self._botao(self._quadro_opcoes_normal, "+", lambda: self.mudar_zoom(1.12),
+                    "Aumentar zoom (roda do mouse)", "Icone.TButton", width=2).pack(side="left", padx=1)
+        self._botao(self._quadro_opcoes_normal, "1:1", lambda: self.mudar_zoom(None),
+                    "Ajustar zoom a 100%", "Compacto.TButton").pack(side="left", padx=(6, 2))
+        guias_op = ttk.Checkbutton(
+            self._quadro_opcoes_normal, text="Guias", variable=self.guias, command=self.desenhar_lamina,
+        )
+        guias_op.pack(side="left", padx=(10, 2))
+        tema.dica(guias_op, "Mostrar ou ocultar linhas guias de corte, sangria e dobra (Tecla H)")
+        self.rotulo_opcoes_produto = ttk.Label(self._quadro_opcoes_normal, text="", style="BarraOpcoes.TLabel")
+        self.rotulo_opcoes_produto.pack(side="right", padx=8, pady=2)
+
+        ttk.Label(self._quadro_opcoes_layout, text="Edição de layout:", style="BarraOpcoes.TLabel").pack(
+            side="left", padx=(8, 4), pady=2)
+        ttk.Label(
+            self._quadro_opcoes_layout,
+            text="Alt desliga o ímã · Shift = proporção livre",
+            style="BarraOpcoes.TLabel",
+        ).pack(side="left", padx=2)
+        for txt, cmd, dica in (
+            ("＋", self.adicionar_espaco, "Novo espaço (N)"),
+            ("❐", self.duplicar_espaco, "Duplicar espaço (Ctrl+D)"),
+            ("🗑", self._tecla_apagar, "Apagar espaço / foto (Delete)"),
+        ):
+            self._botao(self._quadro_opcoes_layout, txt, cmd, dica, "Icone.TButton", width=2).pack(side="left", padx=1)
+        pos_op = ttk.Menubutton(self._quadro_opcoes_layout, text="Alinhar", style="Compacto.TMenubutton")
+        menu_op = tk.Menu(pos_op, tearoff=0)
+        for texto, acao in (
+            ("⇕ Preencher página", "pagina_util"),
+            ("＝ Igualar tamanho", "igualar"),
+            ("⊡ Proporção original", "proporcao_foto"),
+        ):
+            menu_op.add_command(label=texto, command=lambda a=acao: self.alinhar_espaco(a))
+        pos_op["menu"] = menu_op
+        pos_op.pack(side="left", padx=(8, 4))
+        self._atualizar_barra_opcoes()
+
+    def _atualizar_barra_opcoes(self):
+        if not getattr(self, "barra_opcoes", None):
+            return
+        for quadro in (getattr(self, "_quadro_opcoes_normal", None), getattr(self, "_quadro_opcoes_layout", None)):
+            if quadro is not None:
+                quadro.pack_forget()
+        if self.editar_layout.get():
+            if getattr(self, "_quadro_opcoes_layout", None):
+                self._quadro_opcoes_layout.pack(fill="x")
+        elif getattr(self, "_quadro_opcoes_normal", None):
+            self._quadro_opcoes_normal.pack(fill="x")
+        if getattr(self, "rotulo_zoom_opcoes", None):
+            self.rotulo_zoom_opcoes.configure(text="%d%%" % int(round(self.zoom * 100)))
+        if getattr(self, "rotulo_opcoes_produto", None) and self.produto:
+            self.rotulo_opcoes_produto.configure(text=self.produto.get("nome", ""))
 
     def abrir_janela_configuracoes(self):
         """Janela redimensionável que reúne Margem, Espaçamento, Regras e opções do antigo menu Exibir."""
@@ -786,32 +856,33 @@ class Aplicativo:
     def _montar_ferramentas_esquerda(self, barra):
         """Barra vertical esquerda unificando ferramentas de edição de foto/espaço e os botões das abas."""
         bt_mover = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout,
-                                   style="Alternar.Toolbutton", command=self._mudou_modo_layout, width=3)
-        bt_mover.pack(pady=1)
+                                   style="Ferramenta.Toolbutton", command=self._mudou_modo_layout, width=2)
+        bt_mover.pack(pady=2)
         tema.dica(bt_mover, "Mover / redimensionar espaços (Tecla L)")
 
+        estilo_ic = "Ferramenta.TButton"
         self._botao(barra, "✂", self.editar_foto_selecionada,
-                    "Editor de Foto, 1-Clique e Edição em Lote (Enter)", "Icone.TButton", width=3).pack(pady=1)
+                    "Editor de Foto, 1-Clique e Edição em Lote (Enter)", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "↻", self.girar_foto_selecionada,
-                    "Girar foto 90°", "Icone.TButton", width=3).pack(pady=1)
+                    "Girar foto 90°", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "＝", lambda: self.alinhar_espaco("igualar"),
-                    "Igualar tamanho das fotos selecionadas", "Icone.TButton", width=3).pack(pady=1)
+                    "Igualar tamanho das fotos selecionadas", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "⊡", lambda: self.alinhar_espaco("proporcao_foto"),
-                    "Proporção original da foto (0% corte)", "Icone.TButton", width=3).pack(pady=1)
+                    "Proporção original da foto (0% corte)", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "⇕", lambda: self.alinhar_espaco("pagina_util"),
-                    "Preencher página 100% até a sangria", "Icone.TButton", width=3).pack(pady=1)
+                    "Preencher página 100% até a sangria", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "＋", self.adicionar_espaco,
-                    "Novo espaço na página", "Icone.TButton", width=3).pack(pady=1)
+                    "Novo espaço na página", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "❐", self.duplicar_espaco,
-                    "Duplicar espaço selecionado", "Icone.TButton", width=3).pack(pady=1)
+                    "Duplicar espaço selecionado", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "↑", lambda: self.ordem_espaco(True),
-                    "Trazer para a frente", "Icone.TButton", width=3).pack(pady=1)
+                    "Trazer para a frente", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "↓", lambda: self.ordem_espaco(False),
-                    "Mandar para trás", "Icone.TButton", width=3).pack(pady=1)
+                    "Mandar para trás", estilo_ic, width=2).pack(pady=2)
         self._botao(barra, "🗑", self._tecla_apagar,
-                    "Tirar foto / apagar espaço selecionado", "Icone.TButton", width=3).pack(pady=1)
+                    "Tirar foto / apagar espaço selecionado", estilo_ic, width=2).pack(pady=2)
 
-        tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=2, pady=6)
+        tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=1, pady=4)
 
         self.botoes_abas_esquerda = {}
         self.vars_abas_esquerda = {}
@@ -831,11 +902,11 @@ class Aplicativo:
                 barra,
                 text=icone_aba,
                 variable=var_aba,
-                style="Alternar.Toolbutton",
-                width=3,
+                style="Ferramenta.Toolbutton",
+                width=2,
                 command=lambda c=chave_aba: self.alternar_aba_lateral(c),
             )
-            bt_aba.pack(pady=1)
+            bt_aba.pack(pady=2)
             tema.dica(bt_aba, dica_aba)
             self.botoes_abas_esquerda[chave_aba] = bt_aba
 
@@ -1200,11 +1271,20 @@ class Aplicativo:
             "⌨ Atalhos": (self._aba_atalhos, False, "⌨ Atalhos"),
         }
 
-        # Cabeçalho compacto da aba fixada na lateral (com botão 📌 Janela para desafixar e ✕ para fechar)
-        cab = tk.Frame(direita, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=8, pady=5)
+        # Cabeçalho compacto da aba fixada na lateral (com botão Janela para desafixar e fechar)
+        cab = tk.Frame(direita, bg=tema.CABECALHO, highlightthickness=0, padx=4, pady=3)
         cab.pack(side="top", fill="x")
         self.cabecalho_aba_lateral = cab
-        self.rotulo_aba_lateral = tk.Label(cab, text="⊞ Layouts", bg=tema.CABECALHO, fg=tema.TEXTO, font=tema.FONTE_FORTE)
+        self._lateral_conteudo_aberto = bool(self.arranjo.get("lateral_conteudo_aberto", True))
+        self.bt_recolher_lateral = tk.Label(
+            cab, text="▾" if self._lateral_conteudo_aberto else "▸",
+            bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_ICONE, cursor="hand2",
+        )
+        self.bt_recolher_lateral.pack(side="left", padx=(2, 4))
+        self.bt_recolher_lateral.bind("<Button-1>", lambda _e: self._alternar_conteudo_lateral())
+        self.rotulo_aba_lateral = tk.Label(
+            cab, text="⊞ Layouts", bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA,
+        )
         self.rotulo_aba_lateral.pack(side="left")
 
         bt_fechar = self._botao(
@@ -1227,12 +1307,24 @@ class Aplicativo:
         bt_desafixar.pack(side="right", padx=2)
 
         self.container_abas_lateral = ttk.Frame(direita, padding=2)
-        self.container_abas_lateral.pack(side="top", fill="both", expand=True)
+        if self._lateral_conteudo_aberto:
+            self.container_abas_lateral.pack(side="top", fill="both", expand=True)
 
         for titulo in self._funcoes_montar_abas:
             self._criar_quadro_aba_lateral(titulo)
 
         self._exibir_aba_fixada(self.aba_fixada_ativa)
+
+    def _alternar_conteudo_lateral(self):
+        self._lateral_conteudo_aberto = not getattr(self, "_lateral_conteudo_aberto", True)
+        self.arranjo["lateral_conteudo_aberto"] = self._lateral_conteudo_aberto
+        if self._lateral_conteudo_aberto:
+            self.container_abas_lateral.pack(side="top", fill="both", expand=True)
+            self.bt_recolher_lateral.configure(text="▾")
+        else:
+            self.container_abas_lateral.pack_forget()
+            self.bt_recolher_lateral.configure(text="▸")
+        self.agendar("gravar_arranjo", 400, self.gravar_arranjo)
 
     def _criar_quadro_aba_lateral(self, titulo):
         montar_fn, rolavel, _rotulo = self._funcoes_montar_abas[titulo]
@@ -1637,7 +1729,7 @@ class Aplicativo:
                     "Girar foto 90° no sentido anti-horário", "Icone.TButton", width=3).pack(side="right", padx=1)
 
         self.canvas_enquadramento = tk.Canvas(
-            enq, bg="#18181b", highlightthickness=1, highlightbackground=tema.BORDA, height=104, cursor="fleur"
+            enq, bg="#262626", highlightthickness=1, highlightbackground=tema.BORDA, height=104, cursor="fleur"
         )
         self.canvas_enquadramento.pack(fill="both", expand=True, pady=(0, 4))
         self.canvas_enquadramento.bind("<ButtonPress-1>", self._enquadramento_inicio)
@@ -5840,8 +5932,8 @@ class Aplicativo:
                 f_pag = int(vars_num["fotos_por_pagina"].get())
                 max_pag = int(vars_num["max_fotos_pagina"].get())
                 lam_des = int(vars_num["laminas_desejadas"].get())
-                _m = float(vars_num["margem_mm"].get())
-                _e = float(vars_num["espacamento_mm"].get())
+                float(vars_num["margem_mm"].get())
+                float(vars_num["espacamento_mm"].get())
             except (tk.TclError, ValueError):
                 messagebox.showwarning("Diagramação", "Confira os valores numéricos informados.", parent=janela)
                 return
@@ -8403,6 +8495,7 @@ class Aplicativo:
         self._atualizar_degrade_ui()
         if self.editor and self.editor.alvo:
             self.editor.mostrar(self.editor.alvo if self._alvo_valido(self.editor.alvo) else self._alvo_padrao())
+        self._atualizar_barra_opcoes()
 
     def atualizar_lamina_atual(self, timeline=True):
         self._marcar_modificado()
@@ -8538,7 +8631,8 @@ class Aplicativo:
                 tk_para_exibir = None
 
         self.canvas.delete("all")
-        self.canvas.create_rectangle(ox + 6, oy + 8, ox + dw + 6, oy + dh + 8, fill="#0d0d0f", outline="")
+        for dx, dy, cor in ((10, 12, "#1a1a1a"), (7, 9, "#222222"), (4, 5, "#2a2a2a")):
+            self.canvas.create_rectangle(ox + dx, oy + dy, ox + dw + dx, oy + dh + dy, fill=cor, outline="")
         if tk_para_exibir is not None:
             self.canvas.create_image(ox, oy, image=tk_para_exibir, anchor="nw", tags="img")
         else:
@@ -9215,6 +9309,7 @@ class Aplicativo:
                 self._geo = self._geometria()
                 dw_final, dh_final = self._geo[:2]
                 self.agendar("zoom_render", 60, lambda: self._pedir_render(dw_final, dh_final))
+                self._atualizar_barra_opcoes()
 
         self.agendar("zoom_animacao", 1, animar)
 
@@ -9646,6 +9741,7 @@ class Aplicativo:
         self.canvas.configure(cursor="")
         self._desenhar_espacos()
         self._atualizar_rotulo_lamina()
+        self._atualizar_barra_opcoes()
 
     def _mm(self):
         return lamina_mm(self.produto)
@@ -10816,7 +10912,6 @@ class Aplicativo:
             self.registrar("Selecione um ou mais espaços na lâmina.")
             return
         lw, lh = self._mm()
-        i = alvo[1] if alvo[0] == "espaco" else None
         lamina = self._lamina()
         e = self._item_layout(alvo, lamina)
         pagina = self._pagina_do_espaco(e)

@@ -24,7 +24,6 @@ from composicao import (
     AJUSTES_FUNDO_PADRAO,
     eh_fundo_gerado,
     extrair_paleta_fotos,
-    gerar_galeria_fundos_procedurais,
     renderizar_fundo_gerado,
 )
 

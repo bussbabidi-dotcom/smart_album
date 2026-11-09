@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops
 
-from comum import cor_rgb, mm_para_px
+from comum import cor_rgb
 from composicao import (
     aplicar_moldura,
     compor_fundo_completo,

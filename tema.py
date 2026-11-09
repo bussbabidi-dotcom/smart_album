@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tema escuro inspirado no Adobe Photoshop CC (grafite #181818 / #252526 com seletor de cores HSB/RGB/Hex e conta-gotas de tela)."""
+"""Tema escuro inspirado no Adobe Photoshop CC (#282828 lâmina, #323232 painéis, #378ef0 seleção)."""
 
 import colorsys
 import ctypes
@@ -14,31 +14,31 @@ try:
 except Exception:
     ImageGrab = None
 
-FUNDO = "#181818"
-PAINEL = "#252526"
-PAINEL_2 = "#323233"
-PAINEL_3 = "#3e3e42"
-CABECALHO = "#1e1e1e"
-BORDA = "#3c3c3c"
-BORDA_CLARA = "#505054"
-TEXTO = "#e6e6e6"
-TEXTO_FRACO = "#969696"
-DESTAQUE = "#0d99ff"
-DESTAQUE_ESCURO = "#007acc"
+FUNDO = "#282828"
+PAINEL = "#323232"
+PAINEL_2 = "#3a3a3a"
+PAINEL_3 = "#454545"
+CABECALHO = "#3c3c3c"
+BORDA = "#1e1e1e"
+BORDA_CLARA = "#505050"
+TEXTO = "#d6d6d6"
+TEXTO_FRACO = "#9a9a9a"
+DESTAQUE = "#378ef0"
+DESTAQUE_ESCURO = "#2a6fc4"
 MULTI_SEL = "#8b5cf6"
 MULTI_SEL_ESCURO = "#4c1d95"
 VERDE = "#4cc38a"
 ALERTA = "#e0a040"
 ERRO = "#e05555"
 
-FONTE = ("Segoe UI", 9)
+FONTE = ("Segoe UI", 8)
 FONTE_NORMAL = FONTE
-FONTE_FORTE = ("Segoe UI Semibold", 9)
-FONTE_TITULO = ("Segoe UI Semibold", 10)
-FONTE_CABECALHO = ("Segoe UI Semibold", 11)
+FONTE_FORTE = ("Segoe UI Semibold", 8)
+FONTE_TITULO = ("Segoe UI Semibold", 9)
+FONTE_CABECALHO = ("Segoe UI Semibold", 9)
 FONTE_PEQUENA = ("Segoe UI", 8)
-FONTE_MONO = ("Consolas", 9)
-FONTE_ICONE = ("Segoe UI Symbol", 10)
+FONTE_MONO = ("Consolas", 8)
+FONTE_ICONE = ("Segoe UI Symbol", 9)
 
 
 def configurar(root):
@@ -76,41 +76,51 @@ def configurar(root):
     estilo.configure("Secao.TLabel", foreground=DESTAQUE, font=FONTE_FORTE)
     estilo.configure("Logo.TLabel", font=("Segoe UI Black", 12), foreground=DESTAQUE)
 
-    estilo.configure("TButton", background=PAINEL_2, foreground=TEXTO, borderwidth=1, bordercolor=BORDA,
-                     padding=(9, 4), relief="flat")
-    estilo.map("TButton", background=[("pressed", DESTAQUE_ESCURO), ("active", PAINEL_3), ("disabled", PAINEL)],
-               foreground=[("pressed", "#ffffff"), ("disabled", TEXTO_FRACO)],
-               bordercolor=[("active", BORDA_CLARA), ("pressed", DESTAQUE)])
+    estilo.configure("TButton", background=PAINEL_2, foreground=TEXTO, borderwidth=0, bordercolor=BORDA,
+                     padding=(7, 3), relief="flat")
+    estilo.map("TButton", background=[("pressed", PAINEL), ("active", PAINEL_3), ("disabled", PAINEL)],
+               foreground=[("pressed", TEXTO), ("disabled", TEXTO_FRACO)])
 
     estilo.configure("Primario.TButton", background=DESTAQUE, foreground="#ffffff", font=FONTE_FORTE,
-                     borderwidth=0, padding=(10, 5))
-    estilo.map("Primario.TButton", background=[("pressed", DESTAQUE_ESCURO), ("active", "#33adff"),
+                     borderwidth=0, padding=(8, 4))
+    estilo.map("Primario.TButton", background=[("pressed", DESTAQUE_ESCURO), ("active", "#5aa3f5"),
                                                ("disabled", PAINEL_3)])
 
-    estilo.configure("Icone.TButton", padding=(6, 4), font=FONTE_ICONE, anchor="center", width=0)
-    estilo.configure("Compacto.TButton", padding=(7, 3), width=0)
-    estilo.configure("Mini.TButton", padding=(6, 3), anchor="center", font=FONTE_ICONE, width=0)
+    estilo.configure("Icone.TButton", padding=(4, 2), font=FONTE_ICONE, anchor="center", width=0)
+    estilo.configure("Compacto.TButton", padding=(6, 2), width=0)
+    estilo.configure("Mini.TButton", padding=(4, 2), anchor="center", font=FONTE_ICONE, width=0)
     estilo.configure("PrimarioCompacto.TButton", background=DESTAQUE, foreground="#ffffff", font=FONTE_FORTE,
                      borderwidth=0, padding=(8, 4), width=0)
     estilo.map("PrimarioCompacto.TButton", background=[("pressed", DESTAQUE_ESCURO), ("active", "#33adff"),
                                                        ("disabled", PAINEL_3)])
 
-    estilo.configure("Compacto.TMenubutton", background=PAINEL_2, foreground=TEXTO, borderwidth=1, bordercolor=BORDA,
-                     padding=(7, 3), relief="flat", arrowcolor=TEXTO_FRACO, width=0)
+    estilo.configure("Compacto.TMenubutton", background=PAINEL_2, foreground=TEXTO, borderwidth=0, bordercolor=BORDA,
+                     padding=(6, 2), relief="flat", arrowcolor=TEXTO_FRACO, width=0)
     estilo.map("Compacto.TMenubutton", background=[("active", PAINEL_3)])
     estilo.configure("Compacto.TCheckbutton", padding=(4, 2))
     estilo.configure("PrimarioCompacto.TMenubutton", background=DESTAQUE, foreground="#ffffff", font=FONTE_FORTE,
                      arrowcolor="#ffffff", borderwidth=0, relief="flat", padding=(8, 3), width=0)
     estilo.map("PrimarioCompacto.TMenubutton", background=[("active", "#33adff")])
 
-    estilo.configure("Alternar.Toolbutton", background=PAINEL_2, foreground=TEXTO, borderwidth=1, bordercolor=BORDA,
-                     padding=(8, 4), relief="flat", anchor="center", width=0)
-    estilo.map("Alternar.Toolbutton", background=[("selected", DESTAQUE), ("active", PAINEL_3)],
-               foreground=[("selected", "#ffffff")],
-               bordercolor=[("selected", DESTAQUE)])
+    estilo.configure("Alternar.Toolbutton", background=PAINEL, foreground=TEXTO, borderwidth=0, bordercolor=BORDA,
+                     padding=(4, 2), relief="flat", anchor="center", width=0)
+    estilo.map("Alternar.Toolbutton", background=[("selected", DESTAQUE_ESCURO), ("active", PAINEL_3)],
+               foreground=[("selected", "#ffffff")])
 
-    estilo.configure("TMenubutton", background=PAINEL_2, foreground=TEXTO, borderwidth=1, bordercolor=BORDA,
-                     padding=(8, 4), relief="flat", arrowcolor=TEXTO_FRACO)
+    estilo.configure("Ferramenta.Toolbutton", background=PAINEL, foreground=TEXTO, borderwidth=0,
+                     padding=(2, 2), relief="flat", anchor="center", width=2)
+    estilo.map("Ferramenta.Toolbutton", background=[("selected", DESTAQUE_ESCURO), ("active", PAINEL_3)],
+               foreground=[("selected", "#ffffff")])
+
+    estilo.configure("Ferramenta.TButton", background=PAINEL, foreground=TEXTO, borderwidth=0,
+                     padding=(2, 2), font=FONTE_ICONE, anchor="center", width=2)
+    estilo.map("Ferramenta.TButton", background=[("active", PAINEL_3)])
+
+    estilo.configure("BarraOpcoes.TFrame", background=CABECALHO)
+    estilo.configure("BarraOpcoes.TLabel", background=CABECALHO, foreground=TEXTO_FRACO, font=FONTE_PEQUENA)
+
+    estilo.configure("TMenubutton", background=PAINEL_2, foreground=TEXTO, borderwidth=0, bordercolor=BORDA,
+                     padding=(6, 2), relief="flat", arrowcolor=TEXTO_FRACO)
     estilo.map("TMenubutton", background=[("active", PAINEL_3)])
     estilo.configure("Primario.TMenubutton", background=DESTAQUE, foreground="#ffffff", font=FONTE_FORTE,
                      arrowcolor="#ffffff")
@@ -127,26 +137,29 @@ def configurar(root):
     estilo.map("Filtro.TRadiobutton", background=[("selected", DESTAQUE_ESCURO), ("active", PAINEL_3)],
                foreground=[("selected", "#ffffff")])
 
-    estilo.configure("TEntry", fieldbackground=FUNDO, foreground=TEXTO, borderwidth=1, bordercolor=BORDA)
-    estilo.configure("TSpinbox", fieldbackground=FUNDO, foreground=TEXTO, arrowcolor=TEXTO_FRACO, background=PAINEL_2)
-    estilo.configure("TCombobox", fieldbackground=FUNDO, foreground=TEXTO, arrowcolor=TEXTO_FRACO, background=PAINEL_2)
+    estilo.configure("TEntry", fieldbackground="#262626", foreground=TEXTO, borderwidth=1, bordercolor=BORDA)
+    estilo.configure("TSpinbox", fieldbackground="#262626", foreground=TEXTO, arrowcolor=TEXTO_FRACO, background=PAINEL_2)
+    estilo.configure("TCombobox", fieldbackground="#262626", foreground=TEXTO, arrowcolor=TEXTO_FRACO, background=PAINEL_2)
     estilo.map("TCombobox", fieldbackground=[("readonly", FUNDO)], foreground=[("readonly", TEXTO)],
                selectbackground=[("readonly", FUNDO)], selectforeground=[("readonly", TEXTO)])
 
-    estilo.configure("TNotebook", background=PAINEL, borderwidth=0, tabmargins=(2, 2, 2, 0))
-    estilo.configure("TNotebook.Tab", background=FUNDO, foreground=TEXTO_FRACO, padding=(10, 4), borderwidth=0)
+    estilo.configure("TNotebook", background=PAINEL, borderwidth=0, tabmargins=(0, 0, 0, 0))
+    estilo.configure("TNotebook.Tab", background=CABECALHO, foreground=TEXTO_FRACO, padding=(8, 3), borderwidth=0)
     estilo.map("TNotebook.Tab", background=[("selected", PAINEL)], foreground=[("selected", TEXTO)])
 
-    estilo.configure("TLabelframe", background=PAINEL, bordercolor=BORDA, borderwidth=1, relief="solid")
-    estilo.configure("TLabelframe.Label", background=PAINEL, foreground=DESTAQUE, font=FONTE_FORTE)
+    estilo.configure("TLabelframe", background=PAINEL, bordercolor=BORDA, borderwidth=1, relief="flat")
+    estilo.configure("TLabelframe.Label", background=PAINEL, foreground=TEXTO_FRACO, font=FONTE_PEQUENA)
+
+    estilo.configure("Grupo.TLabelframe", background=PAINEL, bordercolor=BORDA, borderwidth=1, relief="flat")
+    estilo.configure("Grupo.TLabelframe.Label", background=PAINEL, foreground=TEXTO_FRACO, font=FONTE_PEQUENA)
 
     estilo.configure("Horizontal.TProgressbar", background=DESTAQUE, troughcolor=FUNDO, borderwidth=0,
                      lightcolor=DESTAQUE, darkcolor=DESTAQUE)
     estilo.configure("Horizontal.TScale", background=PAINEL, troughcolor=FUNDO)
     estilo.configure("TScrollbar", background=PAINEL_2, troughcolor=FUNDO, arrowcolor=TEXTO_FRACO, borderwidth=0)
     estilo.map("TScrollbar", background=[("active", PAINEL_3)])
-    estilo.configure("TPanedwindow", background=FUNDO)
-    estilo.configure("Sash", sashthickness=3)
+    estilo.configure("TPanedwindow", background=BORDA)
+    estilo.configure("Sash", sashthickness=2, sashrelief="flat", background=BORDA)
     return estilo
 
 
@@ -409,9 +422,9 @@ class Dica:
         self.janela = tk.Toplevel(self.widget)
         self.janela.overrideredirect(True)
         self.janela.attributes("-topmost", True)
-        borda = tk.Frame(self.janela, bg="#525257", padx=1, pady=1)
+        borda = tk.Frame(self.janela, bg=BORDA_CLARA, padx=1, pady=1)
         borda.pack()
-        tk.Label(borda, text=self.texto, bg="#181818", fg="#f0f0f0", padx=8, pady=4, font=FONTE,
+        tk.Label(borda, text=self.texto, bg=PAINEL, fg=TEXTO, padx=8, pady=3, font=FONTE,
                  justify="left").pack()
         self.janela.update_idletasks()
         x = self.widget.winfo_rootx()
@@ -426,6 +439,39 @@ class Dica:
 def dica(widget, texto):
     widget._dica = Dica(widget, texto)
     return widget
+
+
+def criar_grupo_colapsavel(pai, titulo, arranjo=None, chave=None, padding=4):
+    """Grupo recolhível estilo painéis do Photoshop (▾/▸ no título)."""
+    externo = ttk.Frame(pai)
+    externo.pack(fill="x", pady=(0, 2))
+    mapa = (arranjo or {}).setdefault("secoes_recolhidas", {}) if isinstance(arranjo, dict) else {}
+    aberto = not bool(mapa.get(chave or titulo, False)) if chave or isinstance(arranjo, dict) else True
+    cab = tk.Frame(externo, bg=CABECALHO, highlightthickness=0)
+    cab.pack(fill="x")
+    seta = tk.Label(cab, text="▾" if aberto else "▸", bg=CABECALHO, fg=TEXTO_FRACO, font=FONTE_ICONE, cursor="hand2")
+    seta.pack(side="left", padx=(4, 2))
+    rotulo = tk.Label(cab, text=titulo, bg=CABECALHO, fg=TEXTO_FRACO, font=FONTE_PEQUENA, anchor="w", cursor="hand2")
+    rotulo.pack(side="left", fill="x", expand=True, pady=2)
+    corpo = ttk.Frame(externo, padding=padding)
+    if aberto:
+        corpo.pack(fill="x")
+
+    def alternar(_e=None):
+        if corpo.winfo_ismapped():
+            corpo.pack_forget()
+            seta.configure(text="▸")
+            if isinstance(mapa, dict) and (chave or titulo):
+                mapa[chave or titulo] = True
+        else:
+            corpo.pack(fill="x")
+            seta.configure(text="▾")
+            if isinstance(mapa, dict) and (chave or titulo):
+                mapa[chave or titulo] = False
+
+    for w in (seta, rotulo, cab):
+        w.bind("<Button-1>", alternar)
+    return corpo, externo
 
 
 def _hex_para_rgb(texto):
