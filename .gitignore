@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Ambiente virtual e caches de teste
+.venv/
+.pytest_cache/
+
 # Pastas e arquivos temporários / builds locais
 build/
 modelos/

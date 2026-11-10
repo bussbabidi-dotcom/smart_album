@@ -74,10 +74,9 @@ def pasta_dados():
 
 def pasta_fundos_temporarios():
     """
-    Pasta temporária persistente onde os fundos gerados pelo Diagramador Inteligente
-    (Degradê e Abstrato nos padrões Preto+Cores e Branco+Cores) são salvos como arquivos
-    de imagem reais (.png) para permitir qualquer edição, ajuste ou abertura externa.
-    Os arquivos permanecem até o usuário clicar em 'Limpar Fundos Temporários'.
+    Pasta temporária onde os fundos gerados pelo Diagramador Inteligente são salvos como
+    arquivos .png reais (prévia e abertura externa). O programa apaga a pasta ao abrir e ao
+    fechar; o projeto guarda a receita (fundo_imagem["gerado"]) e o PNG é recriado quando usado.
     """
     pasta = pasta_dados() / "fundos_temp"
     pasta.mkdir(parents=True, exist_ok=True)

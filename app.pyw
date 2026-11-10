@@ -20,12 +20,9 @@ import random
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import traceback
-import urllib.parse
-import urllib.request
 import tkinter as tk
 from collections import OrderedDict
 from pathlib import Path
@@ -53,6 +50,7 @@ from comum import (
     normalizar_caminho, pasta_dados, pasta_fundos_temporarios,
 )
 import fundos
+import janela_drive
 import janela_exportar
 import janela_tratamento
 from composicao import (
@@ -380,6 +378,8 @@ class Aplicativo:
         self._celula = (100, 96, 84)
         self._pastas_temp_drive = []
         atexit.register(self._limpar_pastas_temp_drive)
+        # Sobras de uma sessão fechada à força; síncrono para não apagar um fundo recém-gerado pela UI.
+        self._limpar_fundos_gerados()
         threading.Thread(
             target=lambda: limpar_temporarios_disco(pastas_protegidas=self._pastas_temp_drive, limpar_autosave=False),
             daemon=True,
@@ -726,7 +726,7 @@ class Aplicativo:
         for rot_txt, dica_txt, var, de, ate, passo, sufixo in (
             ("Margem externa:", "Margem externa da página em milímetros", self.margem_var, 0, 60, 1, "mm"),
             ("Espaçamento entre fotos:", "Distância entre as fotos em milímetros", self.espacamento_var, 0, 40, 0.5, "mm"),
-            ("Fotos por lâmina (padrão):", "Quantidade ideal de fotos por lâmina na diagramação", self.fotos_lamina_var, 1, 12, 1, "fotos"),
+            ("Mínimo de fotos por lâmina:", "A diagramação nunca põe menos fotos que isto numa lâmina (salvo uma pasta/grupo menor)", self.fotos_lamina_var, 1, 12, 1, "fotos"),
             ("Auto-salvar projeto:", "Intervalo de auto-salvamento local em minutos (0 = desativado)", self.auto_salvar_var, 0, 60, 1, "min"),
         ):
             linha_m = ttk.Frame(sec_med)
@@ -4230,8 +4230,16 @@ class Aplicativo:
         except Exception:
             pass
         self._limpar_pastas_temp_drive(limpar_autosave=True)
+        self._limpar_fundos_gerados()
         analise.gravar_cache()
         self.root.destroy()
+
+    def _limpar_fundos_gerados(self):
+        """Apaga os PNGs de fundos gerados; o projeto guarda a receita e eles são recriados quando usados."""
+        try:
+            limpar_fundos_temporarios()
+        except Exception:
+            pass
 
     # ==================================================================
     # Fotos: entrada
@@ -4321,11 +4329,11 @@ class Aplicativo:
                     parent=self.root,
                 ):
                     if novo or sem_laminas:
-                        self.diagramar_tudo(False)
+                        self.abrir_diagramacao(sugerir_ideal=True)
                     else:
                         self.diagramar_tudo(False, escopo="pasta", pasta_alvo=str(pasta_origem) if pasta_origem else None)
             elif novo or sem_laminas:
-                self.diagramar_tudo(False)
+                self.abrir_diagramacao(sugerir_ideal=True)
             elif self.projeto.get("laminas") and (self._cfg().get("separar_pastas", True) or tem_pasta_arrastada):
                 pastas_novas = []
                 nomes_novas = []
@@ -4384,650 +4392,8 @@ class Aplicativo:
         if pasta:
             self.adicionar_caminhos([pasta])
 
-    _HEADERS_DRIVE = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin": "https://drive.google.com",
-        "Referer": "https://drive.google.com/",
-    }
-    _CHAVES_API_DRIVE_PADRAO = (
-        "AIzaSyAWGrfCCr7albM3lmCc937gx4uIphbpeKQ",
-        "AIzaSyC1qbk75NzWBvSaDh6KnsjjA9pIrP4lYIE",
-    )
-    _chave_api_drive_ativa = None
-
-    @staticmethod
-    def _extrair_id_drive(url):
-        url = str(url or "").strip()
-        parsed = urllib.parse.urlparse(url)
-        qs = urllib.parse.parse_qs(parsed.query)
-        resourcekey = qs.get("resourcekey", [None])[0]
-        m_pasta = re.search(r"/folders/([a-zA-Z0-9_-]{10,})", url)
-        if m_pasta:
-            return "pasta", m_pasta.group(1), resourcekey
-        m_arq = re.search(r"/file/d/([a-zA-Z0-9_-]{10,})", url)
-        if m_arq:
-            return "arquivo", m_arq.group(1), resourcekey
-        if "id" in qs and qs["id"]:
-            return "pasta", qs["id"][0], resourcekey
-        if re.fullmatch(r"[a-zA-Z0-9_-]{18,}", url):
-            return "pasta", url, None
-        return None, None, None
-
-    @staticmethod
-    def _decodificar_html_drive(raw_html):
-        s = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), raw_html)
-        s = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), s)
-        return s.replace("\\/", "/")
-
-    @classmethod
-    def _obter_chaves_api_drive(cls, folder_or_file_id=None, html_ja_lido=None):
-        chaves = []
-        if cls._chave_api_drive_ativa:
-            chaves.append(cls._chave_api_drive_ativa)
-        for k in cls._CHAVES_API_DRIVE_PADRAO:
-            if k not in chaves:
-                chaves.append(k)
-        if html_ja_lido:
-            for k in re.findall(r"AIza[0-9A-Za-z_-]{35}", html_ja_lido):
-                if k not in chaves:
-                    chaves.append(k)
-        elif folder_or_file_id:
-            try:
-                url = "https://drive.google.com/drive/folders/%s?usp=sharing" % folder_or_file_id
-                req = urllib.request.Request(url, headers=cls._HEADERS_DRIVE)
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    raw = resp.read().decode("utf-8", errors="ignore")
-                for k in re.findall(r"AIza[0-9A-Za-z_-]{35}", raw):
-                    if k not in chaves:
-                        chaves.append(k)
-            except Exception:
-                pass
-        return chaves
-
-    @classmethod
-    def _requisitar_api_drive_v3(cls, caminho_api, params, resourcekey=None, chaves_candidatas=None):
-        chaves = chaves_candidatas or cls._obter_chaves_api_drive()
-        headers = dict(cls._HEADERS_DRIVE)
-        if resourcekey:
-            headers["X-Goog-Drive-Resource-Keys"] = resourcekey
-
-        for chave in chaves:
-            q_params = dict(params)
-            q_params["key"] = chave
-            url = "https://www.googleapis.com/drive/v3/%s?%s" % (
-                caminho_api.lstrip("/"),
-                urllib.parse.urlencode(q_params),
-            )
-            for tentativa in range(3):
-                try:
-                    req = urllib.request.Request(url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=25) as resp:
-                        dados = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                    cls._chave_api_drive_ativa = chave
-                    return dados
-                except urllib.error.HTTPError as e:
-                    if e.code in (429, 500, 502, 503, 504) and tentativa < 2:
-                        time.sleep(0.6 * (tentativa + 1))
-                        continue
-                    break
-                except Exception:
-                    if tentativa < 2:
-                        time.sleep(0.5 * (tentativa + 1))
-                        continue
-                    break
-        return None
-
-    @classmethod
-    def _resolver_atalho_drive(cls, file_id, resourcekey=None):
-        meta = cls._requisitar_api_drive_v3(
-            "files/%s" % file_id,
-            {
-                "fields": "id,name,mimeType,shortcutDetails(targetId,targetMimeType,targetResourceKey)",
-                "supportsAllDrives": "true",
-            },
-            resourcekey=resourcekey,
-        )
-        if isinstance(meta, dict) and meta.get("id"):
-            atalho = meta.get("shortcutDetails") or {}
-            if atalho.get("targetId"):
-                return atalho["targetId"], meta.get("name"), atalho.get("targetMimeType")
-            return meta["id"], meta.get("name"), meta.get("mimeType")
-
-        try:
-            url = "https://drive.google.com/file/d/%s/view" % file_id
-            req = urllib.request.Request(url, headers=cls._HEADERS_DRIVE)
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
-            s = cls._decodificar_html_drive(raw)
-            m = re.search(
-                r'\["([a-zA-Z0-9_-]{15,})",(?:\["[^"]*"\]|null),"([^"]+)","(image/[^"]+)"',
-                s,
-            )
-            if m:
-                return m.group(1), m.group(2), m.group(3)
-        except Exception:
-            pass
-        return file_id, None, None
-
-    @classmethod
-    def _eh_nome_ou_mime_imagem(cls, nome, mime):
-        mime_l = str(mime or "").lower()
-        ext_l = Path(str(nome or "")).suffix.lower()
-        if mime_l in (
-            "application/vnd.google-apps.folder",
-            "application/vnd.google-apps.shortcut",
-            "application/vnd.google-apps.document",
-            "application/vnd.google-apps.spreadsheet",
-            "application/vnd.google-apps.presentation",
-            "application/vnd.google-apps.form",
-            "application/pdf",
-            "video/mp4",
-            "video/quicktime",
-        ):
-            return False
-        if mime_l.startswith("video/") or mime_l.startswith("audio/"):
-            return False
-        if ext_l in EXTENSOES:
-            return True
-        if mime_l.startswith("image/"):
-            return True
-        return False
-
-    @classmethod
-    def _listar_arquivos_pasta_drive(cls, folder_id, visitados=None, nivel=0, resourcekey=None):
-        if visitados is None:
-            visitados = set()
-        if folder_id in visitados or nivel > 6:
-            return [], None
-        visitados.add(folder_id)
-
-        arquivos = []
-        subpastas = []
-        ids_subpastas = set()
-        ids_atalhos = set()
-        ids_arquivos = set()
-        titulo_pasta = None
-        rk_header = "%s/%s" % (folder_id, resourcekey) if resourcekey else None
-
-        # 0. Paginação completa via Google Drive API v3 (traz 100% dos arquivos sem o limite de 50 itens da página HTML)
-        meta_pasta = cls._requisitar_api_drive_v3(
-            "files/%s" % folder_id,
-            {"fields": "id,name,mimeType", "supportsAllDrives": "true"},
-            resourcekey=rk_header,
-        )
-        if isinstance(meta_pasta, dict) and meta_pasta.get("name"):
-            titulo_pasta = meta_pasta["name"].strip()
-
-        page_token = None
-        listou_via_api = False
-        for _pagina in range(50):
-            params_lista = {
-                "q": "'%s' in parents and trashed = false" % folder_id,
-                "fields": "nextPageToken,files(id,name,mimeType,resourceKey,shortcutDetails(targetId,targetMimeType,targetResourceKey))",
-                "pageSize": "1000",
-                "orderBy": "folder,name_natural",
-                "supportsAllDrives": "true",
-                "includeItemsFromAllDrives": "true",
-            }
-            if page_token:
-                params_lista["pageToken"] = page_token
-            dados_pag = cls._requisitar_api_drive_v3("files", params_lista, resourcekey=rk_header)
-            if not isinstance(dados_pag, dict) or "files" not in dados_pag:
-                break
-            listou_via_api = True
-            for item in dados_pag.get("files") or []:
-                fid = item.get("id")
-                nome = (item.get("name") or "").strip()
-                mime = item.get("mimeType") or ""
-                if not fid:
-                    continue
-                if mime == "application/vnd.google-apps.folder":
-                    if fid != folder_id and fid not in visitados and fid not in ids_subpastas:
-                        ids_subpastas.add(fid)
-                        subpastas.append((fid, nome, item.get("resourceKey")))
-                elif mime == "application/vnd.google-apps.shortcut":
-                    atalho = item.get("shortcutDetails") or {}
-                    alvo_id = atalho.get("targetId")
-                    alvo_mime = atalho.get("targetMimeType") or ""
-                    alvo_rk = atalho.get("targetResourceKey")
-                    if not alvo_id:
-                        alvo_id, real_nome, alvo_mime = cls._resolver_atalho_drive(fid)
-                        nome = real_nome or nome
-                    if alvo_mime == "application/vnd.google-apps.folder":
-                        if alvo_id and alvo_id != folder_id and alvo_id not in visitados and alvo_id not in ids_subpastas:
-                            ids_subpastas.add(alvo_id)
-                            subpastas.append((alvo_id, nome, alvo_rk))
-                    elif alvo_id and cls._eh_nome_ou_mime_imagem(nome, alvo_mime):
-                        if alvo_id not in ids_arquivos:
-                            ids_arquivos.add(alvo_id)
-                            arquivos.append((alvo_id, nome))
-                elif cls._eh_nome_ou_mime_imagem(nome, mime):
-                    if fid not in ids_arquivos:
-                        ids_arquivos.add(fid)
-                        arquivos.append((fid, nome))
-            page_token = dados_pag.get("nextPageToken")
-            if not page_token:
-                break
-
-        # 1. Fallback HTML (_initData e embeddedfolderview) apenas se a API v3 não respondeu
-        if not listou_via_api:
-            raw_html_principal = ""
-            try:
-                url_folder = "https://drive.google.com/drive/folders/%s?usp=sharing" % folder_id
-                req = urllib.request.Request(url_folder, headers=cls._HEADERS_DRIVE)
-                with urllib.request.urlopen(req, timeout=25) as resp:
-                    raw_html_principal = resp.read().decode("utf-8", errors="ignore")
-                if not titulo_pasta:
-                    m_title = re.search(r"<title>([^<]+)</title>", raw_html_principal, re.I)
-                    if m_title:
-                        t_limpo = re.sub(r"\s*-\s*Google\s*Drive\s*$", "", m_title.group(1), flags=re.I).strip()
-                        if t_limpo and t_limpo.lower() != "google drive":
-                            titulo_pasta = t_limpo
-
-                # Se achou uma nova chave AIza no HTML, tenta imediatamente a API paginada com ela
-                novas_chaves = cls._obter_chaves_api_drive(html_ja_lido=raw_html_principal)
-                dados_retry = cls._requisitar_api_drive_v3(
-                    "files",
-                    {
-                        "q": "'%s' in parents and trashed = false" % folder_id,
-                        "fields": "nextPageToken,files(id,name,mimeType,resourceKey,shortcutDetails(targetId,targetMimeType,targetResourceKey))",
-                        "pageSize": "1000",
-                        "orderBy": "folder,name_natural",
-                        "supportsAllDrives": "true",
-                        "includeItemsFromAllDrives": "true",
-                    },
-                    resourcekey=rk_header,
-                    chaves_candidatas=novas_chaves,
-                )
-                if isinstance(dados_retry, dict) and "files" in dados_retry:
-                    visitados.discard(folder_id)
-                    return cls._listar_arquivos_pasta_drive(folder_id, visitados, nivel, resourcekey)
-
-                s = cls._decodificar_html_drive(raw_html_principal)
-                for fid, nome, mime in re.findall(
-                    r'\["([a-zA-Z0-9_-]{15,})",(?:\["[^"]*"\]|null),"([^"]+)","([^"]+)"',
-                    s,
-                ):
-                    if mime == "application/vnd.google-apps.folder":
-                        if fid != folder_id and fid not in visitados and fid not in ids_subpastas:
-                            ids_subpastas.add(fid)
-                            subpastas.append((fid, nome, None))
-                    elif mime == "application/vnd.google-apps.shortcut":
-                        ids_atalhos.add(fid)
-                    elif cls._eh_nome_ou_mime_imagem(nome, mime):
-                        if fid not in ids_arquivos:
-                            ids_arquivos.add(fid)
-                            arquivos.append((fid, nome))
-            except Exception:
-                pass
-
-            try:
-                url_lista = "https://drive.google.com/embeddedfolderview?id=%s#list" % folder_id
-                req_emb = urllib.request.Request(url_lista, headers=cls._HEADERS_DRIVE)
-                with urllib.request.urlopen(req_emb, timeout=25) as resp_emb:
-                    html_emb = resp_emb.read().decode("utf-8", errors="ignore")
-                if not titulo_pasta:
-                    m_t2 = re.search(r"<title>([^<]+)</title>", html_emb, re.I)
-                    if m_t2 and m_t2.group(1).strip():
-                        titulo_pasta = m_t2.group(1).strip()
-
-                padrao_entry = re.compile(
-                    r'id="entry-([a-zA-Z0-9_-]{10,})".*?<a\s+href="([^"]+)".*?class="flip-entry-title">([^<]+)<',
-                    re.S,
-                )
-                for m in padrao_entry.finditer(html_emb):
-                    eid, href, titulo = m.group(1), m.group(2), m.group(3).strip()
-                    bloco = m.group(0)
-                    if "/folders/" in href or "drive-sprite-folder" in bloco:
-                        if eid != folder_id and eid not in visitados and eid not in ids_subpastas:
-                            ids_subpastas.add(eid)
-                            subpastas.append((eid, titulo, None))
-                    elif "vnd.google-apps.shortcut" in bloco:
-                        if eid not in ids_atalhos:
-                            ids_atalhos.add(eid)
-                            real_id, real_nome, real_mime = cls._resolver_atalho_drive(eid)
-                            if real_id and real_id not in ids_arquivos and cls._eh_nome_ou_mime_imagem(real_nome or titulo, real_mime or "image/jpeg"):
-                                ids_arquivos.add(real_id)
-                                arquivos.append((real_id, real_nome or titulo))
-                    elif cls._eh_nome_ou_mime_imagem(titulo, ""):
-                        if eid not in ids_arquivos and eid not in ids_atalhos:
-                            ids_arquivos.add(eid)
-                            arquivos.append((eid, titulo))
-            except Exception:
-                pass
-
-        # 2. Percorre recursivamente todas as subpastas encontradas (ex: "Álbum 20x20" dentro da pasta principal)
-        for sub_item in subpastas:
-            sub_id, sub_nome = sub_item[0], sub_item[1]
-            sub_rk = sub_item[2] if len(sub_item) > 2 else None
-            sub_arqs, _ = cls._listar_arquivos_pasta_drive(sub_id, visitados, nivel + 1, sub_rk)
-            if sub_arqs and len(subpastas) == 1 and not arquivos and sub_nome:
-                titulo_pasta = sub_nome
-            for fid, nome in sub_arqs:
-                if fid not in ids_arquivos:
-                    ids_arquivos.add(fid)
-                    arquivos.append((fid, nome))
-
-        return arquivos, titulo_pasta
-
-    @classmethod
-    def _eh_conteudo_imagem_valido(cls, dados):
-        if not dados or len(dados) < 256:
-            return False
-        # Verifica assinaturas binárias reais (Magic Bytes) para nunca aceitar JSON de erro 403/429, texto ou página HTML de cota do Google
-        if dados[:3] == b"\xff\xd8\xff":  # JPEG
-            return True
-        if dados[:8] == b"\x89PNG\r\n\x1a\n":  # PNG
-            return True
-        if dados[:4] == b"RIFF" and dados[8:12] == b"WEBP":  # WebP
-            return True
-        if dados[:4] in (b"II*\x00", b"MM\x00*"):  # TIFF
-            return True
-        if dados[:2] == b"BM":  # BMP
-            return True
-        if dados[:6] in (b"GIF87a", b"GIF89a"):  # GIF
-            return True
-        cabecalho = dados[:512].lstrip().lower()
-        if (
-            cabecalho.startswith(b"<!doctype")
-            or cabecalho.startswith(b"<html")
-            or cabecalho.startswith(b"<head")
-            or cabecalho.startswith(b"{")
-            or cabecalho.startswith(b"[")
-        ):
-            return False
-        return False
-
-    @classmethod
-    def _baixar_item_drive(cls, file_id, destino_arq):
-        chaves = cls._obter_chaves_api_drive()
-        urls_tentativa = []
-        for ch in chaves[:2]:
-            urls_tentativa.append(
-                "https://www.googleapis.com/drive/v3/files/%s?alt=media&supportsAllDrives=true&key=%s"
-                % (file_id, ch)
-            )
-        urls_tentativa.extend([
-            "https://lh3.googleusercontent.com/d/%s=s0" % file_id,
-            "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t" % file_id,
-            "https://drive.google.com/uc?export=download&id=%s" % file_id,
-            "https://drive.google.com/thumbnail?id=%s&sz=w4096" % file_id,
-        ])
-
-        conteudo = None
-        for rodada in range(3):
-            for url_dl in urls_tentativa:
-                try:
-                    req = urllib.request.Request(url_dl, headers=cls._HEADERS_DRIVE)
-                    with urllib.request.urlopen(req, timeout=35) as resp:
-                        dados = resp.read()
-                    if not cls._eh_conteudo_imagem_valido(dados):
-                        # Verifica se é página de confirmação do Google Drive
-                        m_conf = re.search(rb"confirm=([0-9A-Za-z_-]+)", dados)
-                        m_uuid = re.search(rb'name="uuid"\s+value="([^"]+)"', dados)
-                        if m_uuid:
-                            uuid_val = m_uuid.group(1).decode("utf-8", errors="ignore")
-                            url_conf = (
-                                "https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t&uuid=%s"
-                                % (file_id, uuid_val)
-                            )
-                            req2 = urllib.request.Request(url_conf, headers=cls._HEADERS_DRIVE)
-                            with urllib.request.urlopen(req2, timeout=35) as resp2:
-                                dados = resp2.read()
-                        elif m_conf:
-                            token = m_conf.group(1).decode("utf-8", errors="ignore")
-                            url_conf = "https://drive.google.com/uc?export=download&id=%s&confirm=%s" % (file_id, token)
-                            req2 = urllib.request.Request(url_conf, headers=cls._HEADERS_DRIVE)
-                            with urllib.request.urlopen(req2, timeout=35) as resp2:
-                                dados = resp2.read()
-                    if cls._eh_conteudo_imagem_valido(dados):
-                        conteudo = dados
-                        break
-                except urllib.error.HTTPError as e:
-                    if e.code in (429, 500, 502, 503, 504):
-                        time.sleep(0.4 * (rodada + 1))
-                    continue
-                except Exception:
-                    continue
-            if conteudo:
-                break
-            time.sleep(0.7 * (rodada + 1))
-
-        if not conteudo:
-            return False
-
-        with open(destino_arq, "wb") as f:
-            f.write(conteudo)
-        return True
-
     def importar_link_drive(self):
-        janela = tk.Toplevel(self.root)
-        janela.title("Importar Fotos do Google Drive")
-        janela.configure(bg=tema.PAINEL)
-        janela.transient(self.root)
-
-        tema.criar_cabecalho_janela(
-            janela,
-            "Importar Fotos ou Pastas do Google Drive",
-            "Baixa todas as fotos do link em pasta temporária com limpeza automática ao fechar",
-            icone="☁",
-        )
-
-        rodape = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=8)
-        rodape.pack(side="bottom", fill="x")
-
-        quadro = ttk.Frame(janela, padding=14)
-        quadro.pack(fill="both", expand=True)
-        lbl_t = ttk.Label(quadro, text="Cole o link público da pasta ou foto do Google Drive:", style="Titulo.TLabel")
-        lbl_t.pack(anchor="w")
-        lbl_sub = ttk.Label(
-            quadro,
-            text="As fotos serão baixadas em uma pasta temporária e apagadas ao fechar o programa ou atingir o limite de memória.",
-            style="Fraco.TLabel",
-            justify="left",
-        )
-        lbl_sub.pack(anchor="w", pady=(2, 8))
-        quadro.bind("<Configure>", lambda e: lbl_sub.configure(wraplength=max(320, e.width - 28)), add="+")
-
-        linha = ttk.Frame(quadro)
-        linha.pack(fill="x", pady=(0, 6))
-        link_var = tk.StringVar()
-        try:
-            clip = self.root.clipboard_get().strip()
-            if "drive.google.com" in clip:
-                link_var.set(clip)
-        except tk.TclError:
-            pass
-
-        campo = ttk.Entry(linha, textvariable=link_var, width=54)
-        campo.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        campo.focus_set()
-
-        def colar_clip():
-            try:
-                link_var.set(self.root.clipboard_get().strip())
-            except tk.TclError:
-                pass
-
-        ttk.Button(linha, text="Colar", command=colar_clip).pack(side="right")
-
-        botoes = ttk.Frame(rodape)
-        botoes.pack(fill="x")
-
-        def confirmar():
-            url = link_var.get().strip()
-            if not url:
-                return
-            try:
-                janela.grab_release()
-            except tk.TclError:
-                pass
-            janela.destroy()
-            self._executar_download_drive(url)
-
-        ttk.Button(botoes, text="Cancelar", command=janela.destroy).pack(side="right", padx=(0, 10))
-        ttk.Button(botoes, text="Baixar Fotos", style="Primario.TButton", command=confirmar).pack(side="right", padx=(0, 6))
-        janela.bind("<Return>", lambda _e: confirmar())
-        janela.bind("<Escape>", lambda _e: janela.destroy())
-        tema.configurar_janela_secundaria(
-            janela,
-            pai=self,
-            chave="janela_drive",
-            largura=600,
-            altura=230,
-            min_largura=440,
-            min_altura=200,
-        )
-        janela.grab_set()
-
-    def _executar_download_drive(self, url):
-        tipo_id, drive_id, resourcekey = self._extrair_id_drive(url)
-        if not drive_id:
-            messagebox.showwarning("Google Drive", "Link inválido. Cole um link de pasta ou arquivo do Google Drive.", parent=self.root)
-            return
-
-        pasta_base = tempfile.mkdtemp(prefix="SmartAlbum_Drive_")
-        self._pastas_temp_drive.append(pasta_base)
-        estado_destino = {"pasta": Path(pasta_base) / ("Drive_%s" % drive_id[:6]), "esperadas": 0}
-        estado_destino["pasta"].mkdir(parents=True, exist_ok=True)
-
-        def trabalho(t):
-            baixados = []
-            pasta_destino = estado_destino["pasta"]
-
-            if tipo_id == "arquivo":
-                real_id, real_nome, _real_mime = self._resolver_atalho_drive(drive_id, resourcekey=resourcekey)
-                nome_arq = re.sub(r'[<>:"/\\|?*]', "_", (real_nome or ("foto_%s.jpg" % drive_id[:8])).strip())
-                if Path(nome_arq).suffix.lower() not in EXTENSOES:
-                    nome_arq += ".jpg"
-                dest = pasta_destino / nome_arq
-                estado_destino["esperadas"] = 1
-                if self._baixar_item_drive(real_id or drive_id, dest) and dest.is_file():
-                    baixados.append(dest)
-                return baixados
-
-            # 1. Lista recursivamente TODAS as fotos (paginando todas as páginas da API v3 sem o limite de 50 fotos)
-            achados, titulo_pasta = self._listar_arquivos_pasta_drive(drive_id, resourcekey=resourcekey)
-            if titulo_pasta:
-                nome_pasta_limpo = re.sub(r'[<>:"/\\|?*]', "_", titulo_pasta).strip()
-                if nome_pasta_limpo:
-                    nova_pasta = Path(pasta_base) / nome_pasta_limpo
-                    nova_pasta.mkdir(parents=True, exist_ok=True)
-                    pasta_destino = nova_pasta
-                    estado_destino["pasta"] = nova_pasta
-
-            if achados:
-                import concurrent.futures
-
-                total = len(achados)
-                estado_destino["esperadas"] = total
-                nomes_usados = set()
-                tarefas_dl = []
-                for idx, (fid, nome_arq) in enumerate(achados, start=1):
-                    nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (nome_arq or ("foto_%03d.jpg" % idx)).strip())
-                    if Path(nome_limpo).suffix.lower() not in EXTENSOES:
-                        nome_limpo += ".jpg"
-                    base_stem = Path(nome_limpo).stem
-                    ext_s = Path(nome_limpo).suffix
-                    cand = nome_limpo
-                    contador_dup = 2
-                    while cand.lower() in nomes_usados:
-                        cand = "%s_%d%s" % (base_stem, contador_dup, ext_s)
-                        contador_dup += 1
-                    nomes_usados.add(cand.lower())
-                    tarefas_dl.append((fid, pasta_destino / cand))
-
-                concluidos = 0
-                faltaram = []
-                # Usa 4 workers paralelos para evitar bloqueio de taxa (HTTP 429) do Google Drive
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                    futuros = {
-                        pool.submit(self._baixar_item_drive, fid, dest): (fid, dest)
-                        for fid, dest in tarefas_dl
-                    }
-                    for fut in concurrent.futures.as_completed(futuros):
-                        if t.parar():
-                            break
-                        fid, dest = futuros[fut]
-                        concluidos += 1
-                        ok = False
-                        try:
-                            if fut.result() and dest.is_file() and dest.stat().st_size > 256:
-                                baixados.append(dest)
-                                ok = True
-                        except Exception:
-                            ok = False
-                        if not ok:
-                            faltaram.append((fid, dest))
-                        t.progresso(concluidos, total)
-
-                # Segunda passagem sequencial de recuperação para fotos que sofreram rate-limit momentâneo
-                if faltaram and not t.parar():
-                    time.sleep(1.0)
-                    for fid, dest in faltaram:
-                        if t.parar():
-                            break
-                        try:
-                            if self._baixar_item_drive(fid, dest) and dest.is_file() and dest.stat().st_size > 256:
-                                baixados.append(dest)
-                        except Exception:
-                            pass
-
-                if baixados:
-                    # Ordena na mesma ordem exata da listagem da pasta
-                    ordem_map = {dest: i for i, (_fid, dest) in enumerate(tarefas_dl)}
-                    baixados.sort(key=lambda p: ordem_map.get(p, 999999))
-                    return baixados
-
-            # 2. Fallback com gdown (com remaining_ok=True para não parar em 50 arquivos)
-            try:
-                import gdown
-                try:
-                    arqs = gdown.download_folder(
-                        id=drive_id,
-                        output=str(pasta_destino),
-                        quiet=True,
-                        use_cookies=False,
-                        remaining_ok=True,
-                    ) or []
-                except TypeError:
-                    arqs = gdown.download_folder(
-                        id=drive_id,
-                        output=str(pasta_destino),
-                        quiet=True,
-                        use_cookies=False,
-                    ) or []
-                baixados = [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES and Path(a).is_file()]
-            except Exception:
-                pass
-            return baixados
-
-        def fim(baixados, erro):
-            if erro or not baixados:
-                try:
-                    if pasta_base in self._pastas_temp_drive:
-                        self._pastas_temp_drive.remove(pasta_base)
-                    apagar_pasta(pasta_base, tentativas=5, pausa=0.15)
-                except Exception:
-                    pass
-                messagebox.showwarning(
-                    "Google Drive",
-                    "Não foi possível baixar fotos desse link.\nVerifique se a pasta do Google Drive está com acesso 'Qualquer pessoa com o link'.",
-                    parent=self.root,
-                )
-                return
-            esperadas = estado_destino.get("esperadas") or len(baixados)
-            self.registrar(
-                "Google Drive: %d de %d foto(s) baixada(s) na pasta temporária (auto-excluída ao fechar)." % (len(baixados), esperadas)
-            )
-            self.adicionar_caminhos([str(p) for p in baixados], perguntar_diagramar=True)
-
-        self.executar("Baixando fotos do Google Drive", trabalho, fim)
+        janela_drive.abrir(self)
 
     def colar(self):
         caminhos = entrada.caminhos_da_area_de_transferencia(self.root)
@@ -5206,7 +4572,8 @@ class Aplicativo:
     # Diagramação
     # ==================================================================
 
-    def abrir_diagramacao(self):
+    def abrir_diagramacao(self, sugerir_ideal=False):
+        """Janela de diagramação. Com sugerir_ideal (primeira diagramação), já traz o nº ideal de lâminas."""
         todas_fotos = proj.fotos_para_diagramar(self.projeto, self.info)
         if not todas_fotos:
             self.registrar("Adicione fotos antes de diagramar.")
@@ -5352,7 +4719,10 @@ class Aplicativo:
         numeros.pack(fill="x", pady=(0, 8))
 
         vars_num = {
-            "laminas_desejadas": tk.IntVar(value=int(cfg.get("laminas_desejadas", self.produto["laminas_min"]))),
+            "laminas_desejadas": tk.IntVar(value=int(
+                diagramar.laminas_ideais(len(todas_fotos), self.produto, cfg) if sugerir_ideal
+                else cfg.get("laminas_desejadas", self.produto["laminas_min"])
+            )),
             "fotos_por_pagina": tk.IntVar(value=max(1, int(round(cfg["fotos_por_lamina"] / float(paginas))))),
             "max_fotos_pagina": tk.IntVar(
                 value=max(1, min(diagramar.MAX_POR_PAGINA, int(cfg["max_fotos_lamina"]) // paginas))
@@ -5363,7 +4733,7 @@ class Aplicativo:
         }
         campos = (
             ("Lâminas desejadas", "laminas_desejadas", 1, self.produto["laminas_max"], 1),
-            ("Fotos por página (meta ideal)", "fotos_por_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
+            ("Mínimo de fotos por página", "fotos_por_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
             ("Máximo de fotos por página", "max_fotos_pagina", 1, diagramar.MAX_POR_PAGINA, 1),
             ("Margem externa de segurança (mm)", "margem_mm", 0, 60, 1),
             ("Espaçamento entre fotos (mm)", "espacamento_mm", 0, 40, 0.5),
@@ -5692,8 +5062,8 @@ class Aplicativo:
         quadro_f3.pack(fill="x", pady=(0, 6))
         auto_molduras_var = tk.BooleanVar(value=bool(cfg.get("auto_molduras", True)))
         regra_auto_molduras_var = tk.StringVar(value=str(cfg.get("regra_auto_molduras", "grades_e_margem") or "grades_e_margem"))
-        cor_auto_molduras_var = tk.StringVar(value=str(cfg.get("cor_auto_molduras", "contraste_fundo") or "contraste_fundo"))
-        estilo_auto_molduras_var = tk.StringVar(value=str(cfg.get("estilo_auto_molduras", "simples") or "simples"))
+        cor_auto_molduras_var = tk.StringVar(value=str(cfg.get("cor_auto_molduras", "cores_do_evento") or "cores_do_evento"))
+        estilo_auto_molduras_var = tk.StringVar(value=str(cfg.get("estilo_auto_molduras", "por_evento") or "por_evento"))
         espessura_auto_molduras_var = tk.DoubleVar(value=float(cfg.get("espessura_auto_molduras_mm", 0.5)))
 
         ttk.Checkbutton(
@@ -5714,9 +5084,16 @@ class Aplicativo:
         )
         _criar_combo_acabamento(
             quadro_f3,
+            "Estilo da moldura:",
+            estilo_auto_molduras_var,
+            (("por_evento", "Por evento (dinâmico: destaque, secundárias e rodízio)"),) + tuple(ESTILOS_MOLDURA),
+        )
+        _criar_combo_acabamento(
+            quadro_f3,
             "Cor da moldura:",
             cor_auto_molduras_var,
             (
+                ("cores_do_evento", "Cores do evento (com contraste garantido)"),
                 ("contraste_fundo", "Contraste automático com o fundo da página"),
                 ("contraste_automatico", "Contraste automático com o fundo da página"),
                 ("branca", "Branca clássica"),
@@ -5836,8 +5213,8 @@ class Aplicativo:
                 "intensidade_auto_degrade": str(intensidade_auto_degrade_var.get() or "suave"),
                 "auto_molduras": bool(auto_molduras_var.get()),
                 "regra_auto_molduras": str(regra_auto_molduras_var.get() or "grades_e_margem"),
-                "cor_auto_molduras": str(cor_auto_molduras_var.get() or "contraste_fundo"),
-                "estilo_auto_molduras": str(estilo_auto_molduras_var.get() or "simples"),
+                "cor_auto_molduras": str(cor_auto_molduras_var.get() or "cores_do_evento"),
+                "estilo_auto_molduras": str(estilo_auto_molduras_var.get() or "por_evento"),
                 "espessura_auto_molduras_mm": esp_mold,
             })
             return cfg_temp
@@ -5849,7 +5226,7 @@ class Aplicativo:
             prod_p = dict(self.produto)
             if esc in ("pasta", "nao_usadas"):
                 prod_p["laminas_min"] = 0
-                cfg_t["laminas_desejadas"] = max(1, int(math.ceil(len(fotos_esc) / float(max(1, cfg_t["fotos_por_lamina"])))))
+                cfg_t["laminas_desejadas"] = diagramar.laminas_ideais(len(fotos_esc), prod_p, cfg_t)
             prev = diagramar.previa_diagramacao(fotos_esc, prod_p, cfg_t)
             lbl_previa_1.configure(
                 text="Resumo: %d fotos (👤 %d ind. · 👥 %d grupo)  |  Grupos: %d  |  Pastas: %d  →  %d lâmina(s)"
@@ -5862,13 +5239,16 @@ class Aplicativo:
                     prev["laminas_estimadas"],
                 )
             )
-            detalhes = "Média de %.1f fotos/lâmina (%d lâminas com fotos" % (
-                prev["media_fotos_lamina"],
+            detalhes = "%d a %d fotos por lâmina (pedido: %d a %d) · %d lâminas com fotos" % (
+                prev.get("menor_lamina", 0),
+                prev.get("maior_lamina", 0),
+                prev.get("minimo_lamina", 0),
+                prev.get("maximo_lamina", 0),
                 prev["laminas_com_fotos"],
             )
             if prev["laminas_extras_vazias"] > 0:
                 detalhes += " + %d vazia(s)" % prev["laminas_extras_vazias"]
-            detalhes += ")."
+            detalhes += "."
             acabamentos = []
             if auto_fundos_var.get():
                 acabamentos.append("Fundo Auto")
@@ -5878,8 +5258,8 @@ class Aplicativo:
                 acabamentos.append("Moldura Auto")
             if acabamentos:
                 detalhes += " Acabamento: " + " · ".join(acabamentos) + "."
-            if prev["sobras"] > 0:
-                detalhes += " Atenção: %d foto(s) excedem o limite máximo de lâminas." % prev["sobras"]
+            for aviso in prev.get("avisos") or []:
+                detalhes += "\n⚠ " + aviso
             lbl_previa_2.configure(text=detalhes)
 
         for v in (
@@ -5912,14 +5292,7 @@ class Aplicativo:
 
         def _calcular_laminas_ideais():
             fotos_esc = _obter_fotos_escopo()
-            try:
-                f_pag = max(1, int(vars_num["fotos_por_pagina"].get()))
-            except (tk.TclError, ValueError):
-                f_pag = 2
-            por_lam = max(1, f_pag * paginas)
-            ideal = max(self.produto["laminas_min"], int(math.ceil(len(fotos_esc) / float(por_lam))))
-            ideal = min(self.produto["laminas_max"], ideal)
-            vars_num["laminas_desejadas"].set(ideal)
+            vars_num["laminas_desejadas"].set(diagramar.laminas_ideais(len(fotos_esc), self.produto, _montar_cfg_atual()))
 
         ttk.Button(
             botoes,
@@ -5940,7 +5313,7 @@ class Aplicativo:
             if max_pag < f_pag:
                 messagebox.showwarning(
                     "Diagramação",
-                    "O máximo de fotos por página deve ser igual ou maior que a quantidade desejada.",
+                    "O máximo de fotos por página deve ser igual ou maior que o mínimo.",
                     parent=janela,
                 )
                 return
@@ -7383,10 +6756,9 @@ class Aplicativo:
         cfg["_lista_fundos_pasta"] = list(getattr(self, "_fundos_lista", None) or [])
         if escopo in ("pasta", "nao_usadas"):
             produto["laminas_min"] = 0
-            cfg["laminas_desejadas"] = max(
-                1, int(math.ceil(len(fotos) / float(max(1, int(cfg.get("fotos_por_lamina", 4))))))
-            )
+            cfg["laminas_desejadas"] = diagramar.laminas_ideais(len(fotos), produto, cfg)
         modelos = self._modelos()
+        avisos = []
 
         def trabalho(t):
             removidas = []
@@ -7395,7 +6767,7 @@ class Aplicativo:
                 fotos_usadas, removidas = self._sem_repetidas(fotos, t.parar, t.progresso)
                 if fotos_usadas is None:
                     return None
-            resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, modelos, ao_progresso=t.progresso)
+            resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, modelos, ao_progresso=t.progresso, avisos=avisos)
             return resultado, removidas
 
         def fim(resultado, erro):
@@ -7452,13 +6824,10 @@ class Aplicativo:
             if removidas:
                 texto += " %s foto(s) repetida(s) ignorada(s)." % len(removidas)
             self.registrar(texto)
-            if sobras:
-                messagebox.showinfo(
-                    "Diagramar",
-                    "%s foto(s) não couberam no máximo de %s lâminas do produto."
-                    % (len(sobras), self.produto["laminas_max"]),
-                    parent=self.root,
-                )
+            for aviso in avisos:
+                self.registrar("Diagramação: " + aviso)
+            if avisos:
+                messagebox.showinfo("Diagramar", texto + "\n\n" + "\n".join("• " + a for a in avisos), parent=self.root)
             self.atualizar_tudo()
 
         self.executar("Diagramando", trabalho, fim)
@@ -7517,22 +6886,62 @@ class Aplicativo:
             return self.projeto["laminas"][indice]
         return None
 
+    def _moldura_sombra_manuais(self, espacos):
+        """A primeira moldura e a primeira sombra escolhidas à mão na lâmina (as do automático não contam)."""
+        moldura_ref = sombra_ref = None
+        for esp in espacos or []:
+            ed = esp.get("edicao") or {}
+            m_e = ed.get("moldura")
+            if (moldura_ref is None and isinstance(m_e, dict) and m_e.get("estilo") and m_e.get("estilo") != "nenhuma"
+                    and not diagramar.eh_automatico(ed, "moldura")):
+                moldura_ref = dict(m_e)
+            s_e = ed.get("sombra")
+            if (sombra_ref is None and isinstance(s_e, dict) and s_e.get("ativa", True)
+                    and not diagramar.eh_automatico(ed, "sombra")):
+                sombra_ref = dict(s_e)
+        return moldura_ref, sombra_ref
+
+    def _cfg_acabamento(self, extra=None):
+        cfg = dict(self._cfg())
+        cfg["pasta_fundos"] = self._pasta_fundos()
+        cfg["_arquivo_fundos"] = str(ARQUIVO_FUNDOS)
+        cfg["_lista_fundos_pasta"] = list(getattr(self, "_fundos_lista", None) or [])
+        cfg.update(extra or {})
+        return cfg
+
+    def _acabamento(self, laminas, forcar=(), cfg_extra=None):
+        """
+        Refaz fundo, degradê e molduras das lâminas depois de uma edição (diagramar.acabamento_lamina),
+        com o produto real e os dados das fotos (grupo, pasta, estrela, rosto) para os motores decidirem juntos.
+        """
+        alvo = []
+        for lamina in laminas or []:
+            if isinstance(lamina, dict) and all(lamina is not l for l in alvo):
+                alvo.append(lamina)
+        if not alvo:
+            return
+        cfg = self._cfg_acabamento(cfg_extra)
+        meta = {normalizar_caminho(f["caminho"]): f for f in proj.fotos_para_diagramar(self.projeto, self.info)}
+        todas = self.projeto.get("laminas", [])
+        for lamina in alvo:
+            indice = next((i for i, l in enumerate(todas) if l is lamina), 0)
+            fotos = []
+            for esp in lamina.get("espacos", []):
+                if esp.get("foto"):
+                    dados = meta.get(normalizar_caminho(esp["foto"]))
+                    fotos.append(dict(dados, caminho=esp["foto"]) if dados else {"caminho": esp["foto"]})
+            diagramar.acabamento_lamina(lamina, fotos, self.produto, cfg, indice_lamina=indice, forcar=forcar)
+
     def _sincronizar_molduras_sombra_lamina(self, lamina, moldura_ref=None, sombra_ref=None):
-        """Garante que todas as fotos na Safe Zone recebam a moldura/sombra da lâmina e fotos sangradas nas bordas não fiquem com moldura."""
+        """
+        Depois de mudar o layout: a moldura/sombra escolhida à mão vale para as fotos na Safe Zone,
+        fotos sangradas ou com degradê ficam sem moldura, e o resto é o acabamento automático.
+        """
         if not lamina or not lamina.get("espacos"):
             return
-        if moldura_ref is None:
-            for esp in lamina.get("espacos", []):
-                m_e = (esp.get("edicao") or {}).get("moldura")
-                if isinstance(m_e, dict) and m_e.get("estilo") and m_e.get("estilo") != "nenhuma":
-                    moldura_ref = dict(m_e)
-                    break
-        if sombra_ref is None:
-            for esp in lamina.get("espacos", []):
-                s_e = (esp.get("edicao") or {}).get("sombra")
-                if isinstance(s_e, dict) and s_e.get("ativa", True):
-                    sombra_ref = dict(s_e)
-                    break
+        achada_m, achada_s = self._moldura_sombra_manuais(lamina.get("espacos"))
+        moldura_ref = moldura_ref or achada_m
+        sombra_ref = sombra_ref or achada_s
 
         for esp in lamina.get("espacos", []):
             if not esp.get("foto"):
@@ -7550,30 +6959,26 @@ class Aplicativo:
             )
             tem_deg = bool((ed.get("degrade") or {}).get("ativo"))
             if sangrada_borda or tem_deg:
-                ed.pop("moldura", None)
-                ed.pop("sombra", None)
+                for chave in ("moldura", "sombra", "_auto_moldura", "_auto_sombra"):
+                    ed.pop(chave, None)
             else:
-                if moldura_ref and not ed.get("moldura"):
+                if moldura_ref and (not ed.get("moldura") or diagramar.eh_automatico(ed, "moldura")):
                     ed["moldura"] = dict(moldura_ref)
-                if sombra_ref and not ed.get("sombra"):
+                    ed.pop("_auto_moldura", None)
+                if sombra_ref and (not ed.get("sombra") or diagramar.eh_automatico(ed, "sombra")):
                     ed["sombra"] = dict(sombra_ref)
+                    ed.pop("_auto_sombra", None)
 
-        if moldura_ref is None and self._cfg().get("auto_molduras", True):
-            diagramar.aplicar_molduras_automaticas(lamina, None, self.produto, self._cfg())
+        self._acabamento([lamina])
 
     def _aplicar_opcao(self, lamina, opcao):
-        """Troca o layout, mantendo giro e ajustes de cada foto (o corte é refeito) e sincronizando molduras na Safe Zone."""
+        """Troca o layout, mantendo giro e ajustes de cada foto (o corte é refeito) e refazendo o acabamento da lâmina."""
         antigas = {}
-        moldura_ref = None
-        sombra_ref = None
+        moldura_ref, sombra_ref = self._moldura_sombra_manuais(lamina.get("espacos"))
         for espaco in lamina.get("espacos", []):
             if espaco.get("foto"):
                 ed = dict(espaco.get("edicao") or {})
                 ed.pop("corte", None)
-                if moldura_ref is None and isinstance(ed.get("moldura"), dict) and ed["moldura"].get("estilo") != "nenhuma":
-                    moldura_ref = dict(ed["moldura"])
-                if sombra_ref is None and isinstance(ed.get("sombra"), dict) and ed["sombra"].get("ativa", True):
-                    sombra_ref = dict(ed["sombra"])
                 antigas[normalizar_caminho(espaco["foto"])] = ed
         novos_espacos = []
         for e in opcao["espacos"]:
@@ -7589,11 +6994,15 @@ class Aplicativo:
         lamina["espacos"] = novos_espacos
         lamina["sobreposicoes"] = list(opcao.get("sobreposicoes") or [])
         lamina["modelo"] = opcao.get("modelo")
-        self._sincronizar_molduras_sombra_lamina(lamina, moldura_ref, sombra_ref)
+        if opcao.get("tipo_layout"):
+            lamina["tipo_layout"] = opcao["tipo_layout"]
+        else:
+            lamina.pop("tipo_layout", None)
         ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lamina)
         if ch_l:
             lamina["pasta"] = ch_l
             lamina["nome_pasta"] = nm_l
+        self._sincronizar_molduras_sombra_lamina(lamina, moldura_ref, sombra_ref)
 
     def relayout(self, indice, fotos=None, marcar=True):
         lamina = self._lamina(indice)
@@ -7699,6 +7108,7 @@ class Aplicativo:
                 lamina = self._lamina()
                 if lamina is not None and not self.editar_layout.get() and lamina.get("espacos"):
                     diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+                    self._acabamento([lamina])
                 self.desenhar_lamina()
                 self.agendar("config_timeline", 180, self.desenhar_timeline)
             self.atualizar_sugestoes()
@@ -7914,6 +7324,7 @@ class Aplicativo:
             lamina["nome_pasta"] = nm_l
         if not self.editar_layout.get():
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+        self._acabamento([lamina])
         self.atual, self.espaco_sel = li, ei
         self.atualizar_lamina_atual()
         if antes is not None:
@@ -7947,6 +7358,7 @@ class Aplicativo:
         if not self.editar_layout.get() and lb is not la:
             diagramar.ajustar_espacos_lamina(la, self._mapa_proporcoes(la), self.produto, self._cfg())
             diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
+        self._acabamento([la, lb])
         self.atual, self.espaco_sel = lj, b
         self.atualizar_tudo()
         if antes is not None:
@@ -7992,6 +7404,7 @@ class Aplicativo:
                     ea["edicao"], eb["edicao"] = edb, eda
                 diagramar.ajustar_espacos_lamina(la, self._mapa_proporcoes(la), self.produto, self._cfg())
                 diagramar.ajustar_espacos_lamina(lb, self._mapa_proporcoes(lb), self.produto, self._cfg())
+                self._acabamento([la, lb])
                 self._grupo_scroll_troca = None
                 self.atual = li_dest
                 self._definir_selecao_espacos(set(validos_dest), validos_dest[0])
@@ -8062,6 +7475,7 @@ class Aplicativo:
         else:
             lamina["espacos"][ei]["foto"] = None
             lamina["espacos"][ei]["edicao"] = {}
+        self._acabamento([lamina])
         self.atual = lamina_aberta
         self.espaco_sel = None
         self.atualizar_lamina_atual()
@@ -8084,6 +7498,7 @@ class Aplicativo:
         lamina["modelo"] = None
         if lamina["espacos"]:
             diagramar.ajustar_espacos_lamina(lamina, self._mapa_proporcoes(lamina), self.produto, self._cfg())
+        self._acabamento([lamina])
         self.atual = lamina_aberta
         self.espaco_sel = None
         self.atualizar_lamina_atual()
@@ -8317,6 +7732,7 @@ class Aplicativo:
             novos = opcoes[0]["espacos"]
             lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
             lamina["modelo"] = None
+            lamina.pop("tipo_layout", None)
             self._sincronizar_molduras_sombra_lamina(lamina)
             self.espaco_sel = None
             self.atualizar_lamina_atual()
@@ -8346,6 +7762,7 @@ class Aplicativo:
             novos = [proj.copia(e) for e in opcao["espacos"]]
             lamina["espacos"] = (novos + ficam) if pagina == 0 else (ficam + novos)
             lamina["modelo"] = None
+            lamina.pop("tipo_layout", None)
             self._sincronizar_molduras_sombra_lamina(lamina)
             self.espaco_sel = None
             self.atualizar_lamina_atual()
@@ -8374,6 +7791,7 @@ class Aplicativo:
             lamina["espacos"] = novos
             lamina["sobreposicoes"] = [sobre] if sobre else []
         lamina["modelo"] = modelo["id"]
+        lamina.pop("tipo_layout", None)
         self._sincronizar_molduras_sombra_lamina(lamina)
         if sobras:
             self.registrar("%s foto(s) não couberam no modelo e voltaram para as não usadas." % len(sobras))
@@ -8818,7 +8236,7 @@ class Aplicativo:
                 text="✦ Diagramar Álbum Agora",
                 fill="#ffffff", font=tema.FONTE_FORTE,
             )
-            self._botoes_vazio.append((bx0, by0, bx1, by1, lambda: self.diagramar_tudo(False)))
+            self._botoes_vazio.append((bx0, by0, bx1, by1, lambda: self.abrir_diagramacao(sugerir_ideal=True)))
             return
 
         w_card = min(720, cw - 48)
@@ -10903,6 +10321,7 @@ class Aplicativo:
             ed.pop("corte", None)
             esp["edicao"] = ed
             diagramar.ajustar_espacos_lamina(l, self._mapa_proporcoes(l), self.produto, self._cfg())
+            self._acabamento([l])
 
         self._mudar_espacos(mudar, "Foto girada em %s° com reajuste proporcional da página." % graus)
 
@@ -13164,23 +12583,18 @@ class Aplicativo:
         if not laminas:
             return
         self.marcar_historico()
-        cfg = dict(self._cfg())
-        cfg["auto_fundos"] = True
-        cfg["estilo_fundo_gerado"] = (
-            self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo") else cfg.get("estilo_fundo_gerado", "ambos")
-        )
+        extra = {
+            "estilo_fundo_gerado": (
+                self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo")
+                else self._cfg().get("estilo_fundo_gerado", "ambos")
+            ),
+            "_seed_auto_fundos": random.randint(1, 900000),
+        }
         alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
         if apenas_atual and alvo in ("esquerda", "direita"):
-            cfg["escopo_auto_fundos"] = "pagina"
-        diagramar.aplicar_fundos_automaticos(
-            laminas,
-            self.info,
-            cfg,
-            pasta_fundos=self._pasta_fundos(),
-            arquivo_cfg_fundos=str(ARQUIVO_FUNDOS),
-            caminhos_pasta=list(getattr(self, "_fundos_lista", None) or []),
-            seed_extra=random.randint(1, 9999),
-        )
+            extra["escopo_auto_fundos"] = "pagina"
+        # Fundo novo -> degradê de fusão e cor das molduras se ajustam a ele (o que foi feito à mão fica)
+        self._acabamento(laminas, forcar=("fundos",), cfg_extra=extra)
         self.atualizar_tudo()
         self.registrar(
             "Função 1 (Fundos Automáticos) aplicada %s."
@@ -13193,10 +12607,7 @@ class Aplicativo:
         if not laminas:
             return
         self.marcar_historico()
-        cfg = dict(self._cfg())
-        cfg["auto_degrade"] = True
-        fotos_meta = proj.fotos_para_diagramar(self.projeto, self.info)
-        diagramar.aplicar_degrade_automatico(laminas, fotos_meta, cfg, self.produto)
+        self._acabamento(laminas, forcar=("degrade",))
         self._atualizar_degrade_ui()
         self.atualizar_tudo()
         self.registrar(
@@ -13210,18 +12621,23 @@ class Aplicativo:
         if not laminas:
             return
         self.marcar_historico()
-        cfg = dict(self._cfg())
-        cfg["auto_molduras"] = True
+        # Estilo e cor vêm da configuração do álbum (padrão: por evento); o painel só define a espessura.
+        extra = {}
         if hasattr(self, "moldura_espessura"):
-            cfg["espessura_auto_molduras_mm"] = float(self.moldura_espessura.get() or 0.5)
-        if hasattr(self, "moldura_estilo"):
-            cfg["estilo_auto_molduras"] = str(self.moldura_estilo.get() or "simples")
-        if hasattr(self, "moldura_cor_secundaria"):
-            cfg["cor_secundaria_moldura"] = str(self.moldura_cor_secundaria or "#111111")
+            try:
+                extra["espessura_auto_molduras_mm"] = float(self.moldura_espessura.get() or 0.5)
+            except (tk.TclError, ValueError):
+                pass
         if hasattr(self, "moldura_sinc_sombra") and self.moldura_sinc_sombra.get():
-            cfg["auto_sombra_molduras"] = True
-            cfg["cfg_sombra_molduras"] = self._ler_cfg_sombra_ui()
-        diagramar.aplicar_molduras_automaticas(laminas, self.info, cfg)
+            extra["auto_sombra_molduras"] = True
+            try:
+                sombra_painel = self._sombra_atual_dos_controles()
+            except (AttributeError, tk.TclError, ValueError):
+                sombra_painel = None
+            # Sombra ligada no painel vale para todas; senão cada evento usa a sua
+            if sombra_painel and sombra_painel.get("ativa"):
+                extra["cfg_sombra_molduras"] = sombra_painel
+        self._acabamento(laminas, forcar=("molduras",), cfg_extra=extra)
         self._atualizar_moldura_ui()
         self._atualizar_sombra_ui()
         self.atualizar_tudo()

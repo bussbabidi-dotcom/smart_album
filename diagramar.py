@@ -12,6 +12,8 @@ Regras principais (aplicadas em todas as ferramentas do programa):
      volta para a sua proporção padrão original (sem corte forçado) e as
      demais fotos da página se expandem para ocupar o espaço restante com
      margem mínima.
+   - Quadros que encostam na sangria (transpasse, meio termo, sangria total)
+     aceitam até CORTE_MAXIMO * 1.08.
 """
 
 import itertools
@@ -29,6 +31,7 @@ PESO_VAZIO = 9.5
 PESO_PEQUENA = 1.8
 PESO_DESEQUILIBRIO = 0.30
 PESO_PAGINA_VAZIA = 3.2
+PESO_PAGINA_ABAIXO_MIN = 2.5
 INTERVALO_CHEIO = 1800.0
 PESO_INTERVALO = 1.5
 
@@ -69,14 +72,45 @@ def configuracao(produto, projeto_cfg=None):
         # 3. Função Independente de Molduras Automáticas (Ativada por padrão)
         "auto_molduras": True,
         "regra_auto_molduras": "grades_com_margem",  # "grades_com_margem" | "todas_com_margem" | "secundarias"
-        "estilo_auto_molduras": "simples",  # "simples" | "dupla"
-        "cor_auto_molduras": "contraste_automatico",  # "contraste_automatico" | "branca" | "paleta"
+        "estilo_auto_molduras": "por_evento",  # "por_evento" | um estilo de composicao.ESTILOS_MOLDURA
+        "cor_auto_molduras": "cores_do_evento",  # "cores_do_evento" | "contraste_automatico" | "branca" | "paleta"
         "espessura_auto_molduras_mm": 1.2,
     }
     for chave, valor in (projeto_cfg or {}).items():
         if valor is not None:
             cfg[chave] = valor
+    # Limites por página coerentes com os da lâmina, a menos que o projeto defina os seus
+    paginas = max(1, int(produto.get("paginas_por_lamina", 1) or 1))
+    if (projeto_cfg or {}).get("max_fotos_pagina") is None:
+        cfg["max_fotos_pagina"] = max(1, int(cfg["max_fotos_lamina"]) // paginas)
+    # O mínimo por página sempre sai de "fotos por lâmina" (um único lugar para o usuário mudar)
+    cfg["min_fotos_pagina"] = max(1, int(math.ceil(int(cfg["fotos_por_lamina"]) / float(paginas))))
     return cfg
+
+
+def _limites_pagina(cfg, produto):
+    """(mínimo, máximo) de fotos numa página."""
+    paginas = max(1, int((produto or {}).get("paginas_por_lamina", 1) or 1))
+    try:
+        maximo = int(cfg.get("max_fotos_pagina") or 0)
+    except (TypeError, ValueError):
+        maximo = 0
+    if maximo <= 0:
+        maximo = max(1, int(cfg.get("max_fotos_lamina", MAX_POR_PAGINA * paginas)) // paginas)
+    try:
+        minimo = int(cfg.get("min_fotos_pagina") or 0)
+    except (TypeError, ValueError):
+        minimo = 0
+    if minimo <= 0:
+        minimo = max(1, int(math.ceil(int(cfg.get("fotos_por_lamina", 1) or 1) / float(paginas))))
+    return max(1, min(minimo, maximo)), max(1, maximo)
+
+
+def _penalidade_pagina_vazia_demais(divisao, n, minimo_pagina):
+    """Penaliza página com menos fotos que o mínimo quando a lâmina tem fotos para as duas."""
+    if len(divisao) < 2 or n < 2 * minimo_pagina:
+        return 0.0
+    return PESO_PAGINA_ABAIXO_MIN * sum(max(0, minimo_pagina - k) for k in divisao)
 
 
 def _limite_corte_cfg(cfg):
@@ -791,6 +825,9 @@ def _layouts_transpasse_central(fotos, produto, cfg):
     n = len(fotos)
     if n < 2 or n > 9 or produto.get("paginas_por_lamina", 1) < 2:
         return []
+    # A foto que atravessa ocupa uma página; as demais ficam todas na outra
+    if n - 1 > _limites_pagina(cfg, produto)[1]:
+        return []
     W, H = lamina_mm(produto)
     b = float(produto.get("sangria_mm", 3.0))
     seg = float(produto.get("seguranca_mm", 8.0))
@@ -1000,6 +1037,9 @@ def _layouts_meio_termo(fotos, produto, cfg):
     n = len(fotos)
     if n < 2 or n > 9 or produto.get("paginas_por_lamina", 1) < 2:
         return []
+    # Uma página com a foto sangrada; as demais ficam todas na outra
+    if n - 1 > _limites_pagina(cfg, produto)[1]:
+        return []
     lw, _lh = lamina_mm(produto)
     margem = float(cfg["margem_mm"])
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
@@ -1095,7 +1135,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
     lw, lh = lamina_mm(produto)
     paginas = produto.get("paginas_por_lamina", 1)
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
-    max_pagina = max(1, int(cfg.get("max_fotos_pagina", MAX_POR_PAGINA)))
+    min_pagina, max_pagina = _limites_pagina(cfg, produto)
     corte_max = _limite_corte_cfg(cfg)
     saida = []
 
@@ -1170,6 +1210,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
             continue
 
         penalidade = PESO_DESEQUILIBRIO * abs(divisao[0] - divisao[1]) if len(divisao) == 2 else 0.0
+        penalidade += _penalidade_pagina_vazia_demais(divisao, n, min_pagina)
         for combinacao in itertools.product(*[p[1] for p in por_pagina]):
             espacos = []
             for (grupo, _ops), (_c, quadros, _mod, ordem) in zip(por_pagina, combinacao):
@@ -1343,7 +1384,9 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
     espaco = float(cfg["espacamento_mm"])
     margem = float(cfg["margem_mm"])
     paginas = produto["paginas_por_lamina"]
-    max_pagina = max(1, int(cfg.get("max_fotos_pagina", MAX_POR_PAGINA)))
+    min_pagina, max_pagina = _limites_pagina(cfg, produto)
+    # Lâmina montada à mão com mais fotos que o limite: ainda precisa de pelo menos uma divisão possível
+    max_pagina = max(max_pagina, int(math.ceil(n / float(max(1, paginas)))))
     corte_max = _limite_corte_cfg(cfg)
 
     modelos_lamina = [m for m in modelos if m.get("escopo") == "lamina" and len(m["espacos"]) == n]
@@ -1429,6 +1472,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             penalidade = PESO_PAGINA_VAZIA if n > 1 else 0.12
         if len(divisao) == 2 and n > 1:
             penalidade += PESO_DESEQUILIBRIO * abs(divisao[0] - divisao[1])
+        penalidade += _penalidade_pagina_vazia_demais(divisao, n, min_pagina)
 
         for combinacao in itertools.product(*[p[2] for p in por_pagina]):
             custo = penalidade + sum(c[0] for c in combinacao)
@@ -1939,29 +1983,74 @@ def detectar_nome_evento_foto(foto, info=None, indice=0):
     ):
         return nome_g
 
+    # Só o fim dos caminhos: a pasta-raiz do fotógrafo (ex.: "D:\Estudio Fulano") não é o evento.
+    from pathlib import PureWindowsPath
+
     partes = [
         nome_g,
-        str(foto.get("pasta") or ""),
+        " ".join(PureWindowsPath(str(foto.get("pasta") or "")).parts[-2:]),
         str(foto.get("nome_pasta") or ""),
-        str(foto.get("caminho") or ""),
+        " ".join(PureWindowsPath(str(foto.get("caminho") or "")).parts[-3:]),
     ]
-    txt = " ".join(partes).lower()
-    if any(k in txt for k in ("jaleco", "cerimonia_jaleco", "cerimonia do jaleco", "cerimônia do jaleco")):
-        return "Cerimônia do Jaleco"
-    if any(k in txt for k in ("externa", "parque", "praia", "ar_livre", "jardim", "botanic", "outdoor")):
-        return "Fotos Externas"
-    if any(k in txt for k in ("baile", "gala", "valsa", "festa_formatura")):
-        return "Baile de Gala"
-    if any(k in txt for k in ("culto", "missa", "igreja")):
-        return "Culto Ecumênico"
-    if any(k in txt for k in ("ensaio", "pre_wedding", "making")):
-        return "Ensaio Fotográfico"
-    if any(k in txt for k in ("colacao 2", "colação 2", "colacao_2", "solenidade", "tribuna", "canudo")):
-        return "Colação 2"
-    if any(k in txt for k in ("colacao", "colação", "beca", "juramento")):
-        return "Colação 1"
+    return evento_por_palavras(" ".join(partes))
 
+
+# Ordem importa: "colação 2" antes de "colação".
+PALAVRAS_EVENTO = (
+    (("jaleco", "cerimonia_jaleco", "cerimonia do jaleco", "cerimônia do jaleco"), "Cerimônia do Jaleco"),
+    (("externa", "parque", "praia", "ar_livre", "jardim", "botanic", "outdoor"), "Fotos Externas"),
+    (("baile", "gala", "valsa", "festa_formatura"), "Baile de Gala"),
+    (("culto", "missa", "igreja"), "Culto Ecumênico"),
+    (("ensaio", "pre_wedding", "making"), "Ensaio Fotográfico"),
+    (("colacao 2", "colação 2", "colacao_2", "solenidade", "tribuna", "canudo"), "Colação 2"),
+    (("colacao", "colação", "beca", "juramento"), "Colação 1"),
+    (("estudio", "estúdio", "studio"), "Estúdio"),
+)
+
+# Evento -> tema de composicao.CATALOGO_TEMAS (fundo, textura e molduras).
+TEMA_DO_EVENTO = {
+    "Estúdio": "colacao_royal",
+    "Colação 1": "colacao_royal",
+    "Colação 2": "estudio_dark_bokeh",
+    "Cerimônia do Jaleco": "jaleco_fine_art",
+    "Fotos Externas": "externas_botanica",
+    "Baile de Gala": "baile_dark_luxury",
+    "Culto Ecumênico": "culto_solenidade",
+    "Ensaio Fotográfico": "ensaio_linho",
+}
+
+
+def evento_por_palavras(texto):
+    txt = str(texto or "").lower()
+    for palavras, evento in PALAVRAS_EVENTO:
+        if any(k in txt for k in palavras):
+            return evento
     return ""
+
+
+def tema_evento_das_fotos(fotos, info=None, preferido=None):
+    """
+    Tema do evento da maioria das fotos (pelo nome do grupo, da pasta ou do arquivo), ou None
+    quando menos da metade das fotos tem evento reconhecível. Em empate vence `preferido`
+    (o tema que a lâmina já tinha), para uma foto de outro evento não trocar a lâmina toda.
+    """
+    from collections import Counter
+
+    lista = [f for f in (fotos or []) if isinstance(f, dict)]
+    if not lista:
+        return None
+    votos = Counter()
+    for foto in lista:
+        nome = detectar_nome_evento_foto(foto, info)
+        tema = TEMA_DO_EVENTO.get(nome) or TEMA_DO_EVENTO.get(evento_por_palavras(nome))
+        if tema:
+            votos[tema] += 1
+    if not votos:
+        return None
+    tema, qtd = votos.most_common(1)[0]
+    if preferido and votos.get(preferido) == qtd:
+        tema = preferido
+    return tema if qtd * 2 >= len(lista) else None
 
 
 def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
@@ -2254,46 +2343,60 @@ def ordenar_e_agrupar_por_cenario(fotos, limiar=0.28):
     )
 
 
-def _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=True):
-    por_lamina = max(1, int(cfg["fotos_por_lamina"]))
-    maximo = max(1, int(cfg["max_fotos_lamina"]))
-    minimo_por_grupo = max(1, int(math.floor(por_lamina * 0.75)))
-    maximo_por_grupo = min(maximo, int(math.ceil(por_lamina * 1.25)))
-    s_fotos = int(math.ceil(n / float(por_lamina))) if n else 0
-    s_capacidade = int(math.ceil(n / float(maximo))) if n else 0
-    s = max(s_fotos, s_capacidade, destaques)
-    if respeitar_minimo_produto:
-        desejadas = int(cfg.get("laminas_desejadas", produto["laminas_min"]))
-        desejadas = max(produto["laminas_min"], min(produto["laminas_max"], desejadas))
-        if n and s_capacidade <= desejadas <= produto["laminas_max"]:
-            media_desejada = n / float(desejadas)
-            if minimo_por_grupo <= media_desejada <= maximo_por_grupo:
-                s = max(destaques, desejadas)
-    s = min(s, produto["laminas_max"])
-    return min(s, n) if n else 0
+def faixa_fotos_lamina(produto, cfg):
+    """
+    (mínimo, máximo) de fotos por lâmina. "Fotos por página" (fotos_por_lamina) é o mínimo;
+    o máximo é o menor entre max_fotos_lamina e max_fotos_pagina x páginas.
+    """
+    paginas = max(1, int(produto.get("paginas_por_lamina", 1) or 1))
+    try:
+        maximo = int(cfg.get("max_fotos_lamina") or 0)
+    except (TypeError, ValueError):
+        maximo = 0
+    try:
+        max_pagina = int(cfg.get("max_fotos_pagina") or 0)
+    except (TypeError, ValueError):
+        max_pagina = 0
+    if max_pagina > 0:
+        maximo = min(maximo, max_pagina * paginas) if maximo > 0 else max_pagina * paginas
+    maximo = max(1, maximo or MAX_POR_PAGINA * paginas)
+    try:
+        minimo = int(cfg.get("fotos_por_lamina") or 1)
+    except (TypeError, ValueError):
+        minimo = 1
+    return max(1, min(maximo, minimo)), maximo
 
 
-def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
-    """Divide um único bloco homogêneo (mesmo grupo numerado / pasta) em lâminas."""
+def laminas_ideais(n, produto, cfg):
+    """Nº de lâminas que deixa cada uma no meio da faixa mínimo-máximo (no máximo o limite do produto)."""
+    if n <= 0:
+        return 0
+    minimo, maximo = faixa_fotos_lamina(produto, cfg)
+    ideal = int(math.ceil(n / max(1.0, (minimo + maximo) / 2.0)))
+    return max(1, min(int(produto.get("laminas_max", ideal) or ideal), ideal))
+
+
+def _dividir_bloco_unico(fotos, minimo, maximo, s):
+    """
+    Divide um bloco (mesmo grupo/pasta) em `s` lâminas seguidas com entre `minimo` e `maximo` fotos,
+    em quantidades parecidas. Prefere cortar na troca de cenário ou num intervalo grande de horário
+    e evita duas fotos de destaque na mesma lâmina.
+    """
     n = len(fotos)
     if n == 0:
         return []
-    maximo = max(1, int(cfg["max_fotos_lamina"]))
-    alvo = max(1, int(cfg["fotos_por_lamina"]))
-    destaques = sum(1 for f in fotos if f.get("destaque"))
-    s = s_alvo if s_alvo is not None else _numero_laminas(n, produto, cfg, destaques, respeitar_minimo_produto=False)
-    s = max(1, min(s, n))
-    if s == 1 and n <= maximo:
-        return [fotos]
+    maximo = max(1, int(maximo))
+    s = max(1, min(int(s), n), int(math.ceil(n / float(maximo))))
+    if s == 1:
+        return [list(fotos)]
+    minimo = max(1, min(int(minimo), n // s))
+    media = n / float(s)
 
-    eh_destaque = [bool(f.get("destaque")) for f in fotos]
     bonus = [0.0] * (n + 1)
     for i in range(1, n):
         a = fotos[i - 1].get("data") or 0
         b = fotos[i].get("data") or 0
-        intervalo = abs(b - a)
-        b_val = PESO_INTERVALO * min(1.0, intervalo / INTERVALO_CHEIO)
-        # Bônus forte ao trocar de cenário visual dentro do grupo (prefere quebrar a lâmina na mudança de cenário)
+        b_val = PESO_INTERVALO * min(1.0, abs(b - a) / INTERVALO_CHEIO)
         cen_a = fotos[i - 1].get("cenario_subgrupo")
         cen_b = fotos[i].get("cenario_subgrupo")
         if cen_a is not None and cen_b is not None and cen_a != cen_b:
@@ -2301,26 +2404,23 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
         bonus[i] = b_val
 
     destaques_ate = [0] * (n + 1)
-    for i, d in enumerate(eh_destaque):
-        destaques_ate[i + 1] = destaques_ate[i] + (1 if d else 0)
+    for i, f in enumerate(fotos):
+        destaques_ate[i + 1] = destaques_ate[i] + (1 if f.get("destaque") else 0)
 
     def custo_grupo(j, i):
         tamanho = i - j
-        if tamanho > maximo or tamanho < 1:
+        if tamanho < minimo or tamanho > maximo:
             return None
-        tem_destaque = destaques_ate[i] - destaques_ate[j]
-        if tem_destaque > 1:
-            return None
-        bonus_dest = -0.45 if (tem_destaque == 1 and tamanho <= max(2, int(round(alvo)))) else 0.0
-        return 2.0 * (tamanho - alvo) ** 2 / max(1.0, alvo) - bonus[j] + bonus_dest
+        extras = max(0, destaques_ate[i] - destaques_ate[j] - 1)
+        return 3.0 * (tamanho - media) ** 2 / max(1.0, media) - bonus[j] + 4.0 * extras
 
     infinito = float("inf")
     melhor = [[infinito] * (n + 1) for _ in range(s + 1)]
     volta = [[-1] * (n + 1) for _ in range(s + 1)]
     melhor[0][0] = 0.0
     for k in range(1, s + 1):
-        for i in range(k, n + 1):
-            for j in range(max(k - 1, i - maximo), i):
+        for i in range(k * minimo, n + 1):
+            for j in range(max((k - 1) * minimo, i - maximo), i - minimo + 1):
                 if melhor[k - 1][j] == infinito:
                     continue
                 c = custo_grupo(j, i)
@@ -2331,12 +2431,18 @@ def _dividir_bloco_unico(fotos, produto, cfg, s_alvo=None):
                     melhor[k][i] = total
                     volta[k][i] = j
     if melhor[s][n] == infinito:
-        return [fotos[i:i + maximo] for i in range(0, n, maximo)]
+        base, resto = divmod(n, s)
+        grupos, inicio = [], 0
+        for k in range(s):
+            tamanho = base + (1 if k < resto else 0)
+            grupos.append(list(fotos[inicio:inicio + tamanho]))
+            inicio += tamanho
+        return grupos
     grupos = []
     i = n
     for k in range(s, 0, -1):
         j = volta[k][i]
-        grupos.append(fotos[j:i])
+        grupos.append(list(fotos[j:i]))
         i = j
     grupos.reverse()
     return grupos
@@ -2487,121 +2593,147 @@ def _blocos_pastas_e_cenarios(fotos, cfg):
     return blocos_finais, max(1, len(pastas_unicas)), qtd_cenarios
 
 
-def dividir(fotos, produto, cfg):
+def _blocos_duros(fotos, cfg):
     """
-    Grupos de fotos (um por lâmina) e as fotos que não couberam.
-    - Quando `respeitar_grupos_manuais` está ativo, respeita a sequência de grupos numerados (Grupo 1, Grupo 2...)
-      e a ordem manual das fotos dentro de cada grupo, sem nunca misturar grupos diferentes na mesma lâmina.
-    - Quando `reconhecer_cenarios` está ativo, identifica e agrupa fotos por cenário visual dentro de cada grupo.
-    - Respeita `ordem_pessoas_grupo` ('manter', 'individuais_primeiro', 'turma_primeiro') dentro de cada grupo,
-      permitindo que fotos individuais e em grupo do mesmo grupo numerado compartilhem lâminas na transição.
-    - Quando `separar_pastas` está ativo, evita misturar pastas diferentes.
-    - Distribui proporcionalmente `laminas_desejadas` entre os blocos respeitando os limites do produto.
+    Blocos que nunca se misturam: grupo numerado e, com separar_pastas, pasta. As fotos do mesmo
+    cenário continuam juntas e marcadas em cenario_subgrupo, para servirem só de ponto de corte preferido.
     """
-    maximo = max(1, int(cfg["max_fotos_lamina"]))
-    capacidade = produto["laminas_max"] * maximo
-    fotos_ordenadas = (
+    blocos, _p, _c = _blocos_pastas_e_cenarios(fotos, cfg)
+    respeitar = bool(cfg.get("respeitar_grupos_manuais", True))
+    multiplos = len({int(f.get("grupo_ordem") or 1) for f in fotos}) > 1
+    por_pasta = bool(cfg.get("separar_pastas", True)) and not (respeitar and multiplos)
+
+    def chave(bloco):
+        f = bloco[0]
+        return (
+            int(f.get("grupo_ordem") or 1) if respeitar else 0,
+            (f.get("pasta") or f.get("nome_pasta") or "") if por_pasta else "",
+        )
+
+    duros = []
+    for bloco in blocos:
+        if not bloco:
+            continue
+        if duros and chave(duros[-1]) == chave(bloco):
+            duros[-1] = duros[-1] + list(bloco)
+        else:
+            duros.append(list(bloco))
+    return duros
+
+
+def _nome_bloco(bloco):
+    f = bloco[0] if bloco else {}
+    nome = str(f.get("nome_grupo") or "")
+    if not nome or nome.startswith("Grupo "):
+        nome = str(f.get("nome_pasta") or nome or "fotos")
+    return nome
+
+
+def planejar_distribuicao(fotos, produto, cfg):
+    """
+    Divide as fotos em lâminas, nesta ordem de prioridade:
+    1. nunca passa do máximo de fotos por lâmina (e por página);
+    2. não mistura grupos numerados nem, com separar_pastas, pastas;
+    3. cada lâmina com pelo menos o mínimo ("Fotos por página"), salvo um bloco que já tem menos fotos;
+    4. o nº de lâminas desejadas, quando cabe entre o mínimo e o máximo (senão o mínimo vence, com aviso);
+    5. cortes preferidos na troca de cenário ou num intervalo de horário, com lâminas equilibradas.
+    Devolve {"grupos", "sobras", "avisos", "minimo", "maximo", "desejadas", "laminas"}.
+    """
+    minimo, maximo = faixa_fotos_lamina(produto, cfg)
+    laminas_max = max(1, int(produto["laminas_max"]))
+    ordenadas = (
         ordenar_e_agrupar_por_grupos(fotos, cfg)
         if cfg.get("respeitar_grupos_manuais", True)
         else _ordenar_bloco_por_pessoas(list(fotos), cfg.get("ordem_pessoas_grupo", "manter"))
     )
-    sobras = list(fotos_ordenadas[capacidade:])
-    fotos_validas = list(fotos_ordenadas[:capacidade])
-    if not fotos_validas:
-        return [], sobras
+    total_fotos = len(ordenadas)
+    try:
+        desejadas = int(cfg.get("laminas_desejadas") or 0)
+    except (TypeError, ValueError):
+        desejadas = 0
+    if desejadas <= 0:
+        desejadas = laminas_ideais(total_fotos, produto, cfg)
+    plano = {"grupos": [], "sobras": [], "avisos": [], "minimo": minimo, "maximo": maximo,
+             "desejadas": desejadas, "laminas": 0}
+    if not ordenadas:
+        return plano
 
-    blocos_finais, _n_pastas, _n_cenarios = _blocos_pastas_e_cenarios(fotos_validas, cfg)
-    if not blocos_finais:
-        return [], sobras
+    blocos = _blocos_duros(ordenadas, cfg)
 
-    por_lamina = max(1, int(cfg["fotos_por_lamina"]))
-    laminas_naturais_totais = max(1, int(math.ceil(len(fotos_validas) / float(por_lamina))))
-    laminas_max_prod = max(1, int(produto["laminas_max"]))
+    def faixa(bloco):
+        n = len(bloco)
+        menor = max(1, int(math.ceil(n / float(maximo))))
+        return [menor, max(menor, n // minimo)]
 
-    # Se a subdivisão por cenários dentro de um mesmo grupo gerou mais sub-blocos do que
-    # a quantidade natural/desejada de lâminas (ou que o máximo do produto), mescla sub-blocos
-    # de cenário adjacentes APENAS dentro do mesmo grupo numerado (nunca mistura grupos diferentes!)
-    desejadas_cfg = int(cfg.get("laminas_desejadas", laminas_naturais_totais))
-    desejadas_lim = max(
-        int(produto.get("laminas_min", 1)),
-        min(laminas_max_prod, max(desejadas_cfg, laminas_naturais_totais)),
-    )
-    while len(blocos_finais) > desejadas_lim:
-        melhor_par = -1
-        menor_tam = 999999
-        for idx_b in range(len(blocos_finais) - 1):
-            b1 = blocos_finais[idx_b]
-            b2 = blocos_finais[idx_b + 1]
-            g1 = int(b1[0].get("grupo_ordem") or 1) if b1 else 1
-            g2 = int(b2[0].get("grupo_ordem") or 1) if b2 else 1
-            p1 = (b1[0].get("pasta") or "") if b1 else ""
-            p2 = (b2[0].get("pasta") or "") if b2 else ""
-            if g1 == g2 and (not cfg.get("separar_pastas", True) or p1 == p2):
-                soma_t = len(b1) + len(b2)
-                if soma_t < menor_tam:
-                    menor_tam = soma_t
-                    melhor_par = idx_b
-        if melhor_par == -1:
-            break
-        blocos_finais[melhor_par] = blocos_finais[melhor_par] + blocos_finais[melhor_par + 1]
-        blocos_finais.pop(melhor_par + 1)
+    faixas = [faixa(b) for b in blocos]
 
-    # Calcula quantidades mínimas, máximas e naturais de lâminas para cada bloco
-    mins_b = []
-    maxs_b = []
-    alvos_b = []
-    for bloco in blocos_finais:
-        nb = len(bloco)
-        destaques_b = sum(1 for f in bloco if f.get("destaque"))
-        s_min = max(1, int(math.ceil(nb / float(maximo))), destaques_b)
-        s_max = max(s_min, nb)
-        s_nat = _numero_laminas(nb, produto, cfg, destaques_b, respeitar_minimo_produto=False)
-        s_nat = max(s_min, min(s_max, s_nat))
-        mins_b.append(s_min)
-        maxs_b.append(s_max)
-        alvos_b.append(s_nat)
+    # O produto tem um limite de lâminas: o que não cabe nem com o máximo por lâmina fica de fora
+    sobras = []
+    while blocos and sum(f[0] for f in faixas) > laminas_max:
+        excesso = sum(f[0] for f in faixas) - laminas_max
+        ultimo = blocos[-1]
+        manter = max(0, faixas[-1][0] - excesso) * maximo
+        sobras = ultimo[manter:] + sobras
+        if manter <= 0:
+            blocos.pop()
+            faixas.pop()
+        else:
+            blocos[-1] = ultimo[:manter]
+            faixas[-1] = faixa(blocos[-1])
+    if sobras:
+        plano["avisos"].append(
+            "%d foto(s) não couberam: o produto vai até %d lâminas com no máximo %d fotos cada."
+            % (len(sobras), laminas_max, maximo)
+        )
 
-    # Garante que a soma de alvos_b nunca ultrapasse laminas_max_prod enquanto houver margem nos blocos,
-    # evitando descartar fotos em `sobras` apenas porque muitos sub-blocos de cenário foram criados
-    while sum(alvos_b) > laminas_max_prod:
-        candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] > mins_b[i]]
+    soma_min = sum(f[0] for f in faixas)
+    soma_max = min(laminas_max, sum(f[1] for f in faixas))
+    total = max(soma_min, min(soma_max, desejadas))
+    usadas = total_fotos - len(sobras)
+    if total < desejadas:
+        if soma_max == laminas_max and sum(f[1] for f in faixas) > laminas_max:
+            plano["avisos"].append("O produto vai até %d lâminas; foram usadas %d, não %d." % (laminas_max, total, desejadas))
+        else:
+            plano["avisos"].append(
+                "Com no mínimo %d foto(s) por lâmina, as %d fotos dão %d lâmina(s), não %d."
+                % (minimo, usadas, total, desejadas)
+            )
+    elif total > desejadas:
+        motivo = " e sem misturar grupos/pastas" if len(blocos) > 1 else ""
+        plano["avisos"].append(
+            "Com no máximo %d foto(s) por lâmina%s, foram precisas %d lâmina(s), não %d."
+            % (maximo, motivo, total, desejadas)
+        )
+
+    # Reparte as lâminas entre os blocos, sempre para o bloco mais cheio por lâmina
+    alocadas = [f[0] for f in faixas]
+    while sum(alocadas) < total:
+        candidatos = [i for i in range(len(blocos)) if alocadas[i] < faixas[i][1]]
         if not candidatos:
             break
-        melhor_i = min(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
-        alvos_b[melhor_i] -= 1
+        i = max(candidatos, key=lambda k: len(blocos[k]) / float(alocadas[k]))
+        alocadas[i] += 1
 
-    # Se o usuário definiu laminas_desejadas compatível com a capacidade dos blocos,
-    # ajusta proporcionalmente os alvos por bloco para aproximar do total desejado
-    if produto.get("laminas_min", 0) > 0 or "laminas_desejadas" in cfg:
-        desejadas = int(cfg.get("laminas_desejadas", sum(alvos_b)))
-        desejadas = max(sum(mins_b), min(laminas_max_prod, sum(maxs_b), desejadas))
-        total_fotos = len(fotos_validas)
-        media_desejada = total_fotos / float(max(1, desejadas))
-        # Permite ajustar os blocos se a média por lâmina continuar razoável (entre 1 e max_fotos_lamina)
-        if 1.0 <= media_desejada <= maximo and abs(media_desejada - por_lamina) <= max(2.0, por_lamina * 0.65):
-            while sum(alvos_b) < desejadas:
-                candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] < maxs_b[i]]
-                if not candidatos:
-                    break
-                melhor_i = max(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
-                alvos_b[melhor_i] += 1
-            while sum(alvos_b) > desejadas:
-                candidatos = [i for i in range(len(blocos_finais)) if alvos_b[i] > mins_b[i]]
-                if not candidatos:
-                    break
-                melhor_i = min(candidatos, key=lambda i: len(blocos_finais[i]) / float(alvos_b[i]))
-                alvos_b[melhor_i] -= 1
+    grupos = []
+    for bloco, s in zip(blocos, alocadas):
+        grupos.extend(_dividir_bloco_unico(bloco, minimo, maximo, s))
 
-    # 3. Divide cada bloco independente em lâminas seguidas (sem misturar grupos/blocos)
-    todos_grupos = []
-    for bloco, s_alvo in zip(blocos_finais, alvos_b):
-        grupos_b = _dividir_bloco_unico(bloco, produto, cfg, s_alvo=s_alvo)
-        for g in grupos_b:
-            if len(todos_grupos) < laminas_max_prod:
-                todos_grupos.append(g)
-            else:
-                sobras.extend(g)
-    return todos_grupos, sobras
+    pequenos = [b for b in blocos if len(b) < minimo]
+    if pequenos:
+        nomes = ", ".join(_nome_bloco(b) for b in pequenos[:4]) + ("..." if len(pequenos) > 4 else "")
+        plano["avisos"].append(
+            "%d grupo(s)/pasta(s) têm menos de %d fotos e ficaram com lâmina abaixo do mínimo: %s."
+            % (len(pequenos), minimo, nomes)
+        )
+
+    plano.update(grupos=grupos, sobras=sobras, laminas=len(grupos))
+    return plano
+
+
+def dividir(fotos, produto, cfg):
+    """Grupos de fotos (um por lâmina) e as fotos que não couberam (ver planejar_distribuicao)."""
+    plano = planejar_distribuicao(fotos, produto, cfg)
+    return plano["grupos"], plano["sobras"]
 
 
 def previa_diagramacao(fotos, produto, cfg):
@@ -2628,12 +2760,15 @@ def previa_diagramacao(fotos, produto, cfg):
         }
     _blocos, qtd_pastas, qtd_cenarios = _blocos_pastas_e_cenarios(fotos_lista, cfg)
     qtd_grupos = max(1, len({int(f.get("grupo_ordem") or 1) for f in fotos_lista}))
-    grupos, sobras = dividir(fotos_lista, produto, cfg)
+    plano = planejar_distribuicao(fotos_lista, produto, cfg)
+    grupos, sobras = plano["grupos"], plano["sobras"]
     laminas_com_fotos = len(grupos)
-    desejadas = int(cfg.get("laminas_desejadas", produto.get("laminas_min", 0)))
-    alvo_min = max(int(produto.get("laminas_min", 0)), min(int(produto["laminas_max"]), desejadas))
-    laminas_totais = max(laminas_com_fotos, alvo_min)
+    avisos = list(plano["avisos"])
+    laminas_totais = max(laminas_com_fotos, int(produto.get("laminas_min", 0))) if laminas_com_fotos else 0
     extras_vazias = max(0, laminas_totais - laminas_com_fotos)
+    if extras_vazias:
+        avisos.append("O produto pede no mínimo %d lâminas: %d %s." % (
+            laminas_totais, extras_vazias, "ficaria vazia" if extras_vazias == 1 else "ficariam vazias"))
     usadas = sum(len(g) for g in grupos)
     media = usadas / float(max(1, laminas_com_fotos)) if laminas_com_fotos else 0.0
     total_rostos = 0
@@ -2664,15 +2799,24 @@ def previa_diagramacao(fotos, produto, cfg):
         "laminas_estimadas": laminas_totais,
         "sobras": len(sobras),
         "media_fotos_lamina": round(media, 1),
+        "minimo_lamina": plano["minimo"],
+        "maximo_lamina": plano["maximo"],
+        "menor_lamina": min((len(g) for g in grupos), default=0),
+        "maior_lamina": max((len(g) for g in grupos), default=0),
+        "avisos": avisos,
     }
 
 
-def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
+def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=None):
     """
     fotos: [{"caminho", "proporcao", "data", "destaque", "grupo_ordem", "ordem_manual", "pasta"}] na ordem do álbum.
-    Devolve (lâminas, sobras).
+    Devolve (lâminas, sobras). Com `avisos` (lista), recebe as mensagens da distribuição
+    (lâminas a menos ou a mais que as desejadas, blocos abaixo do mínimo, lâminas vazias).
     """
-    grupos, sobras = dividir(list(fotos), produto, cfg)
+    plano = planejar_distribuicao(list(fotos), produto, cfg)
+    grupos, sobras = plano["grupos"], plano["sobras"]
+    if avisos is not None:
+        avisos.extend(plano["avisos"])
     laminas = []
     for indice, grupo in enumerate(grupos, start=1):
         grupo_layout = grupo
@@ -2718,11 +2862,17 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
         laminas.append(lamina)
         if ao_progresso:
             ao_progresso(indice, len(grupos))
+    # Lâminas vazias só para o mínimo físico do produto (nunca para alcançar as desejadas)
     min_prod = int(produto.get("laminas_min", 0))
-    desejadas = int(cfg.get("laminas_desejadas", min_prod))
-    alvo = max(min_prod, min(int(produto["laminas_max"]), desejadas))
-    while len(laminas) < alvo:
-        laminas.append(lamina_vazia(cfg))
+    if laminas and len(laminas) < min_prod:
+        if avisos is not None:
+            vazias = min_prod - len(laminas)
+            avisos.append(
+                "O produto %s pede no mínimo %d lâminas: %d %s para completar."
+                % (produto.get("nome", ""), min_prod, vazias, "ficou vazia" if vazias == 1 else "ficaram vazias")
+            )
+        while len(laminas) < min_prod:
+            laminas.append(lamina_vazia(cfg))
     edicoes_fotos = {
         str(f.get("caminho")): dict(f.get("edicao") or {})
         for f in fotos
@@ -2739,14 +2889,9 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None):
             if not cfg.get("reconhecer_rostos", True):
                 edicao["ignorar_rosto"] = True
 
-        # Executa os 3 motores de acabamento de forma 100% independente conforme suas regras próprias
+        # Fundo, degradê e molduras na mesma sequência usada depois de cada edição na interface
         fotos_desta_lamina = grupos[idx_lam] if idx_lam < len(grupos) else []
-        if cfg.get("auto_fundos", True):
-            aplicar_fundos_automaticos(lamina, fotos_desta_lamina, produto, cfg, indice_lamina=idx_lam)
-        if cfg.get("auto_degrade", True):
-            aplicar_degrade_automatico(lamina, fotos_desta_lamina, produto, cfg)
-        if cfg.get("auto_molduras", True):
-            aplicar_molduras_automaticas(lamina, fotos_desta_lamina, produto, cfg)
+        acabamento_lamina(lamina, fotos_desta_lamina, produto, cfg, indice_lamina=idx_lam)
 
     return laminas, [f["caminho"] for f in sobras]
 
@@ -2779,7 +2924,12 @@ def _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto):
         if paginas > 1 and x0 < 0.485 and x1 > 0.515:
             atravessa_meio = True
         centro_x = x0 + w * 0.5
-        meta = mapa_f.get(cam_s, {"caminho": cam_s})
+        meta = mapa_f.get(cam_s) or {
+            "caminho": cam_s,
+            "nome_grupo": lamina.get("nome_grupo"),
+            "nome_pasta": lamina.get("nome_pasta"),
+            "pasta": lamina.get("pasta"),
+        }
         if paginas < 2 or centro_x < 0.5:
             esq_caminhos.append(cam_s)
             esq_meta.append(meta)
@@ -2797,16 +2947,19 @@ def _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto):
     }
 
 
-def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0):
+def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0, tema=None, medidas_mm=None):
     """
     Analisa as fotos do alvo (uma página ou a lâmina inteira) e devolve `(cor_hex_base, dados_fundo_imagem, paleta)`:
     - Se a origem permitir usar a Pasta de Fundos do usuário e houver arquivos nela, sugere com base
       na harmonia com as fotos + padrão/histórico de uso do usuário (`sugerir_fundos_da_pasta`).
-    - Caso contrário (ou ao alternar no modo 'misturar'), gera na hora um fundo Degradê ou Abstrato
-      baseado nas cores das fotos com aleatoriedade controlada (`seed`).
+    - Com `tema` (evento detectado), gera o fundo do tema com textura e um toque das cores das fotos.
+    - Sem tema, gera um fundo com cor forte das fotos e textura escolhida pela luminosidade.
+    `medidas_mm` = (largura, altura) da área coberta, para a textura sair na escala física certa.
     """
     import time
-    from composicao import extrair_paleta_fotos, fundo_imagem_padrao, gerar_galeria_fundos_procedurais
+    from composicao import (
+        MAPA_TEMAS, extrair_paleta_fotos, fundo_imagem_padrao, gerar_fundo_de_tema, gerar_galeria_fundos_procedurais,
+    )
     from fundos import listar_fundos, sugerir_fundos_da_pasta
 
     paleta = extrair_paleta_fotos(caminhos_fotos)
@@ -2848,11 +3001,19 @@ def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0):
             return cor_base, dados_pasta, paleta
 
     seed_base = int(cfg.get("_seed_auto_fundos") or (int(time.time() * 1000) % 900000)) + int(indice_seed) * 7919
+    if tema and tema in MAPA_TEMAS:
+        dados_tema = gerar_fundo_de_tema(
+            tema, fotos_lamina=caminhos_fotos, seed_extra=seed_base % 100000, medidas_mm=medidas_mm, paleta=paleta,
+        )
+        cores_t = (dados_tema.get("gerado") or {}).get("cores") or [MAPA_TEMAS[tema].get("cor_base") or cor_base]
+        return str(cores_t[0]), dados_tema, paleta
+
     padrao_det = str(cfg.get("padrao_fundo_gerado") or paleta.get("padrao_sugerido") or "preto").lower()
     if padrao_det not in ("preto", "branco"):
         padrao_det = str(paleta.get("padrao_sugerido") or "preto").lower()
     galeria = gerar_galeria_fundos_procedurais(
-        paleta, estilo=estilo_gerado, seed_base=seed_base, quantidade=4, padrao_filtro=padrao_det
+        paleta, estilo=estilo_gerado, seed_base=seed_base, quantidade=4, padrao_filtro=padrao_det,
+        medidas_mm=medidas_mm,
     )
     dados_gerado = galeria[int(indice_seed) % len(galeria)] if galeria else None
     if dados_gerado and isinstance(dados_gerado.get("gerado"), dict):
@@ -2862,12 +3023,164 @@ def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0):
     return cor_base, dados_gerado, paleta
 
 
+# ------------------------------------------------------------
+# Marcação do que o acabamento automático colocou
+# ------------------------------------------------------------
+# dono["_auto_<chave>"] guarda a assinatura do valor que o automático gravou em dono[<chave>].
+# Se o valor atual ainda tem a mesma assinatura, foi o automático e pode ser refeito;
+# se mudou (edição à mão), é do usuário e fica. Sem marca, só vale refazer quando está vazio.
+
+CAMPOS_FUNDO = ("fundo", "fundo_esquerda", "fundo_direita", "fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita")
+
+
+def _assinatura(valor):
+    import json
+
+    return json.dumps(valor, sort_keys=True, default=str)
+
+
+def _pode_auto(dono, chave):
+    marca = dono.get("_auto_" + chave)
+    if marca is None:
+        return dono.get(chave) is None
+    return marca == _assinatura(dono.get(chave))
+
+
+def eh_automatico(dono, chave):
+    """O valor dono[chave] existe e foi posto pelo acabamento automático (sem edição à mão depois)."""
+    return isinstance(dono, dict) and dono.get(chave) is not None and dono.get("_auto_" + chave) == _assinatura(dono.get(chave))
+
+
+def _marcar_auto(dono, chave):
+    if dono.get(chave) is None:
+        dono.pop("_auto_" + chave, None)
+    else:
+        dono["_auto_" + chave] = _assinatura(dono.get(chave))
+
+
+def _tirar_auto(dono, chave):
+    dono.pop(chave, None)
+    dono.pop("_auto_" + chave, None)
+
+
+def _assinatura_fundo(lamina):
+    campos = {}
+    for chave in CAMPOS_FUNDO:
+        valor = lamina.get(chave)
+        if isinstance(valor, dict) and valor.get("gerado"):
+            # O caminho do PNG de prévia muda quando ele é recriado; não é edição do usuário
+            valor = {k: v for k, v in valor.items() if k != "caminho"}
+        campos[chave] = valor
+    return _assinatura(campos)
+
+
+def _fundo_e_automatico(lamina):
+    marca = lamina.get("_auto_fundo")
+    if marca is None:
+        vazia = not any(lamina.get(c) for c in CAMPOS_FUNDO[1:])
+        return vazia and str(lamina.get("fundo") or "#ffffff").lower() == "#ffffff"
+    return marca == _assinatura_fundo(lamina)
+
+
+def _semente_lamina(lamina):
+    import hashlib
+
+    return int(hashlib.md5(str(lamina.get("id") or "").encode("utf-8")).hexdigest()[:8], 16) % 900000 + 1
+
+
+def _planejar_fundos(lamina, fotos_lamina, produto, cfg):
+    """Como o fundo automático vai ser feito: divisão das fotos, se separa por página e o tema de cada parte."""
+    divisao = _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto)
+    paginas = int(produto.get("paginas_por_lamina", 1))
+    escopo = str(cfg.get("escopo_auto_fundos", "adaptativo") or "adaptativo").strip().lower()
+    tipo_layout = str(lamina.get("tipo_layout") or "")
+
+    separar = False
+    if paginas >= 2 and divisao["esquerda"] and divisao["direita"] and not divisao["atravessa_meio"]:
+        if escopo == "pagina":
+            separar = True
+        elif escopo == "adaptativo":
+            cen_esq = {f.get("cenario_subgrupo") for f in divisao["meta_esquerda"] if f.get("cenario_subgrupo") is not None}
+            cen_dir = {f.get("cenario_subgrupo") for f in divisao["meta_direita"] if f.get("cenario_subgrupo") is not None}
+            if (cen_esq and cen_dir and cen_esq.isdisjoint(cen_dir)) or tipo_layout in ("meio_termo_esq", "meio_termo_dir"):
+                separar = True
+    atual = lamina.get("tema_evento")
+    return {
+        "divisao": divisao,
+        "separar": separar,
+        "tema": tema_evento_das_fotos(divisao["meta_esquerda"] + divisao["meta_direita"], preferido=atual),
+        "tema_esquerda": tema_evento_das_fotos(divisao["meta_esquerda"], preferido=lamina.get("tema_evento_esquerda") or atual) if separar else None,
+        "tema_direita": tema_evento_das_fotos(divisao["meta_direita"], preferido=lamina.get("tema_evento_direita") or atual) if separar else None,
+    }
+
+
+def _chave_fundo(plano, cfg):
+    """Só o que muda o fundo: evento, divisão por página, origem/estilo e, sem evento, quais fotos."""
+    temas = [plano["tema"], plano["tema_esquerda"], plano["tema_direita"]]
+    return _assinatura({
+        "separar": plano["separar"],
+        "temas": temas,
+        "fotos": None if any(temas) else sorted(plano["divisao"]["todos"]),
+        "origem": cfg.get("modo_auto_fundos"),
+        "estilo": cfg.get("estilo_fundo_gerado"),
+    })
+
+
+def acabamento_lamina(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0, forcar=()):
+    """
+    Acabamento automático da lâmina, na ordem em que um motor depende do outro:
+    fundo (define o evento) -> degradê (exclui moldura) -> molduras e sombra (contrastam com o fundo).
+
+    Sem `forcar`, respeita o que foi mexido à mão e só refaz o que o próprio automático colocou;
+    o fundo só é refeito quando muda o evento, a divisão por página ou (sem evento) as fotos.
+    `forcar` = motores ("fundos", "degrade", "molduras") que refazem tudo, como nos botões de cada função.
+    """
+    if not isinstance(lamina, dict):
+        return False
+    cfg = dict(cfg or {})
+    produto = produto or {"paginas_por_lamina": 2}
+    forcar = set(forcar or ())
+    cfg.setdefault("_seed_auto_fundos", _semente_lamina(lamina))
+    alterou = False
+
+    if cfg.get("auto_fundos", True) or "fundos" in forcar:
+        plano = _planejar_fundos(lamina, fotos_lamina, produto, cfg)
+        chave = _chave_fundo(plano, cfg)
+        refazer = "fundos" in forcar or (_fundo_e_automatico(lamina) and lamina.get("_auto_fundo_chave") != chave)
+        if refazer and aplicar_fundos_automaticos(lamina, fotos_lamina, produto, dict(cfg, auto_fundos=True), indice_lamina=indice_lamina):
+            lamina["_auto_fundo"] = _assinatura_fundo(lamina)
+            lamina["_auto_fundo_chave"] = chave
+            alterou = True
+
+    if cfg.get("auto_degrade", True) or "degrade" in forcar:
+        alterou |= bool(aplicar_degrade_automatico(
+            lamina, fotos_lamina, produto, dict(cfg, auto_degrade=True), respeitar_manual="degrade" not in forcar,
+        ))
+
+    if cfg.get("auto_molduras", True) or "molduras" in forcar:
+        alterou |= bool(aplicar_molduras_automaticas(
+            lamina, fotos_lamina, produto, dict(cfg, auto_molduras=True), indice_lamina=indice_lamina,
+            respeitar_manual="molduras" not in forcar,
+        ))
+    return alterou
+
+
+def _gravar_tema_evento(lamina, tema, tema_esquerda, tema_direita):
+    """Guarda na lâmina o tema do evento usado no fundo, para as molduras combinarem."""
+    for chave, valor in (("tema_evento", tema), ("tema_evento_esquerda", tema_esquerda), ("tema_evento_direita", tema_direita)):
+        if valor:
+            lamina[chave] = valor
+        else:
+            lamina.pop(chave, None)
+
+
 def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0, **kwargs):
     """
     FUNÇÃO 1 (Independente): Motor de Fundos Automáticos.
-    - Analisa as cores das fotos da lâmina inteira ou de cada página separadamente.
-    - Gera fundos Degradês e Abstratos suaves baseados nas cores das fotos nos padrões
-      Preto + Cores (15%-25%) ou Branco + Cores (15%-25%) e salva na pasta temporária.
+    - Analisa as fotos da lâmina inteira ou de cada página separadamente.
+    - Evento reconhecido (estúdio, colação, jaleco, externas, baile...): fundo do tema do evento
+      (textura e cores próprias, com um toque das cores das fotos). Grava `tema_evento` na lâmina.
+    - Sem evento: fundo com cor forte das fotos (FATOR_COR_FUNDO) e textura pela luminosidade.
     """
     if not lamina:
         return False
@@ -2893,30 +3206,28 @@ def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None
     if not bool(cfg.get("auto_fundos", True)):
         return False
     produto = produto or {"paginas_por_lamina": 2}
-    divisao = _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto)
+    plano = _planejar_fundos(lamina, fotos_lamina, produto, cfg)
+    divisao = plano["divisao"]
     if not divisao["todos"]:
         return False
 
     paginas = int(produto.get("paginas_por_lamina", 1))
-    escopo = str(cfg.get("escopo_auto_fundos", "adaptativo") or "adaptativo").strip().lower()
-    tipo_layout = str(lamina.get("tipo_layout") or "")
+    try:
+        largura_lamina_mm, altura_mm = lamina_mm(produto)
+    except (KeyError, TypeError, ValueError):
+        largura_lamina_mm, altura_mm = None, None
+    medidas_lamina = (largura_lamina_mm, altura_mm) if altura_mm else None
+    medidas_pagina = (largura_lamina_mm / max(1, paginas), altura_mm) if altura_mm else None
+    tema_lamina = plano["tema"]
 
-    separar_paginas = False
-    if paginas >= 2 and divisao["esquerda"] and divisao["direita"] and not divisao["atravessa_meio"]:
-        if escopo == "pagina":
-            separar_paginas = True
-        elif escopo == "adaptativo":
-            cen_esq = {f.get("cenario_subgrupo") for f in divisao["meta_esquerda"] if f.get("cenario_subgrupo") is not None}
-            cen_dir = {f.get("cenario_subgrupo") for f in divisao["meta_direita"] if f.get("cenario_subgrupo") is not None}
-            if (cen_esq and cen_dir and cen_esq.isdisjoint(cen_dir)) or tipo_layout in ("meio_termo_esq", "meio_termo_dir"):
-                separar_paginas = True
-
-    if separar_paginas:
+    if plano["separar"]:
+        tema_e = plano["tema_esquerda"]
+        tema_d = plano["tema_direita"]
         cor_e, img_e, pal_e = _escolher_ou_gerar_fundo_para_fotos(
-            divisao["esquerda"], cfg, indice_seed=indice_lamina * 2
+            divisao["esquerda"], cfg, indice_seed=indice_lamina * 2, tema=tema_e, medidas_mm=medidas_pagina,
         )
         cor_d, img_d, pal_d = _escolher_ou_gerar_fundo_para_fotos(
-            divisao["direita"], cfg, indice_seed=indice_lamina * 2 + 1
+            divisao["direita"], cfg, indice_seed=indice_lamina * 2 + 1, tema=tema_d, medidas_mm=medidas_pagina,
         )
         lamina["fundo"] = cor_e
         lamina["fundo_esquerda"] = cor_e
@@ -2927,11 +3238,13 @@ def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None
             lamina["fundo_imagem_direita"] = img_d
         lamina["_paleta_esquerda"] = pal_e
         lamina["_paleta_direita"] = pal_d
+        _gravar_tema_evento(lamina, tema_lamina or tema_e or tema_d, tema_e, tema_d)
         return True
 
     cor_l, img_l, pal_l = _escolher_ou_gerar_fundo_para_fotos(
-        divisao["todos"], cfg, indice_seed=indice_lamina
+        divisao["todos"], cfg, indice_seed=indice_lamina, tema=tema_lamina, medidas_mm=medidas_lamina,
     )
+    _gravar_tema_evento(lamina, tema_lamina, None, None)
     lamina["fundo"] = cor_l
     lamina.pop("fundo_esquerda", None)
     lamina.pop("fundo_direita", None)
@@ -2943,7 +3256,7 @@ def aplicar_fundos_automaticos(lamina, fotos_lamina=None, produto=None, cfg=None
     return True
 
 
-def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None):
+def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None, respeitar_manual=False):
     """
     FUNÇÃO 2 (Independente): Motor de Degradê Automático nas Fotos e na Fusão de Páginas.
     Regras próprias:
@@ -2955,6 +3268,8 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
       nem em Transpasses sem estrela.
     - Protege os rostos/pessoas detectados na foto para que o esfumaçado nunca atinja ninguém.
     - Quando a lâmina possui fundos separados por página, ativa fusão suave no centro ('fundo_fusao').
+    - Degradês postos antes pelo automático são refeitos (e somem onde não cabem mais).
+      Com `respeitar_manual`, degradê ou moldura mexidos à mão ficam como estão.
     """
     if not lamina:
         return False
@@ -2963,7 +3278,7 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
         prod_eff = cfg if (isinstance(cfg, dict) and "paginas_por_lamina" in cfg) else {"paginas_por_lamina": 2}
         algum = False
         for lam_item in lamina:
-            if aplicar_degrade_automatico(lam_item, fotos_lamina, prod_eff, cfg_eff):
+            if aplicar_degrade_automatico(lam_item, fotos_lamina, prod_eff, cfg_eff, respeitar_manual=respeitar_manual):
                 algum = True
         return algum
     cfg = cfg or {}
@@ -2983,9 +3298,35 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
     inicio_base = mapa_inicio.get(intensidade, 68)
     alterou = False
 
+    manuais = set()
+    for esp_ in lamina.get("espacos") or []:
+        if not esp_.get("foto"):
+            continue
+        ed_ = esp_.setdefault("edicao", {})
+        if eh_automatico(ed_, "degrade"):
+            _tirar_auto(ed_, "degrade")
+            alterou = True
+        elif respeitar_manual and (
+            ed_.get("degrade") is not None
+            or (ed_.get("moldura") is not None and not eh_automatico(ed_, "moldura"))
+        ):
+            manuais.add(id(esp_))
+
+    def _gravar_degrade(esp_, dados):
+        ed_ = esp_.setdefault("edicao", {})
+        ed_["degrade"] = dados
+        _marcar_auto(ed_, "degrade")
+        # Regra de exclusão mútua: foto com degradê de borda nunca recebe linha de moldura por cima
+        _tirar_auto(ed_, "moldura")
+
     # Regra A: Fusão central suave entre páginas quando esquerda e direita têm fundos próprios
     if regra in ("destaques", "destaque_e_fusao", "somente_fusao") and tem_fundo_por_pagina(lamina):
-        lamina["fundo_fusao"] = {"suave": 36, "medio": 50, "forte": 66}.get(intensidade, 36)
+        if not respeitar_manual or _pode_auto(lamina, "fundo_fusao"):
+            lamina["fundo_fusao"] = {"suave": 36, "medio": 50, "forte": 66}.get(intensidade, 36)
+            _marcar_auto(lamina, "fundo_fusao")
+            alterou = True
+    elif eh_automatico(lamina, "fundo_fusao"):
+        _tirar_auto(lamina, "fundo_fusao")
         alterou = True
 
     if regra == "somente_fusao":
@@ -3002,17 +3343,15 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
         if regra not in ("destaque_apenas", "somente_destaque"):
             e0 = com_foto[0]
             x0, w0, h0 = float(e0.get("x", 0.0)), float(e0.get("w", 0.0)), float(e0.get("h", 0.0))
-            if h0 >= 0.88 and w0 <= 0.62 and (x0 <= 0.02 or x0 + w0 >= 0.98):
+            if h0 >= 0.88 and w0 <= 0.62 and (x0 <= 0.02 or x0 + w0 >= 0.98) and id(e0) not in manuais:
                 direcao_u = "direita" if x0 <= 0.02 else "esquerda"
-                ed = e0.setdefault("edicao", {})
-                ed["degrade"] = {
+                _gravar_degrade(e0, {
                     "ativo": True,
                     "direcao": direcao_u,
                     "inicio": inicio_base,
                     "fim": 100,
                     "opacidade_fim": 0,
-                }
-                ed.pop("moldura", None)
+                })
                 return True
         return alterou
     if len(com_foto) < 2:
@@ -3095,7 +3434,7 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
         if regra in ("destaque_apenas", "somente_destaque") and not tem_estrela:
             direcao_deg = None
 
-        if not direcao_deg:
+        if not direcao_deg or id(esp) in manuais:
             continue
 
         # Proteção inteligente da caixa de rostos/pessoas: o degradê nunca começa sobre alguém
@@ -3109,30 +3448,31 @@ def aplicar_degrade_automatico(lamina, fotos_lamina=None, produto=None, cfg=None
                 limite_rosto = int(round((1.0 - float(rosto["x0"])) * 100.0)) + 6
                 ini_seguro = max(ini_seguro, min(90, limite_rosto))
 
-        ed = esp.setdefault("edicao", {})
-        ed["degrade"] = {
+        _gravar_degrade(esp, {
             "ativo": True,
             "direcao": direcao_deg,
             "inicio": int(ini_seguro),
             "fim": 100,
             "opacidade_fim": 0,
-        }
-        # Regra de exclusão mútua: foto com degradê de borda nunca recebe linha de moldura por cima
-        ed.pop("moldura", None)
+        })
         alterou = True
 
     return alterou
 
 
-def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=None):
+def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=None, indice_lamina=0, respeitar_manual=False):
     """
     FUNÇÃO 3 (Independente): Motor de Molduras Automáticas nas Fotos.
     Regras próprias:
     - Aplica moldura apenas em quadros em grade / com margem ('safe_zone', 'sem_corte', quadros compostos).
     - Nunca aplica moldura em fotos 100% sangradas ('sangria_total', 'panoramico_meio') nem em fotos que
       possuam degradê de borda ativo.
-    - Calcula a cor da moldura pelo contraste com o fundo da página (branca/marfim em fundos médios/escuros,
-      ou tom elegante da paleta em fundos muito claros).
+    - Estilo 'por_evento' (padrão): usa o conjunto de molduras do evento da página (composicao.MOLDURAS_EVENTO).
+      A foto de destaque (estrela, ou a maior da página) recebe o estilo de destaque e as demais o secundário,
+      que reveza com o alternativo de uma lâmina para a outra (pelo índice, sem sorteio).
+    - Cor 'cores_do_evento' (padrão): cores do evento, conferidas contra o fundo da página para ter contraste.
+    - Molduras e sombras postas antes pelo automático são refeitas (e somem onde não cabem mais).
+      Com `respeitar_manual`, as mexidas à mão ficam como estão.
     """
     if not lamina:
         return False
@@ -3140,8 +3480,9 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         cfg_eff = produto if (isinstance(produto, dict) and "paginas_por_lamina" not in produto) else (cfg or {})
         prod_eff = cfg if (isinstance(cfg, dict) and "paginas_por_lamina" in cfg) else {"paginas_por_lamina": 2}
         algum = False
-        for lam_item in lamina:
-            if aplicar_molduras_automaticas(lam_item, None, prod_eff, cfg_eff):
+        for idx_l, lam_item in enumerate(lamina):
+            if aplicar_molduras_automaticas(lam_item, None, prod_eff, cfg_eff, indice_lamina=idx_l,
+                                            respeitar_manual=respeitar_manual):
                 algum = True
         return algum
     cfg = cfg or {}
@@ -3149,26 +3490,18 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         return False
 
     from comum import cor_rgb
-    try:
-        from composicao import NOMES_ESTILOS_MOLDURA, extrair_paleta_fotos, sombra_padrao
-    except ImportError:
-        NOMES_ESTILOS_MOLDURA = {
-            "simples", "dupla", "pontilhada", "royal", "degrade_bicolor",
-            "metalica_ouro", "cantoneira_imperial", "chanfrada_3d",
-            "passepartout", "filete_triplo", "cruzada_vintage", "halo_luminoso",
-        }
-        def extrair_paleta_fotos(_c):
-            return {"tons_medios": ["#d4c5b4"], "cor_moldura_clara": "#faf8f5", "cor_moldura_escura": "#52483e"}
-        def sombra_padrao():
-            return {"ativa": False, "cor": "#000000", "opacidade": 40, "desfoque_mm": 2.2, "offset_x_mm": 1.2, "offset_y_mm": 1.6, "expansao_mm": 0.2, "sincronizar_moldura": True}
+    from composicao import (
+        MAPA_TEMAS, MOLDURAS_EVENTO, MOLDURAS_SEM_EVENTO, NOMES_ESTILOS_MOLDURA,
+        cores_moldura_com_contraste, extrair_paleta_fotos, sombra_padrao,
+    )
 
     regra = str(cfg.get("regra_auto_molduras", "grades_com_margem") or "grades_com_margem").strip().lower()
-    estilo = str(cfg.get("estilo_auto_molduras", "simples") or "simples").strip().lower()
-    if estilo not in NOMES_ESTILOS_MOLDURA:
-        estilo = "simples"
-    cor_modo = str(cfg.get("cor_auto_molduras", "contraste_automatico") or "contraste_automatico").strip().lower()
-    cor_sec = str(cfg.get("cor_secundaria_moldura") or "").strip()
+    estilo_cfg = str(cfg.get("estilo_auto_molduras", "por_evento") or "por_evento").strip().lower()
+    por_evento = estilo_cfg not in NOMES_ESTILOS_MOLDURA
+    cor_modo = str(cfg.get("cor_auto_molduras", "cores_do_evento") or "cores_do_evento").strip().lower()
+    cor_sec_cfg = str(cfg.get("cor_secundaria_moldura") or "").strip()
     incluir_sombra = bool(cfg.get("auto_sombra_molduras", False))
+    sombra_cfg = cfg.get("cfg_sombra_molduras") or cfg.get("sombra_padrao_cfg")
     try:
         espessura_mm = max(0.2, min(3.0, float(cfg.get("espessura_auto_molduras_mm", 0.6) or 0.6)))
     except (TypeError, ValueError):
@@ -3178,45 +3511,107 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
     if not espacos:
         return False
 
+    produto = produto or {"paginas_por_lamina": 2}
+    paginas = int(produto.get("paginas_por_lamina", 2) or 2)
     caminhos_todos = [str(e["foto"]) for e in espacos if e.get("foto")]
     paleta = lamina.get("_paleta_lamina") or extrair_paleta_fotos(caminhos_todos)
+    mapa_fotos = {str(f.get("caminho")): f for f in (fotos_lamina or []) if isinstance(f, dict) and f.get("caminho")}
 
-    def _cor_moldura_para_espaco(esp):
-        if cor_modo == "branca":
-            return "#ffffff"
-        if cor_modo == "dourada":
-            return "#d4af37"
-        if cor_modo == "paleta":
-            return (paleta.get("tons_medios") or ["#d4c5b4"])[0]
-        # Contraste automático com o fundo da página onde a foto está posicionada
+    # Tema do evento: o mesmo que o fundo usou; sem fundo automático, detecta pelas fotos.
+    tema_geral = lamina.get("tema_evento")
+    if not tema_geral and not lamina.get("tema_evento_esquerda") and not lamina.get("tema_evento_direita"):
+        divisao = _fotos_por_lado_da_lamina(lamina, fotos_lamina, produto)
+        tema_geral = tema_evento_das_fotos(divisao["meta_esquerda"] + divisao["meta_direita"])
+
+    def _lado(esp):
         centro_x = float(esp.get("x", 0.0)) + float(esp.get("w", 0.0)) * 0.5
-        cor_fundo_hex = (
-            (lamina.get("fundo_esquerda") if centro_x < 0.5 else lamina.get("fundo_direita"))
-            or lamina.get("fundo")
-            or "#ffffff"
-        )
+        return "esquerda" if (paginas < 2 or centro_x < 0.5) else "direita"
+
+    def _tema(esp):
+        tema = lamina.get("tema_evento_" + _lado(esp)) or tema_geral
+        return tema if tema in MOLDURAS_EVENTO else None
+
+    def _cor_fundo(esp):
+        lado = _lado(esp)
+        return lamina.get("fundo_" + lado) or lamina.get("fundo") or "#ffffff"
+
+    def _cores_contraste_classico(esp):
+        cor_fundo_hex = _cor_fundo(esp)
         r, g, b = cor_rgb(cor_fundo_hex)
         lum_fundo = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        dados_img = (
-            (lamina.get("fundo_imagem_esquerda") if centro_x < 0.5 else lamina.get("fundo_imagem_direita"))
-            or lamina.get("fundo_imagem")
-            or {}
-        )
+        dados_img = lamina.get("fundo_imagem_" + _lado(esp)) or lamina.get("fundo_imagem") or {}
         sub_g = str(((dados_img.get("gerado") or {}).get("subtipo")) or "")
         if "noturn" in sub_g or lum_fundo < 0.78:
             return paleta.get("cor_moldura_clara") or "#faf8f5"
         return paleta.get("cor_moldura_escura") or "#52483e"
 
-    # Conta quantas fotos existem em cada página para identificar grades
-    qtd_esq = sum(1 for e in espacos if (float(e.get("x", 0.0)) + float(e.get("w", 0.0)) * 0.5) < 0.5)
+    def _cores_moldura(esp):
+        """(cor, cor_secundaria) da moldura do espaço."""
+        if cor_modo == "branca":
+            return "#ffffff", cor_sec_cfg
+        if cor_modo == "dourada":
+            return "#d4af37", cor_sec_cfg
+        if cor_modo == "paleta":
+            return (paleta.get("tons_medios") or ["#d4c5b4"])[0], cor_sec_cfg
+        if cor_modo in ("cores_do_evento", "evento"):
+            tema = _tema(esp)
+            if tema:
+                conjunto = MOLDURAS_EVENTO[tema]
+                return cores_moldura_com_contraste(conjunto["cor"], conjunto.get("cor_secundaria"), _cor_fundo(esp))
+            destaque_foto = (paleta.get("cores_destaque_fotos") or [None])[0]
+            if destaque_foto:
+                return cores_moldura_com_contraste(destaque_foto, _cores_contraste_classico(esp), _cor_fundo(esp))
+        return _cores_contraste_classico(esp), cor_sec_cfg
+
+    # Destaque de cada página: a foto com estrela, senão a maior (só quando a página tem mais de uma foto)
+    destaques = set()
+    for lado in ("esquerda", "direita"):
+        da_pagina = [e for e in espacos if _lado(e) == lado]
+        if not da_pagina:
+            continue
+        com_estrela = [e for e in da_pagina if (mapa_fotos.get(str(e["foto"])) or {}).get("destaque")]
+        if com_estrela:
+            destaques.update(id(e) for e in com_estrela)
+        else:
+            destaques.add(id(max(da_pagina, key=lambda e: float(e.get("w", 0.0)) * float(e.get("h", 0.0)))))
+
+    def _estilo(esp):
+        if not por_evento:
+            return estilo_cfg
+        conjunto = MOLDURAS_EVENTO.get(_tema(esp)) or MOLDURAS_SEM_EVENTO
+        if id(esp) in destaques:
+            return conjunto["destaque"]
+        return conjunto["secundaria"] if int(indice_lamina) % 2 == 0 else conjunto["alternativa"]
+
+    def _sombra(esp):
+        if sombra_cfg:
+            s_cfg = dict(sombra_cfg)
+        else:
+            tema = _tema(esp) if por_evento else None
+            s_cfg = dict((MAPA_TEMAS.get(tema) or {}).get("sombra") or sombra_padrao())
+        s_cfg["ativa"] = True
+        s_cfg["sincronizar_moldura"] = True
+        return s_cfg
+
+    qtd_esq = sum(1 for e in espacos if _lado(e) == "esquerda")
     qtd_dir = len(espacos) - qtd_esq
     maior_area = max(float(e.get("w", 0.0)) * float(e.get("h", 0.0)) for e in espacos)
+
+    def _livre(ed, chave):
+        return not respeitar_manual or _pode_auto(ed, chave)
+
+    def _retirar(ed, chave):
+        nonlocal alterou
+        if ed.get(chave) is not None and _livre(ed, chave):
+            _tirar_auto(ed, chave)
+            alterou = True
 
     alterou = False
     for esp in espacos:
         ed = esp.setdefault("edicao", {})
         # Regra 1: Nunca coloca moldura se a foto tem degradê ativo
         if (ed.get("degrade") or {}).get("ativo"):
+            _retirar(ed, "moldura")
             continue
 
         ex = float(esp.get("x", 0.0))
@@ -3233,15 +3628,13 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
             or (ey + eh) >= 0.995
         )
         if sangrada_borda:
-            ed.pop("moldura", None)
-            if incluir_sombra:
-                ed.pop("sombra", None)
+            _retirar(ed, "moldura")
+            if incluir_sombra or eh_automatico(ed, "sombra"):
+                _retirar(ed, "sombra")
             continue
 
-        centro_x = ex + ew * 0.5
-        qtd_na_pagina = qtd_esq if centro_x < 0.5 else qtd_dir
+        qtd_na_pagina = qtd_esq if _lado(esp) == "esquerda" else qtd_dir
 
-        elegivel = False
         if regra in ("todas_com_margem", "grades_e_margem", "grades_com_margem"):
             elegivel = True
         elif regra == "secundarias":
@@ -3252,23 +3645,26 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
             elegivel = True
 
         if not elegivel:
+            if eh_automatico(ed, "moldura"):
+                _retirar(ed, "moldura")
             continue
 
-        cor_escolhida = _cor_moldura_para_espaco(esp)
-        dados_m = {
-            "estilo": estilo,
-            "espessura_mm": round(espessura_mm, 2),
-            "cor": cor_escolhida,
-        }
-        if cor_sec:
-            dados_m["cor_secundaria"] = cor_sec
-        ed["moldura"] = dados_m
-        if incluir_sombra:
-            s_cfg = dict(cfg.get("sombra_padrao_cfg") or sombra_padrao())
-            s_cfg["ativa"] = True
-            s_cfg["sincronizar_moldura"] = True
-            ed["sombra"] = s_cfg
-        alterou = True
+        if _livre(ed, "moldura"):
+            cor_escolhida, cor_secundaria = _cores_moldura(esp)
+            dados_m = {
+                "estilo": _estilo(esp),
+                "espessura_mm": round(espessura_mm, 2),
+                "cor": cor_escolhida,
+            }
+            if cor_secundaria:
+                dados_m["cor_secundaria"] = cor_secundaria
+            ed["moldura"] = dados_m
+            _marcar_auto(ed, "moldura")
+            alterou = True
+        if incluir_sombra and _livre(ed, "sombra"):
+            ed["sombra"] = _sombra(esp)
+            _marcar_auto(ed, "sombra")
+            alterou = True
 
     return alterou
 
@@ -3376,13 +3772,7 @@ def aplicar_tema_em_laminas(
             )
             tem_deg = tem_degrade_ativo(ed.get("degrade"))
 
-            if aplicar_moldura:
-                if not sangrada_borda and not tem_deg:
-                    ed["moldura"] = dict(tema_cfg.get("moldura") or {"estilo": "royal", "cor": "#d4af37", "espessura_mm": 0.6})
-                else:
-                    ed.pop("moldura", None)
-
-            if aplicar_sombra:
+            if aplicar_sombra and not aplicar_moldura:
                 if not sangrada_borda and not tem_deg:
                     ed["sombra"] = dict(tema_cfg.get("sombra") or {"ativa": True, "opacidade": 50, "desfoque_mm": 2.5, "offset_x_mm": 1.3, "offset_y_mm": 1.7, "sincronizar_moldura": True})
                 else:
@@ -3392,6 +3782,17 @@ def aplicar_tema_em_laminas(
                 for ch_ed, val_ed in tema_cfg["edicao_foto"].items():
                     ed[ch_ed] = val_ed
 
+        # O tema escolhido passa a ser o evento da lâmina: as molduras seguem o conjunto do evento
+        # (destaque, secundárias e rodízio) e continuam se ajustando nas próximas edições.
+        _gravar_tema_evento(lam, tema_cfg["id"], None, None)
+        if aplicar_moldura:
+            espessura = float((tema_cfg.get("moldura") or {}).get("espessura_mm") or 0.5)
+            aplicar_molduras_automaticas(lam, None, None, {
+                "estilo_auto_molduras": "por_evento",
+                "cor_auto_molduras": "cores_do_evento",
+                "espessura_auto_molduras_mm": espessura,
+                "auto_sombra_molduras": bool(aplicar_sombra),
+            }, indice_lamina=idx_l)
         lam["tema_aplicado"] = tema_cfg["id"]
         alteradas += 1
 

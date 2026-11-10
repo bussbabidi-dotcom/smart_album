@@ -8,6 +8,7 @@ import threading
 
 from pathlib import Path
 import analise
+import texturas_fundo
 from comum import cor_rgb, normalizar_caminho, pasta_fundos_temporarios
 from produtos import caixa_px
 from recorte import foto_no_espaco
@@ -135,6 +136,11 @@ def rosto_de(info, caminho):
 
 _CACHE_FUNDO_GERADO = OrderedDict()
 _CACHE_PALETA_FOTO = OrderedDict()
+
+# Quanto da cor das fotos entra nos fundos gerados pela paleta (sobre a base preta ou branca).
+FATOR_COR_FUNDO = (0.55, 0.75)
+TEXTURAS_ESCURAS = ("veludo", "concreto")
+TEXTURAS_CLARAS = ("papel", "gesso")
 
 
 def eh_fundo_gerado(dados_ou_caminho):
@@ -397,7 +403,21 @@ def extrair_paleta_fotos(caminhos_fotos, info=None):
     }
 
 
-def materializar_fundo_gerado_em_arquivo(espec, tamanho=(1440, 810), caminho_destino=None):
+def tamanho_previa_fundo(espec, lado=2048):
+    """Tamanho do PNG de prévia na proporção real da área coberta (largura_mm x altura_mm da receita)."""
+    try:
+        largura_mm = float((espec or {}).get("largura_mm") or 0)
+        altura_mm = float((espec or {}).get("altura_mm") or 0)
+    except (TypeError, ValueError):
+        largura_mm = altura_mm = 0.0
+    if largura_mm <= 0 or altura_mm <= 0:
+        return (lado, lado // 2)
+    if largura_mm >= altura_mm:
+        return (lado, max(16, int(round(lado * altura_mm / largura_mm))))
+    return (max(16, int(round(lado * largura_mm / altura_mm))), lado)
+
+
+def materializar_fundo_gerado_em_arquivo(espec, tamanho=None, caminho_destino=None):
     """
     Salva um fundo gerado pelo programa como arquivo `.png` real dentro da pasta temporária
     (`pasta_fundos_temporarios()`), permitindo que ele seja livremente alterado, ajustado,
@@ -407,6 +427,8 @@ def materializar_fundo_gerado_em_arquivo(espec, tamanho=(1440, 810), caminho_des
     import json
 
     esp = dict(espec or {})
+    if tamanho is None:
+        tamanho = tamanho_previa_fundo(esp)
     assinatura = hashlib.sha1(json.dumps(esp, sort_keys=True).encode("utf-8")).hexdigest()[:12]
     padrao_c = str(esp.get("padrao_cor") or ("preto" if "noturn" in str(esp.get("subtipo", "")) else "branco")).lower()
     tipo_c = str(esp.get("tipo") or "degrade").lower()
@@ -476,12 +498,14 @@ def criar_dados_fundo_gerado(espec, materializar=True):
     return dados
 
 
-def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8, padrao_filtro="ambos"):
+def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8, padrao_filtro="ambos",
+                                     medidas_mm=None):
     """
-    Gera uma galeria de fundos ancorados nos DOIS PADRÕES SÓBRIOS:
-      - Padrão Preto + Cores da Foto (15% a 25% de presença das cores das fotos sobre base preta)
-      - Padrão Branco + Cores da Foto (15% a 25% de presença das cores das fotos sobre base branca)
-    Salva cada fundo gerado na pasta temporária (`pasta_fundos_temporarios()`) para edição livre.
+    Gera uma galeria de fundos nos dois padrões, com cor forte das fotos (FATOR_COR_FUNDO) e textura:
+      - Padrão Preto + Cores da Foto (veludo ou concreto)
+      - Padrão Branco + Cores da Foto (papel ou gesso)
+    `medidas_mm` = (largura, altura) da área coberta, guardada na receita para a escala da textura.
+    Salva cada fundo gerado na pasta temporária (`pasta_fundos_temporarios()`) para a prévia.
     """
     import random
     import time
@@ -505,8 +529,8 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
     h_base = (pal.get("matizes") or [32.0, 205.0, 150.0])[0]
     padrao_sugerido = str(pal.get("padrao_sugerido") or "preto").lower()
 
-    def _variar_cor_ancorada(hex_cor_destaque, padrao_alvo, fator_min=0.15, fator_max=0.25):
-        """Varia levemente o matiz da cor da foto e mistura de 15% a 25% na base Preta ou Branca."""
+    def _variar_cor_ancorada(hex_cor_destaque, padrao_alvo, fator_min=FATOR_COR_FUNDO[0], fator_max=FATOR_COR_FUNDO[1]):
+        """Varia levemente o matiz da cor da foto e mistura na base Preta ou Branca (FATOR_COR_FUNDO)."""
         h, s, v = _rgb_para_hsv_deg(cor_rgb(hex_cor_destaque))
         nh = (h + rng.uniform(-12.0, 12.0)) % 360.0
         ns = max(0.32, min(0.75, s + rng.uniform(-0.06, 0.06)))
@@ -580,18 +604,17 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
     for idx in range(quantidade):
         padrao_cor, tipo, subtipo, titulo_base, cores_base = sequencia[idx % len(sequencia)]
         seed_item = rng.randint(1000, 999999)
-        if idx < 2:
-            cores_var = list(cores_base)
-        else:
-            # Mantém a primeira cor como âncora pura (8%) e varia sutilmente as cores da foto entre 15% e 25%
-            ancora = pretos[0] if padrao_cor == "preto" else brancos[0]
-            cores_var = [
-                ancora,
-                _variar_cor_ancorada(destaques[0], padrao_cor, 0.15, 0.21),
-                _variar_cor_ancorada(destaques[1], padrao_cor, 0.18, 0.24),
-                _variar_cor_ancorada(destaques[2], padrao_cor, 0.16, 0.25),
-            ][: len(cores_base)]
+        # Âncora mais fechada (dá profundidade) e as demais cores das fotos fortes, variando entre os itens
+        f_min, f_max = FATOR_COR_FUNDO
+        ordem = [(idx + k) % 3 for k in range(3)]
+        cores_var = [
+            _variar_cor_ancorada(destaques[ordem[0]], padrao_cor, f_min * 0.55, f_min * 0.7),
+            _variar_cor_ancorada(destaques[ordem[0]], padrao_cor, f_min, f_max),
+            _variar_cor_ancorada(destaques[ordem[1]], padrao_cor, f_min, f_max),
+            _variar_cor_ancorada(destaques[ordem[2]], padrao_cor, f_min, f_max),
+        ][: len(cores_base)]
         angulo = rng.choice([25, 45, 65, 115, 135, 155, 0, 90])
+        texturas = TEXTURAS_ESCURAS if padrao_cor == "preto" else TEXTURAS_CLARAS
         espec = {
             "padrao_cor": padrao_cor,
             "tipo": tipo,
@@ -601,7 +624,11 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
             "angulo": angulo,
             "matiz_base": round(h_base, 1),
             "seed": seed_item,
+            "textura": texturas[idx % len(texturas)],
         }
+        if medidas_mm and medidas_mm[0] and medidas_mm[1]:
+            espec["largura_mm"] = round(float(medidas_mm[0]), 1)
+            espec["altura_mm"] = round(float(medidas_mm[1]), 1)
         galeria.append(criar_dados_fundo_gerado(espec, materializar=True))
     return galeria
 
@@ -741,10 +768,13 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
 
     # Texturas detalhadas de superfície por capítulo (cimento queimado, lona de estúdio, gesso/mármore, papel linho/botânico, poeira de ouro)
     textura_cap = str(esp.get("textura") or "").lower()
+    textura_final = texturas_fundo.tem_textura(textura_cap)
     rng_np = np.random.RandomState(seed % 2147483647)
     ruido_fino = rng_np.normal(0.0, 1.0, (gh, gw, 1)).astype(np.float32)
 
-    if textura_cap == "concreto_royal" or "colacao_royal" in str(esp.get("id") or ""):
+    if textura_final:
+        pass  # desenhada depois, já no tamanho final (texturas_fundo)
+    elif textura_cap == "concreto_royal" or "colacao_royal" in str(esp.get("id") or ""):
         # Microtextura de cimento queimado + trama sutil + vinheta de estúdio com centro 2:1 limpo
         ond_c = (np.sin(u * 38.0 + v * 19.0) * np.cos(v * 29.0 - u * 14.0))[..., None] * 4.5
         trama = (((xx.astype(np.int32) % 6 == 0) | (yy.astype(np.int32) % 6 == 0)).astype(np.float32))[..., None] * 2.2
@@ -807,11 +837,18 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
         img_malha = img_malha.filter(ImageFilter.GaussianBlur(1.1))
     filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
     saida = img_malha.resize((W, H), filtro_redim)
+    if textura_final:
+        saida = texturas_fundo.aplicar_textura(
+            saida, textura_cap, seed=seed, altura_mm=esp.get("altura_mm"),
+            padrao_cor=padrao_cor, cores=cores_hex,
+        )
 
-    with _TRAVA_COMP_CACHE:
-        _CACHE_FUNDO_GERADO[chave_cache] = saida
-        while len(_CACHE_FUNDO_GERADO) > 64:
-            _CACHE_FUNDO_GERADO.popitem(last=False)
+    # Fundos no tamanho de exportação ocupam dezenas de MB cada; só a prévia fica no cache.
+    if W * H <= 4_000_000:
+        with _TRAVA_COMP_CACHE:
+            _CACHE_FUNDO_GERADO[chave_cache] = saida
+            while len(_CACHE_FUNDO_GERADO) > 64:
+                _CACHE_FUNDO_GERADO.popitem(last=False)
     return saida.copy()
 
 
@@ -895,8 +932,9 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
     esp_v = bool(dados.get("espelhar_v"))
     pb = bool(dados.get("pb"))
 
-    # Se for um fundo gerado cujo arquivo temporário ainda não existe em disco, materializa agora
-    if eh_gerado:
+    # Na exportação o fundo gerado sai direto da receita no tamanho final; o PNG é só para a prévia.
+    # Se o arquivo da prévia ainda não existe em disco, materializa agora.
+    if eh_gerado and rapido:
         cam_atual = str(dados.get("caminho") or "")
         if not cam_atual or cam_atual.startswith("__gerado__:") or not Path(cam_atual).is_file():
             espec = dados.get("gerado") or {"tipo": "degrade", "subtipo": "linear_diagonal"}
@@ -908,7 +946,8 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
     caminho_arq = str(dados.get("caminho") or "")
     tem_arquivo_real = bool(caminho_arq and not caminho_arq.startswith("__gerado__:") and Path(caminho_arq).is_file())
 
-    if not tem_arquivo_real and eh_gerado:
+    tem_receita = isinstance(dados.get("gerado"), dict) and bool(dados.get("gerado"))
+    if eh_gerado and ((not rapido and tem_receita) or not tem_arquivo_real):
         espec = dados.get("gerado") or {"tipo": "degrade", "subtipo": "linear_diagonal"}
         nw_g = max(W, int(round(W * escala_zoom)))
         nh_g = max(H, int(round(H * escala_zoom)))
@@ -1541,7 +1580,7 @@ CATALOGO_TEMAS = (
             "subtipo": "linear_diagonal",
             "textura": "concreto_royal",
             "padrao_cor": "preto",
-            "cores": ["#091326", "#102142", "#1e1238", "#3b82f6"],
+            "cores": ["#0d1f4f", "#1c3f94", "#3b2179", "#d4af37"],
             "angulo": 32,
             "seed": 2026,
         },
@@ -1562,7 +1601,7 @@ CATALOGO_TEMAS = (
             "subtipo": "bokeh_luz",
             "textura": "lona_bokeh",
             "padrao_cor": "preto",
-            "cores": ["#0c0f16", "#161f30", "#1f293d", "#93c5fd"],
+            "cores": ["#0f1a30", "#1f3558", "#2e4c7c", "#9cc4ff"],
             "seed": 2027,
         },
         "moldura": {"estilo": "dupla", "cor": "#cbd5e1", "cor_secundaria": "#475569", "espessura_mm": 0.45},
@@ -1582,7 +1621,7 @@ CATALOGO_TEMAS = (
             "subtipo": "aquarela_nuvens",
             "textura": "gesso_marmore",
             "padrao_cor": "branco",
-            "cores": ["#faf9f6", "#f1f3f5", "#e5e9f0", "#cbd5e1"],
+            "cores": ["#f3f5f9", "#e1e8f1", "#cbd7e6", "#8ea2bf"],
             "seed": 412,
         },
         "moldura": {"estilo": "passepartout", "cor": "#ffffff", "cor_secundaria": "#cbd5e1", "espessura_mm": 0.45},
@@ -1602,7 +1641,7 @@ CATALOGO_TEMAS = (
             "subtipo": "ondas_sedosas",
             "textura": "papel_botanico",
             "padrao_cor": "branco",
-            "cores": ["#f7f3eb", "#ede4d3", "#dfd3be", "#a39681"],
+            "cores": ["#eee2c8", "#dfcca4", "#c9b385", "#7f7a4e"],
             "seed": 707,
         },
         "moldura": {"estilo": "simples", "cor": "#fffdf9", "cor_secundaria": "#d6c7b2", "espessura_mm": 0.45},
@@ -1622,7 +1661,7 @@ CATALOGO_TEMAS = (
             "subtipo": "bokeh_luz",
             "textura": "veludo_ouro",
             "padrao_cor": "preto",
-            "cores": ["#0f1014", "#18171c", "#241e14", "#eab308"],
+            "cores": ["#141117", "#251c27", "#3d2b17", "#e0b040"],
             "seed": 1225,
         },
         "moldura": {"estilo": "degrade_real", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.50},
@@ -1642,7 +1681,7 @@ CATALOGO_TEMAS = (
             "subtipo": "prisma_geometrico",
             "textura": "veludo_ouro",
             "padrao_cor": "preto",
-            "cores": ["#0b0d13", "#0f241f", "#141d2f", "#d4af37"],
+            "cores": ["#0a1915", "#0f4034", "#1b2d4f", "#d4af37"],
             "seed": 909,
         },
         "moldura": {"estilo": "cantoneira", "cor": "#d4af37", "cor_secundaria": "#fef08a", "espessura_mm": 0.45},
@@ -1662,7 +1701,7 @@ CATALOGO_TEMAS = (
             "subtipo": "linear_diagonal",
             "textura": "papel_botanico",
             "padrao_cor": "branco",
-            "cores": ["#f8f5ee", "#efe7d6", "#e2d4b7", "#c5a059"],
+            "cores": ["#f2e8d4", "#e4d1ab", "#d3b884", "#b8893f"],
             "angulo": 38,
             "seed": 5050,
         },
@@ -1683,7 +1722,7 @@ CATALOGO_TEMAS = (
             "subtipo": "ondas_sedosas",
             "textura": "gesso_marmore",
             "padrao_cor": "branco",
-            "cores": ["#faf8f5", "#f3ede2", "#e7dac6", "#d4af37"],
+            "cores": ["#f7f0e6", "#eddfca", "#dfc8a8", "#c9a35c"],
             "seed": 303,
         },
         "moldura": {"estilo": "royal", "cor": "#c5a880", "cor_secundaria": "#ffffff", "espessura_mm": 0.45},
@@ -1694,28 +1733,92 @@ CATALOGO_TEMAS = (
 
 MAPA_TEMAS = {t["id"]: t for t in CATALOGO_TEMAS}
 
+# Molduras automáticas de cada evento: estilo da foto de destaque, das secundárias e a alternativa
+# (que reveza com a secundária de uma lâmina para a outra). Estilos de ESTILOS_MOLDURA.
+MOLDURAS_EVENTO = {
+    "colacao_royal": {"destaque": "royal", "secundaria": "simples", "alternativa": "cantoneira",
+                      "cor": "#d4af37", "cor_secundaria": "#fef08a"},
+    "estudio_dark_bokeh": {"destaque": "dupla", "secundaria": "passepartout", "alternativa": "halo",
+                           "cor": "#cbd5e1", "cor_secundaria": "#7aa7e0"},
+    "jaleco_fine_art": {"destaque": "passepartout", "secundaria": "simples", "alternativa": "chanfrada",
+                        "cor": "#ffffff", "cor_secundaria": "#7c8ea8"},
+    "externas_botanica": {"destaque": "pontilhada", "secundaria": "simples", "alternativa": "cantoneira",
+                          "cor": "#fffaf0", "cor_secundaria": "#7f7a4e"},
+    "baile_dark_luxury": {"destaque": "degrade_real", "secundaria": "tripla", "alternativa": "royal",
+                          "cor": "#d4af37", "cor_secundaria": "#f7e7b0"},
+    "culto_solenidade": {"destaque": "cantoneira", "secundaria": "simples", "alternativa": "cruzada",
+                         "cor": "#d4af37", "cor_secundaria": "#2f8f6f"},
+    "ensaio_linho": {"destaque": "tripla", "secundaria": "simples", "alternativa": "passepartout",
+                     "cor": "#c5a059", "cor_secundaria": "#faf0ca"},
+    "casamento_perola": {"destaque": "royal", "secundaria": "passepartout", "alternativa": "simples",
+                         "cor": "#c5a880", "cor_secundaria": "#ffffff"},
+}
+MOLDURAS_SEM_EVENTO = {"destaque": "passepartout", "secundaria": "simples", "alternativa": "passepartout"}
+CONTRASTE_MINIMO_MOLDURA = 2.0
 
-def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0):
+
+def _luminancia_relativa(rgb):
+    def canal(c):
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb[:3]
+    return 0.2126 * canal(r) + 0.7152 * canal(g) + 0.0722 * canal(b)
+
+
+def contraste_cores(cor_a, cor_b):
+    """Razão de contraste (WCAG, 1 a 21) entre duas cores."""
+    la = _luminancia_relativa(cor_rgb(cor_a))
+    lb = _luminancia_relativa(cor_rgb(cor_b))
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def cores_moldura_com_contraste(cor, cor_secundaria, cor_fundo, minimo=CONTRASTE_MINIMO_MOLDURA):
+    """
+    Devolve (cor, cor_secundaria) visíveis sobre `cor_fundo`: mantém a cor do evento se já contrasta,
+    senão troca pela secundária, senão clareia ou escurece a cor até chegar ao contraste mínimo.
+    """
+    if contraste_cores(cor, cor_fundo) >= minimo:
+        return cor, cor_secundaria
+    if cor_secundaria and contraste_cores(cor_secundaria, cor_fundo) >= minimo:
+        return cor_secundaria, cor
+    fundo_claro = _luminancia_relativa(cor_rgb(cor_fundo)) > 0.18
+    alvo = (0, 0, 0) if fundo_claro else (255, 255, 255)
+    ajustada = cor
+    for passo in range(1, 11):
+        ajustada = _misturar_rgb_hex(cor_rgb(cor), alvo, passo / 10.0)
+        if contraste_cores(ajustada, cor_fundo) >= minimo:
+            break
+    return ajustada, cor_secundaria or cor
+
+
+def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0, medidas_mm=None, paleta=None):
     """
     Gera o fundo `.png` editável na pasta temporária para o tema escolhido,
-    combinando a atmosfera do tema com um toque sutil das fotos da lâmina quando disponível.
+    combinando a atmosfera do tema com um toque das cores das fotos da lâmina quando disponível.
+    `medidas_mm` = (largura, altura) da área coberta, para a escala da textura.
     """
     tema_cfg = MAPA_TEMAS.get(id_tema) or CATALOGO_TEMAS[0]
     espec = dict(tema_cfg["fundo_espec"])
+    espec["tipo"] = espec.get("tipo") or espec.get("categoria") or "degrade"
     cores = list(espec.get("cores") or ["#121318", "#1e222d", "#282c3a"])
-    if fotos_lamina:
+    if fotos_lamina or paleta:
         try:
-            pal = extrair_paleta_fotos(fotos_lamina, info=info)
-            acento_foto = (pal.get("acentos_vivos") or pal.get("cores_principais") or [None])[0]
+            pal = paleta or extrair_paleta_fotos(fotos_lamina, info=info)
+            acento_foto = (pal.get("cores_destaque_fotos") or [None])[0]
             if acento_foto and len(cores) >= 3:
-                rgb_tema = cor_rgb(cores[1])
-                rgb_foto = cor_rgb(acento_foto)
-                cores[1] = _misturar_rgb_hex(rgb_tema, rgb_foto, 0.18)
+                # Força média: o tema continua reconhecível e ganha a cor das fotos da lâmina.
+                # Temas claros recebem metade, para o branco/areia não virar rosa ou verde.
+                forca = 0.30 if espec.get("padrao_cor") == "preto" else 0.15
+                cores[1] = _misturar_rgb_hex(cor_rgb(cores[1]), cor_rgb(acento_foto), forca)
+                cores[2] = _misturar_rgb_hex(cor_rgb(cores[2]), cor_rgb(acento_foto), forca / 2.0)
         except Exception:
             pass
     espec["cores"] = cores
     espec["seed"] = int(espec.get("seed", 100)) + int(seed_extra)
     espec["id"] = f"{espec.get('id', 'tema')}_{espec['seed']}"
+    if medidas_mm and medidas_mm[0] and medidas_mm[1]:
+        espec["largura_mm"] = round(float(medidas_mm[0]), 1)
+        espec["altura_mm"] = round(float(medidas_mm[1]), 1)
     return criar_dados_fundo_gerado(espec, materializar=True)
 
 

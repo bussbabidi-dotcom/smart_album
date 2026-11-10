@@ -396,12 +396,18 @@ def dados_proporcao(dados):
     return float(dados.get("proporcao") or (dados["w"] / float(dados["h"])))
 
 
-def fundos_imagem(projeto):
-    """As imagens de fundo das lâminas (inteira, página esquerda e página direita)."""
+def fundos_imagem(projeto, incluir_gerados=True):
+    """
+    As imagens de fundo das lâminas (inteira, página esquerda e página direita).
+    Fundos gerados pelo programa têm a receita em "gerado" e o PNG é recriado quando falta;
+    com incluir_gerados=False ficam de fora (não contam como foto sumida nem são relinkados).
+    """
     for dono in projeto.get("laminas", []):
         for ch in ("fundo_imagem", "fundo_imagem_esquerda", "fundo_imagem_direita"):
             dados = dono.get(ch)
             if isinstance(dados, dict) and dados.get("caminho"):
+                if not incluir_gerados and isinstance(dados.get("gerado"), dict) and dados["gerado"]:
+                    continue
                 yield dados
 
 
@@ -428,7 +434,7 @@ def trocar_caminho(projeto, antigo, novo):
 def faltando(projeto):
     caminhos = [f["caminho"] for f in projeto["fotos"]]
     caminhos += [e["foto"] for e in todos_espacos(projeto) if e.get("foto")]
-    caminhos += [d["caminho"] for d in fundos_imagem(projeto)]
+    caminhos += [d["caminho"] for d in fundos_imagem(projeto, incluir_gerados=False)]
     vistos = set()
     saida = []
     for c in caminhos:

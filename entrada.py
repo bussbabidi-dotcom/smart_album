@@ -404,7 +404,7 @@ def consertar_caminhos(projeto, nova_pasta, forcar_todas=False):
     if forcar_todas or not alvos:
         todos = [f["caminho"] for f in projeto.get("fotos", []) if f.get("caminho")]
         todos += [e["foto"] for e in proj.todos_espacos(projeto) if e.get("foto")]
-        todos += [d["caminho"] for d in proj.fundos_imagem(projeto) if d.get("caminho")]
+        todos += [d["caminho"] for d in proj.fundos_imagem(projeto, incluir_gerados=False) if d.get("caminho")]
         vistos = set()
         alvos = []
         for c in todos:
