@@ -441,7 +441,8 @@ class Aplicativo:
         corpo.pack(side="top", fill="both", expand=True)
 
         # Barra vertical esquerda de ferramentas estilo Adobe Photoshop CC
-        self.barra_ferramentas = tk.Frame(corpo, bg=tema.PAINEL, width=34, padx=2, pady=4)
+        self.barra_ferramentas = tk.Frame(corpo, bg=tema.PAINEL, width=tema.px_ferramenta(34),
+                                          padx=2, pady=tema.px_ferramenta(4))
         self.barra_ferramentas.pack(side="left", fill="y")
         self._montar_ferramentas_esquerda(self.barra_ferramentas)
         tk.Frame(corpo, bg=tema.BORDA, width=1).pack(side="left", fill="y")
@@ -855,34 +856,35 @@ class Aplicativo:
 
     def _montar_ferramentas_esquerda(self, barra):
         """Barra vertical esquerda unificando ferramentas de edição de foto/espaço e os botões das abas."""
+        esp = tema.px_ferramenta(2)
         bt_mover = ttk.Checkbutton(barra, text="⬚", variable=self.editar_layout,
                                    style="Ferramenta.Toolbutton", command=self._mudou_modo_layout, width=2)
-        bt_mover.pack(pady=2)
+        bt_mover.pack(fill="x", pady=esp)
         tema.dica(bt_mover, "Mover / redimensionar espaços (Tecla L)")
 
         estilo_ic = "Ferramenta.TButton"
         self._botao(barra, "✂", self.editar_foto_selecionada,
-                    "Editor de Foto, 1-Clique e Edição em Lote (Enter)", estilo_ic, width=2).pack(pady=2)
+                    "Editor de Foto, 1-Clique e Edição em Lote (Enter)", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "↻", self.girar_foto_selecionada,
-                    "Girar foto 90°", estilo_ic, width=2).pack(pady=2)
+                    "Girar foto 90°", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "＝", lambda: self.alinhar_espaco("igualar"),
-                    "Igualar tamanho das fotos selecionadas", estilo_ic, width=2).pack(pady=2)
+                    "Igualar tamanho das fotos selecionadas", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "⊡", lambda: self.alinhar_espaco("proporcao_foto"),
-                    "Proporção original da foto (0% corte)", estilo_ic, width=2).pack(pady=2)
+                    "Proporção original da foto (0% corte)", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "⇕", lambda: self.alinhar_espaco("pagina_util"),
-                    "Preencher página 100% até a sangria", estilo_ic, width=2).pack(pady=2)
+                    "Preencher página 100% até a sangria", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "＋", self.adicionar_espaco,
-                    "Novo espaço na página", estilo_ic, width=2).pack(pady=2)
+                    "Novo espaço na página", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "❐", self.duplicar_espaco,
-                    "Duplicar espaço selecionado", estilo_ic, width=2).pack(pady=2)
+                    "Duplicar espaço selecionado", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "↑", lambda: self.ordem_espaco(True),
-                    "Trazer para a frente", estilo_ic, width=2).pack(pady=2)
+                    "Trazer para a frente", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "↓", lambda: self.ordem_espaco(False),
-                    "Mandar para trás", estilo_ic, width=2).pack(pady=2)
+                    "Mandar para trás", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "🗑", self._tecla_apagar,
-                    "Tirar foto / apagar espaço selecionado", estilo_ic, width=2).pack(pady=2)
+                    "Tirar foto / apagar espaço selecionado", estilo_ic, width=2).pack(fill="x", pady=esp)
 
-        tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=1, pady=4)
+        tk.Frame(barra, bg=tema.BORDA, height=1).pack(fill="x", padx=1, pady=tema.px_ferramenta(4))
 
         self.botoes_abas_esquerda = {}
         self.vars_abas_esquerda = {}
@@ -906,7 +908,7 @@ class Aplicativo:
                 width=2,
                 command=lambda c=chave_aba: self.alternar_aba_lateral(c),
             )
-            bt_aba.pack(pady=2)
+            bt_aba.pack(fill="x", pady=esp)
             tema.dica(bt_aba, dica_aba)
             self.botoes_abas_esquerda[chave_aba] = bt_aba
 

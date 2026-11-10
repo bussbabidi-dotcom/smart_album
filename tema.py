@@ -40,6 +40,17 @@ FONTE_PEQUENA = ("Segoe UI", 8)
 FONTE_MONO = ("Consolas", 8)
 FONTE_ICONE = ("Segoe UI Symbol", 9)
 
+# Barra vertical esquerda de ferramentas: fontes, recuos e espaçamentos derivam desta escala
+ESCALA_FERRAMENTAS = 1.25
+
+
+def px_ferramenta(valor):
+    return max(1, int(valor * ESCALA_FERRAMENTAS + 0.5))
+
+
+FONTE_FERRAMENTA = (FONTE[0], px_ferramenta(FONTE[1]))
+FONTE_ICONE_FERRAMENTA = (FONTE_ICONE[0], px_ferramenta(FONTE_ICONE[1]))
+
 
 def configurar(root):
     root.configure(bg=FUNDO)
@@ -107,13 +118,14 @@ def configurar(root):
     estilo.map("Alternar.Toolbutton", background=[("selected", DESTAQUE_ESCURO), ("active", PAINEL_3)],
                foreground=[("selected", "#ffffff")])
 
+    pad_ferramenta = (px_ferramenta(2), px_ferramenta(2))
     estilo.configure("Ferramenta.Toolbutton", background=PAINEL, foreground=TEXTO, borderwidth=0,
-                     padding=(2, 2), relief="flat", anchor="center", width=2)
+                     padding=pad_ferramenta, font=FONTE_FERRAMENTA, relief="flat", anchor="center", width=2)
     estilo.map("Ferramenta.Toolbutton", background=[("selected", DESTAQUE_ESCURO), ("active", PAINEL_3)],
                foreground=[("selected", "#ffffff")])
 
     estilo.configure("Ferramenta.TButton", background=PAINEL, foreground=TEXTO, borderwidth=0,
-                     padding=(2, 2), font=FONTE_ICONE, anchor="center", width=2)
+                     padding=pad_ferramenta, font=FONTE_ICONE_FERRAMENTA, anchor="center", width=2)
     estilo.map("Ferramenta.TButton", background=[("active", PAINEL_3)])
 
     estilo.configure("BarraOpcoes.TFrame", background=CABECALHO)
