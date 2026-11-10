@@ -27,7 +27,9 @@ MAX_POR_PAGINA = 8
 MAX_LINHAS = 4
 
 PESO_CORTE = 10.0
-PESO_VAZIO = 9.5
+PESO_VAZIO = 14.0
+PESO_VAZIO_LAMINA = 16.0
+PESO_BURACO = 6.0
 PESO_PEQUENA = 1.8
 PESO_DESEQUILIBRIO = 0.30
 PESO_PAGINA_VAZIA = 3.2
@@ -200,6 +202,48 @@ def _composicoes(n, max_partes, max_tamanho):
             continue
         for resto in _composicoes(n - primeiro, max_partes - 1, max_tamanho):
             yield (primeiro,) + resto
+
+
+def _fotos_por_linha(n):
+    """Máximo de fotos numa linha: MAX_LINHAS, ou mais quando a página recebe mais fotos que MAX_LINHAS²."""
+    return max(MAX_LINHAS, int(math.ceil(n / float(MAX_LINHAS))))
+
+
+def _ordens_por_proporcao(proporcoes):
+    """
+    Ordens testadas ao montar linhas e colunas: a recebida, da mais vertical para a mais horizontal,
+    o inverso e intercalada (vertical, horizontal, vertical...). Assim as linhas podem juntar fotos da
+    mesma orientação ou misturá-las, o que preencher melhor a página.
+    """
+    n = len(proporcoes)
+    crescente = sorted(range(n), key=lambda i: (proporcoes[i], i))
+    intercalada = []
+    a, b = 0, n - 1
+    while a <= b:
+        intercalada.append(crescente[a])
+        a += 1
+        if a <= b:
+            intercalada.append(crescente[b])
+            b -= 1
+    vistas, ordens = set(), []
+    for ordem in (list(range(n)), crescente, crescente[::-1], intercalada):
+        chave = tuple(round(float(proporcoes[i]), 3) for i in ordem)
+        if chave not in vistas:
+            vistas.add(chave)
+            ordens.append(ordem)
+    return ordens
+
+
+def _classe_orientacao(proporcao):
+    """0 vertical, 1 quadrada, 2 horizontal, 3 panorâmica."""
+    p = float(proporcao or 1.0)
+    if p >= 1.85:
+        return 3
+    if p >= 1.05:
+        return 2
+    if p > 0.95:
+        return 1
+    return 0
 
 
 def _distribuir_larguras_linha(proporcoes_linha, largura_util, altura_linha, corte_max=CORTE_MAXIMO):
@@ -596,7 +640,7 @@ def _layouts_sem_corte(proporcoes, area, espaco, priorizar=False):
         return []
     x0, y0, W, H = area
     saida = []
-    for linhas in _composicoes(n, min(MAX_LINHAS, n), min(MAX_LINHAS, n)):
+    for linhas in _composicoes(n, min(MAX_LINHAS, n), _fotos_por_linha(n)):
         disponivel_h = H - espaco * (len(linhas) - 1)
         if disponivel_h <= 0:
             continue
@@ -811,6 +855,18 @@ def _custo_rosto_na_dobra(foto, quadro, lw):
     return 0.0, round(dobra_x, 4)
 
 
+def _ajuste_estilo_transpasse(foto, proporcao):
+    """
+    Custo extra de uma foto atravessar a dobra: só compensa para foto de destaque ou panorâmica,
+    ou quando a grade não consegue preencher as páginas.
+    """
+    if foto.get("destaque"):
+        return 0.25
+    if proporcao >= 1.85:
+        return 0.40
+    return 0.85
+
+
 def _layouts_transpasse_central(fotos, produto, cfg):
     """
     Gera vários layouts que atravessam o meio da lâmina (x = 50%):
@@ -848,137 +904,82 @@ def _layouts_transpasse_central(fotos, produto, cfg):
         reverse=True,
     )[:min(n, 3)]
 
-    # 1. Layouts 60/40 e 70/30 (Variação SANGRADA no Destaque + Variação Safe Zone)
-    for fracao_hero, etiqueta_tipo in ((0.60, "transpasse_60_40"), (0.70, "transpasse_70_30")):
-        # A) Variação SANGRADA: Foto em destaque vai até a sangria (0..W*fracao_hero ou W*(1-fracao_hero)..W e 0..H)
-        w_hero_sang = max(20.0, W * fracao_hero)
-        w_resto_sang = W - w_hero_sang - intervalo - margem
-        if w_resto_sang > 20.0:
+    def montar(idx_hero, q_hero, area_resto, etiqueta, extra):
+        f_hero = fotos[idx_hero]
+        indices_rest = [i for i in range(n) if i != idx_hero]
+        props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
+        opcoes_r = _opcoes_pagina(props_rest, area_resto, intervalo, 1, corte_max)
+        if not opcoes_r or not opcoes_r[0][1]:
+            return
+        _cr, quadros_r, _mod_r, ordem_r = opcoes_r[0]
+        quadros_mapa = {idx_hero: q_hero}
+        for qr, idx_rel in zip(quadros_r, ordem_r):
+            quadros_mapa[indices_rest[idx_rel]] = qr
+        pen_rosto, _dobra_h = _custo_rosto_na_dobra(f_hero, q_hero, W)
+        espacos = []
+        for i in range(n):
+            _pen, dobra_rel = _custo_rosto_na_dobra(fotos[i], quadros_mapa[i], W)
+            ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
+            espacos.append(_espaco(produto, quadros_mapa[i], fotos[i]["caminho"], ed))
+        saida.append({
+            "custo": _ajuste_estilo_transpasse(f_hero, max(0.15, float(f_hero["proporcao"]))) + extra + pen_rosto,
+            "espacos": espacos,
+            "sobreposicoes": [],
+            "modelo": None,
+            "tipo_layout": etiqueta,
+        })
+
+    # 1. Foto em destaque atravessando a dobra (sangrada ou dentro da Safe Zone). A largura dela sai da
+    #    sua proporção (a largura natural na altura disponível), além de frações vizinhas entre 52% e 80%.
+    for idx_hero in candidatos_hero:
+        f_hero = fotos[idx_hero]
+        p_hero = max(0.15, float(f_hero["proporcao"]))
+        fracoes = sorted({
+            round(min(0.80, max(0.52, f)), 2)
+            for f in (0.55, 0.62, 0.70, 0.78, H * p_hero / W, area_h * p_hero / (area_w - intervalo))
+        })
+        for fracao_hero in fracoes:
+            etiqueta_tipo = "transpasse_60_40" if fracao_hero < 0.65 else "transpasse_70_30"
+
+            # A) Variação SANGRADA: a foto em destaque vai até a sangria; as demais ficam na Safe Zone
+            w_hero_sang = W * fracao_hero
+            w_resto_sang = W - w_hero_sang - intervalo - margem
+            if w_resto_sang > 20.0:
+                for lado_hero in ("esq", "dir"):
+                    if lado_hero == "esq":
+                        x_hero_s, x_resto_s = 0.0, w_hero_sang + intervalo
+                    else:
+                        x_hero_s, x_resto_s = W - w_hero_sang, margem
+                    q_hero_sang = (x_hero_s, 0.0, w_hero_sang, H)
+                    if (
+                        _corte_quadro(p_hero, q_hero_sang) > corte_max * 1.08
+                        or _risco_cortar_pessoas(f_hero, q_hero_sang)[2] > 0.0
+                    ):
+                        continue
+                    montar(idx_hero, q_hero_sang, (x_resto_s, margem, w_resto_sang, area_h), etiqueta_tipo, 0.0)
+
+            # B) Variação Safe Zone
+            w_hero = (area_w - intervalo) * fracao_hero
+            w_resto = (area_w - intervalo) - w_hero
+            if w_hero <= 20 or w_resto <= 20:
+                continue
             for lado_hero in ("esq", "dir"):
                 if lado_hero == "esq":
-                    x_hero_s = 0.0
-                    x_resto_s = w_hero_sang + intervalo
+                    x_hero, x_resto = margem, margem + w_hero + intervalo
                 else:
-                    x_hero_s = W - w_hero_sang
-                    x_resto_s = margem
-
-                q_hero_sang = (x_hero_s, 0.0, w_hero_sang, H)
-                area_resto_sang = (x_resto_s, margem, w_resto_sang, area_h)
-
-                for idx_hero in candidatos_hero:
-                    f_hero = fotos[idx_hero]
-                    p_hero = max(0.15, float(f_hero["proporcao"]))
-                    corte_h_s = _corte_quadro(p_hero, q_hero_sang)
-                    _ex_x, _ex_y, pen_pessoas_s = _risco_cortar_pessoas(f_hero, q_hero_sang)
-                    if corte_h_s > corte_max * 1.08 or pen_pessoas_s > 0.0:
-                        continue
-
-                    indices_rest = [i for i in range(n) if i != idx_hero]
-                    props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
-                    opcoes_r = layouts_pagina(props_rest, area_resto_sang, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
-                    if not opcoes_r or not opcoes_r[0][1]:
-                        continue
-                    _cr, quadros_r, _mod_r, ordem_r = opcoes_r[0]
-
-                    quadros_mapa = {idx_hero: q_hero_sang}
-                    for qr, idx_rel in zip(quadros_r, ordem_r):
-                        quadros_mapa[indices_rest[idx_rel]] = qr
-
-                    quadros = [quadros_mapa[i] for i in range(n)]
-                    cortes = [_corte_quadro(fotos[i]["proporcao"], q) for i, q in enumerate(quadros)]
-                    pen_rosto, _dobra_h = _custo_rosto_na_dobra(f_hero, q_hero_sang, W)
-                    bonus_s = -0.22 if f_hero.get("destaque") else (-0.08 if p_hero >= 1.35 else 0.15)
-
-                    custo_s = (
-                        0.28
-                        + bonus_s
-                        + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n
-                        + pen_rosto
-                    )
-                    espacos = []
-                    for foto_item, quadro_item in zip(fotos, quadros):
-                        _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
-                        ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
-                        espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
-
-                    saida.append({
-                        "custo": custo_s,
-                        "espacos": espacos,
-                        "sobreposicoes": [],
-                        "modelo": None,
-                        "tipo_layout": etiqueta_tipo,
-                    })
-
-        # B) Variação Safe Zone
-        w_hero = (area_w - intervalo) * fracao_hero
-        w_resto = (area_w - intervalo) - w_hero
-        if w_hero <= 20 or w_resto <= 20:
-            continue
-
-        for lado_hero in ("esq", "dir"):
-            if lado_hero == "esq":
-                x_hero = margem
-                x_resto = margem + w_hero + intervalo
-            else:
-                x_resto = margem
-                x_hero = margem + w_resto + intervalo
-
-            area_hero = (x_hero, margem, w_hero, area_h)
-            area_resto = (x_resto, margem, w_resto, area_h)
-
-            for idx_hero in candidatos_hero:
-                p_hero = max(0.15, float(fotos[idx_hero]["proporcao"]))
+                    x_resto, x_hero = margem, margem + w_resto + intervalo
+                area_hero = (x_hero, margem, w_hero, area_h)
                 q_hero = area_hero
-                if _corte_quadro(p_hero, q_hero) > corte_max + 0.04 or _risco_cortar_pessoas(fotos[idx_hero], q_hero)[2] > 0.0:
+                if _corte_quadro(p_hero, q_hero) > corte_max or _risco_cortar_pessoas(f_hero, q_hero)[2] > 0.0:
                     q_hero = caixa_proporcao_padrao(p_hero, area_hero)
                     if lado_hero == "esq":
                         q_hero = (margem, q_hero[1], q_hero[2], q_hero[3])
                     else:
                         q_hero = (W - margem - q_hero[2], q_hero[1], q_hero[2], q_hero[3])
-
-                # Verifica se o quadro realmente atravessa a linha central (W / 2)
                 meio = W / 2.0
                 if not (q_hero[0] < meio - 4.0 and q_hero[0] + q_hero[2] > meio + 4.0):
                     continue
-
-                indices_rest = [i for i in range(n) if i != idx_hero]
-                props_rest = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_rest]
-                opcoes_r = layouts_pagina(props_rest, area_resto, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
-                if not opcoes_r or not opcoes_r[0][1]:
-                    continue
-                _cr, quadros_r, _mod_r, ordem_r = opcoes_r[0]
-
-                quadros_mapa = {idx_hero: q_hero}
-                for qr, idx_rel in zip(quadros_r, ordem_r):
-                    quadros_mapa[indices_rest[idx_rel]] = qr
-
-                quadros = [quadros_mapa[i] for i in range(n)]
-                cortes = [_corte_quadro(fotos[i]["proporcao"], q) for i, q in enumerate(quadros)]
-                usado = sum(q[2] * q[3] for q in quadros)
-                vazio = max(0.0, 1.0 - usado / max(1.0, area_w * area_h))
-                pen_rosto, _dobra_h = _custo_rosto_na_dobra(fotos[idx_hero], q_hero, W)
-                bonus_t = -0.14 if (fotos[idx_hero].get("destaque") or p_hero >= 1.85) else 0.18
-
-                custo = (
-                    0.32
-                    + bonus_t
-                    + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n
-                    + PESO_VAZIO * 0.45 * vazio
-                    + pen_rosto
-                )
-                espacos = []
-                for foto_item, quadro_item in zip(fotos, quadros):
-                    _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
-                    ed = {"dobra_x": dobra_rel} if dobra_rel is not None else {}
-                    espacos.append(_espaco(produto, quadro_item, foto_item["caminho"], ed))
-
-                saida.append({
-                    "custo": custo,
-                    "espacos": espacos,
-                    "sobreposicoes": [],
-                    "modelo": None,
-                    "tipo_layout": etiqueta_tipo,
-                })
+                montar(idx_hero, q_hero, (x_resto, margem, w_resto, area_h), etiqueta_tipo, 0.05)
 
     # 2. Layout Panorâmico Horizontal Sangrado atravessando o meio no topo (APENAS para fotos realmente panorâmicas)
     indice_hero = candidatos_hero[0]
@@ -997,17 +998,16 @@ def _layouts_transpasse_central(fotos, produto, cfg):
                 indices_restantes = [i for i in range(n) if i != indice_hero]
                 props_restantes = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_restantes]
                 area_inferior = (margem, inferior_y, area_w, inferior_h)
-                melhores_inf = layouts_pagina(props_restantes, area_inferior, intervalo, (), produto=None, pagina=0, maximo=1, corte_max=corte_max)
+                melhores_inf = _opcoes_pagina(props_restantes, area_inferior, intervalo, 1, corte_max)
                 if melhores_inf and melhores_inf[0][1]:
                     _c_inf, quadros_inf, _mod_inf, ordem_inf = melhores_inf[0]
                     quadros_mapa = {indice_hero: quadro_hero}
                     for q_inf, idx_rel in zip(quadros_inf, ordem_inf):
                         quadros_mapa[indices_restantes[idx_rel]] = q_inf
                     quadros = [quadros_mapa[i] for i in range(n)]
-                    cortes = [_corte_quadro(fotos[i]["proporcao"], quadro) for i, quadro in enumerate(quadros)]
                     pen_rosto, _dobra = _custo_rosto_na_dobra(f_hero_pan, quadro_hero, W)
                     bonus_pan = -0.22 if f_hero_pan.get("destaque") else -0.06
-                    custo = 0.30 + bonus_pan + PESO_CORTE * sum(math.log(max(1.0, c)) ** 2 for c in cortes) / n + pen_rosto
+                    custo = 0.30 + bonus_pan + pen_rosto
                     espacos = []
                     for foto_item, quadro_item in zip(fotos, quadros):
                         _pen, dobra_rel = _custo_rosto_na_dobra(foto_item, quadro_item, W)
@@ -1083,18 +1083,15 @@ def _layouts_meio_termo(fotos, produto, cfg):
                     continue
                 q_hero = q_cand
 
-            corte_h = _corte_quadro(p_hero, q_hero)
             eh_destaque = bool(f_hero.get("destaque"))
 
             indices_safe = [i for i in range(n) if i != idx_hero]
             props_safe = [max(0.1, float(fotos[i]["proporcao"])) for i in indices_safe]
-            opcoes_safe = layouts_pagina(
-                props_safe, area_safe, intervalo, (), produto=None, pagina=pagina_safe, maximo=2, corte_max=corte_max
-            )
+            opcoes_safe = _opcoes_pagina(props_safe, area_safe, intervalo, 2, corte_max)
             if not opcoes_safe:
                 continue
 
-            for c_safe, quadros_safe, _mod_s, ordem_safe in opcoes_safe[:2]:
+            for _c_safe, quadros_safe, _mod_s, ordem_safe in opcoes_safe[:2]:
                 quadros_mapa = {idx_hero: q_hero}
                 for qs, idx_rel in zip(quadros_safe, ordem_safe):
                     quadros_mapa[indices_safe[idx_rel]] = qs
@@ -1105,12 +1102,8 @@ def _layouts_meio_termo(fotos, produto, cfg):
                     ordem_final = [indices_safe[idx_rel] for idx_rel in ordem_safe] + [idx_hero]
 
                 espacos = [_espaco(produto, quadros_mapa[i], fotos[i]["caminho"]) for i in ordem_final]
-                pen_hero = PESO_CORTE * (math.log(max(1.0, corte_h)) ** 2) * 0.55
-                bonus = -0.24 if eh_destaque else -0.04
-                custo = 0.30 + bonus + pen_hero + c_safe
-
                 saida.append({
-                    "custo": custo,
+                    "custo": 0.25 if eh_destaque else 0.60,
                     "espacos": espacos,
                     "sobreposicoes": [],
                     "modelo": None,
@@ -1135,7 +1128,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
     lw, lh = lamina_mm(produto)
     paginas = produto.get("paginas_por_lamina", 1)
     intervalo = max(0.0, float(cfg["espacamento_mm"]))
-    min_pagina, max_pagina = _limites_pagina(cfg, produto)
+    max_pagina = _limites_pagina(cfg, produto)[1]
     corte_max = _limite_corte_cfg(cfg)
     saida = []
 
@@ -1148,7 +1141,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
         # Só permite que 1 única foto ocupe a lâmina inteira de ponta a ponta se for panorâmica compatível e não cortar pessoas
         if p0 >= 1.85 and corte_tot <= corte_max * 1.08 and _risco_cortar_pessoas(f0, q_total)[2] <= 0.0:
             saida.append({
-                "custo": (0.18 if eh_dest0 else 0.55) + PESO_CORTE * math.log(max(1.0, corte_tot)) ** 2,
+                "custo": 0.18 if eh_dest0 else 0.55,
                 "espacos": [_espaco(produto, q_total, f0["caminho"])],
                 "sobreposicoes": [],
                 "modelo": None,
@@ -1160,7 +1153,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
                 corte_p = _corte_quadro(p0, area_p)
                 if corte_p <= corte_max * 1.08 and _risco_cortar_pessoas(f0, area_p)[2] <= 0.0:
                     saida.append({
-                        "custo": (0.28 if eh_dest0 else 0.68) + PESO_CORTE * math.log(max(1.0, corte_p)) ** 2,
+                        "custo": 0.28 if eh_dest0 else 0.68,
                         "espacos": [_espaco(produto, area_p, f0["caminho"])],
                         "sobreposicoes": [],
                         "modelo": None,
@@ -1187,9 +1180,7 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
                     area_p = (px + intervalo / 2.0, py, max(10.0, pw - intervalo / 2.0), ph)
             else:
                 area_p = (px, py, pw, ph)
-            ops_p = layouts_pagina(
-                [f["proporcao"] for f in grupo], area_p, intervalo, (), produto=None, pagina=pagina, maximo=2, corte_max=corte_max * 1.08
-            )
+            ops_p = _opcoes_pagina([f["proporcao"] for f in grupo], area_p, intervalo, 2, corte_max * 1.08)
             ops_validas = []
             for op_cand in ops_p:
                 _c_cand, quadros_cand, _m_cand, ord_cand = op_cand
@@ -1209,16 +1200,13 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
         if not viavel:
             continue
 
-        penalidade = PESO_DESEQUILIBRIO * abs(divisao[0] - divisao[1]) if len(divisao) == 2 else 0.0
-        penalidade += _penalidade_pagina_vazia_demais(divisao, n, min_pagina)
         for combinacao in itertools.product(*[p[1] for p in por_pagina]):
             espacos = []
             for (grupo, _ops), (_c, quadros, _mod, ordem) in zip(por_pagina, combinacao):
                 for quadro, indice in zip(quadros, ordem):
                     espacos.append(_espaco(produto, quadro, grupo[indice]["caminho"]))
-            custo = 0.95 + penalidade + sum(c[0] for c in combinacao)
             saida.append({
-                "custo": custo,
+                "custo": 0.45,
                 "espacos": espacos,
                 "sobreposicoes": [],
                 "modelo": None,
@@ -1257,7 +1245,6 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
     opcoes = []
     if n == 0:
         return [(0.0, [], None, [])]
-    ordem_natural = list(range(n))
     somente_sem_corte = corte_max <= 1.005
 
     if n == 1:
@@ -1266,20 +1253,22 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
             opcoes.append((_custo([quadro], proporcoes, area, corte, vazio, corte_max=corte_max), [quadro], marcador, [0]))
     else:
         if not somente_sem_corte:
-            # 1. Partições em Linhas Horizontais Elásticas
-            for linhas in _composicoes(n, MAX_LINHAS, MAX_LINHAS):
-                r = _layout_linhas(proporcoes, area, espaco, linhas, corte_max=corte_max)
-                if r:
-                    quadros, corte, vazio = r
-                    opcoes.append((_custo(quadros, proporcoes, area, corte, vazio, corte_max=corte_max), quadros, None, ordem_natural))
-                # 2. Partições em Colunas Verticais Elásticas (transpondo x<->y e w<->h)
-                x0, y0, W, H = area
-                invertidas = [1.0 / max(0.1, float(p)) for p in proporcoes]
-                r_col = _layout_linhas(invertidas, (y0, x0, H, W), espaco, linhas, corte_max=corte_max)
-                if r_col:
-                    quadros_t, corte, vazio = r_col
-                    quadros = [(qy, qx, qh, qw) for (qx, qy, qw, qh) in quadros_t]
-                    opcoes.append((_custo(quadros, proporcoes, area, corte, vazio, corte_max=corte_max) + 0.01, quadros, None, ordem_natural))
+            x0, y0, W, H = area
+            for ordem in _ordens_por_proporcao(proporcoes):
+                props_o = [proporcoes[i] for i in ordem]
+                invertidas = [1.0 / max(0.1, float(p)) for p in props_o]
+                for linhas in _composicoes(n, MAX_LINHAS, _fotos_por_linha(n)):
+                    # 1. Partições em Linhas Horizontais Elásticas
+                    r = _layout_linhas(props_o, area, espaco, linhas, corte_max=corte_max)
+                    if r:
+                        quadros, corte, vazio = r
+                        opcoes.append((_custo(quadros, props_o, area, corte, vazio, corte_max=corte_max), quadros, None, list(ordem)))
+                    # 2. Partições em Colunas Verticais Elásticas (transpondo x<->y e w<->h)
+                    r_col = _layout_linhas(invertidas, (y0, x0, H, W), espaco, linhas, corte_max=corte_max)
+                    if r_col:
+                        quadros_t, corte, vazio = r_col
+                        quadros = [(qy, qx, qh, qw) for (qx, qy, qw, qh) in quadros_t]
+                        opcoes.append((_custo(quadros, props_o, area, corte, vazio, corte_max=corte_max) + 0.01, quadros, None, list(ordem)))
 
             # 3. Composições Assimétricas Dinâmicas (Destaque + Coadjuvantes)
             opcoes.extend(_layouts_assimetricos(proporcoes, area, espaco, corte_max=corte_max))
@@ -1310,7 +1299,11 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
                 opcoes.append((melhor[0], quadros_finais, modelo, melhor[1]))
 
     # 5. Opções com proporção 100% nativa sem corte
-    opcoes.extend(_layouts_sem_corte(proporcoes, area, espaco, priorizar=somente_sem_corte))
+    for ordem in _ordens_por_proporcao(proporcoes):
+        for custo, quadros, marcador, ordem_rel in _layouts_sem_corte(
+            [proporcoes[i] for i in ordem], area, espaco, priorizar=somente_sem_corte
+        ):
+            opcoes.append((custo, quadros, marcador, [ordem[j] for j in ordem_rel]))
 
     # Garantia estrita de que nenhum quadro ultrapasse os limites de `area` (Safe Zone ou página)
     ax0, ay0, aW, aH = area
@@ -1352,18 +1345,206 @@ def layouts_pagina(proporcoes, area, espaco, modelos_pagina=(), produto=None, pa
         unicas.append(opcao)
         if len(unicas) >= maximo:
             break
+    # A variação sem corte entra como alternativa, nunca no lugar da única opção pedida
     if sem_corte is not None and not any(opcao[2] == "__sem_corte__" for opcao in unicas):
-        if len(unicas) >= maximo:
-            unicas[-1] = sem_corte
-        else:
+        if len(unicas) < maximo:
             unicas.append(sem_corte)
+        elif maximo >= 2:
+            unicas[-1] = sem_corte
     unicas.sort(key=lambda opcao: opcao[0])
     return unicas
+
+
+_CACHE_PAGINA = {}
+
+
+def _opcoes_pagina(proporcoes, area, espaco, maximo=3, corte_max=CORTE_MAXIMO):
+    """
+    layouts_pagina calculado sobre as proporções em ordem crescente (o resultado vale para qualquer
+    página com as mesmas proporções e fica em cache). Cada foto vai para o quadro calculado para a sua
+    proporção; entre fotos de proporção igual, a ordem do álbum segue a ordem de leitura dos quadros.
+    """
+    n = len(proporcoes)
+    if n == 0:
+        return [(0.0, [], None, [])]
+    arredondadas = [round(max(0.1, float(p)), 3) for p in proporcoes]
+    base = sorted(arredondadas)
+    chave = (tuple(base), tuple(round(float(v), 2) for v in area), round(float(espaco), 2), maximo, round(float(corte_max), 4))
+    calculadas = _CACHE_PAGINA.get(chave)
+    if calculadas is None:
+        if len(_CACHE_PAGINA) > 5000:
+            _CACHE_PAGINA.clear()
+        calculadas = [
+            (custo, tuple(quadros), marcador, tuple(base[i] for i in ordem))
+            for custo, quadros, marcador, ordem in layouts_pagina(base, area, espaco, (), None, 0, maximo, corte_max)
+        ]
+        _CACHE_PAGINA[chave] = calculadas
+    saida = []
+    for custo, quadros, marcador, aspectos in calculadas:
+        livres = {}
+        for i, p in enumerate(arredondadas):
+            livres.setdefault(p, []).append(i)
+        ordem = [0] * len(quadros)
+        for j in sorted(range(len(quadros)), key=lambda j: (round(quadros[j][1], 1), quadros[j][0])):
+            ordem[j] = livres[aspectos[j]].pop(0)
+        saida.append((custo, list(quadros), marcador, ordem))
+    return saida
 
 
 # ------------------------------------------------------------
 # Opções para uma lâmina e ajuste global para todas as ações
 # ------------------------------------------------------------
+
+def _toca_sangria(e):
+    return (
+        float(e.get("x", 0.0)) <= 0.006
+        or float(e.get("y", 0.0)) <= 0.006
+        or float(e.get("x", 0.0)) + float(e.get("w", 0.0)) >= 0.994
+        or float(e.get("y", 0.0)) + float(e.get("h", 0.0)) >= 0.994
+    )
+
+
+def _custo_lamina(espacos, fotos, produto, cfg):
+    """
+    Custo único para comparar layouts de qualquer tipo (grade, transpasse, meio termo, sangria, sem corte).
+    O que mais pesa é a área útil de cada página que fica sem foto; depois o corte, fotos pequenas ou
+    muito desproporcionais entre si e o equilíbrio de fotos entre as páginas.
+    """
+    if not espacos:
+        return 0.0
+    lw, lh = lamina_mm(produto)
+    paginas = max(1, int(produto.get("paginas_por_lamina", 1) or 1))
+    margem = float(cfg.get("margem_mm", produto.get("margem_mm", 0.0)))
+    corte_max = _limite_corte_cfg(cfg)
+    props = {f.get("caminho"): max(0.1, float(f.get("proporcao") or 1.5)) for f in fotos}
+    quadros = [(e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh) for e in espacos]
+    areas = [area_util_pagina_mm(produto, p, margem, respeitar_seguranca=True) for p in range(paginas)]
+    n = len(quadros)
+
+    vazios = []
+    for ux, uy, uw, uh in areas:
+        coberto = sum(
+            max(0.0, min(x + w, ux + uw) - max(x, ux)) * max(0.0, min(y + h, uy + uh) - max(y, uy))
+            for x, y, w, h in quadros
+        )
+        vazios.append(max(0.0, 1.0 - coberto / max(1.0, uw * uh)))
+    custo = PESO_VAZIO_LAMINA * sum(vazios) / len(vazios) + PESO_BURACO * sum(max(0.0, v - 0.20) for v in vazios)
+
+    soma_corte = 0.0
+    for e, q in zip(espacos, quadros):
+        corte = _corte_quadro(props.get(e.get("foto"), q[2] / max(1e-6, q[3])), q)
+        soma_corte += math.log(max(1.0, corte)) ** 2
+        limite = corte_max * (1.08 if _toca_sangria(e) else 1.0)
+        custo += 200.0 * max(0.0, corte - limite - 1e-3)
+    custo += PESO_CORTE * soma_corte / n
+
+    menor = 0.22 * min(min(a[2], a[3]) for a in areas)
+    for _x, _y, w, h in quadros:
+        if min(w, h) < menor:
+            custo += PESO_PEQUENA * (1.0 - min(w, h) / menor)
+    if n > 1:
+        logs = [math.log(max(1e-6, w * h)) for _x, _y, w, h in quadros]
+        media = sum(logs) / n
+        custo += 0.15 * sum((v - media) ** 2 for v in logs) / n
+
+    if paginas == 2 and n > 1:
+        meio = lw / 2.0
+        if not any(x < meio - 2.0 and x + w > meio + 2.0 for x, _y, w, _h in quadros):
+            por_pagina = [0, 0]
+            for x, _y, w, _h in quadros:
+                por_pagina[0 if x + w / 2.0 < meio else 1] += 1
+            custo += PESO_DESEQUILIBRIO * abs(por_pagina[0] - por_pagina[1])
+            custo += _penalidade_pagina_vazia_demais(por_pagina, n, _limites_pagina(cfg, produto)[0])
+    return custo
+
+
+def _divisoes_paginas(fotos, max_pagina, limite=36):
+    """
+    Índices das fotos da página esquerda em cada divisão testada: a sequência do álbum cortada em cada
+    ponto e, por orientação, cada quantidade de verticais/quadradas/horizontais/panorâmicas na esquerda
+    (as primeiras de cada orientação), para casar as fotos com o formato das páginas.
+    """
+    n = len(fotos)
+    menor_k = max(0, n - max_pagina)
+    maior_k = min(n, max_pagina)
+    divisoes = {tuple(range(k)): None for k in range(menor_k, maior_k + 1)}
+    por_classe = {}
+    for i, f in enumerate(fotos):
+        por_classe.setdefault(_classe_orientacao(f["proporcao"]), []).append(i)
+    classes = sorted(por_classe)
+    por_orientacao = []
+    for qtds in itertools.product(*[range(len(por_classe[c]) + 1) for c in classes]):
+        if menor_k <= sum(qtds) <= maior_k:
+            por_orientacao.append(tuple(sorted(i for c, q in zip(classes, qtds) for i in por_classe[c][:q])))
+    por_orientacao.sort(key=lambda d: abs(2 * len(d) - n))
+    for d in por_orientacao[:limite]:
+        divisoes.setdefault(d, None)
+    return [list(d) for d in divisoes]
+
+
+def _opcoes_grade(fotos, produto, cfg, modelos_pagina, max_pagina, corte_max, maximo):
+    """Layouts em grade dentro da área útil, testando que fotos vão para cada página."""
+    n = len(fotos)
+    paginas = produto["paginas_por_lamina"]
+    margem = float(cfg["margem_mm"])
+    espaco = float(cfg["espacamento_mm"])
+    min_pagina = _limites_pagina(cfg, produto)[0]
+    areas = [area_util_pagina_mm(produto, p, margem, respeitar_seguranca=True) for p in range(paginas)]
+    if paginas == 1:
+        divisoes = [[list(range(n))]]
+    else:
+        divisoes = []
+        for esquerda in _divisoes_paginas(fotos, max_pagina):
+            no_lado = set(esquerda)
+            divisoes.append([esquerda, [i for i in range(n) if i not in no_lado]])
+
+    candidatos = []
+    for divisao in divisoes:
+        por_pagina = []
+        for pagina, indices in enumerate(divisao):
+            props = [fotos[i]["proporcao"] for i in indices]
+            ops = _opcoes_pagina(props, areas[pagina], espaco, 3, corte_max)
+            if modelos_pagina and indices:
+                ops = ops + [
+                    o for o in layouts_pagina(props, areas[pagina], espaco, modelos_pagina, produto, pagina, 3, corte_max)
+                    if isinstance(o[2], dict)
+                ]
+            por_pagina.append((indices, pagina, ops))
+        qtds = [len(d) for d in divisao]
+        penalidade = 0.0
+        if any(k == 0 for k in qtds):
+            penalidade = PESO_PAGINA_VAZIA if n > 1 else 0.12
+        if len(qtds) == 2 and n > 1:
+            penalidade += PESO_DESEQUILIBRIO * abs(qtds[0] - qtds[1])
+        penalidade += _penalidade_pagina_vazia_demais(qtds, n, min_pagina)
+        for combinacao in itertools.product(*[p[2] for p in por_pagina]):
+            candidatos.append((penalidade + sum(c[0] for c in combinacao), por_pagina, combinacao))
+
+    candidatos.sort(key=lambda c: c[0])
+    saida = []
+    for _estimativa, por_pagina, combinacao in candidatos[:max(16, maximo * 3)]:
+        espacos, sobreposicoes, ids = [], [], []
+        sem_corte = False
+        for (indices, pagina, _ops), (_c, quadros, modelo, ordem) in zip(por_pagina, combinacao):
+            for quadro, rel in zip(quadros, ordem):
+                espacos.append(_espaco(produto, quadro, fotos[indices[rel]]["caminho"]))
+            if modelo == "__sem_corte__":
+                sem_corte = True
+            elif isinstance(modelo, dict):
+                ids.append(modelo["id"])
+                _esp, sobre = espacos_do_modelo(modelo, produto, pagina)
+                if sobre:
+                    sobreposicoes.append(sobre)
+        opcao = {
+            "custo": 0.0,
+            "espacos": espacos,
+            "sobreposicoes": sobreposicoes,
+            "modelo": "+".join(ids) if ids else None,
+        }
+        if sem_corte:
+            opcao["tipo_layout"] = "sem_corte"
+        saida.append(opcao)
+    return saida
 
 def _espaco(produto, quadro, foto, edicao=None):
     e = normalizar_mm(produto, quadro)
@@ -1375,16 +1556,17 @@ def _espaco(produto, quadro, foto, edicao=None):
 def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
     """
     fotos: [{"caminho", "proporcao", "destaque"}] na ordem.
+    Os layouts são calculados na hora pelas proporções das fotos. `modelos` (salvos pelo usuário)
+    só entram quando o chamador os passa de propósito; a diagramação automática não passa nenhum.
     Devolve [{"custo", "espacos", "sobreposicoes", "modelo"}], a melhor primeiro.
     """
     n = len(fotos)
     if n == 0:
         return [{"custo": 0.0, "espacos": [], "sobreposicoes": [], "modelo": None}]
     lw, lh = lamina_mm(produto)
-    espaco = float(cfg["espacamento_mm"])
     margem = float(cfg["margem_mm"])
     paginas = produto["paginas_por_lamina"]
-    min_pagina, max_pagina = _limites_pagina(cfg, produto)
+    max_pagina = _limites_pagina(cfg, produto)[1]
     # Lâmina montada à mão com mais fotos que o limite: ainda precisa de pelo menos uma divisão possível
     max_pagina = max(max_pagina, int(math.ceil(n / float(max(1, paginas)))))
     corte_max = _limite_corte_cfg(cfg)
@@ -1404,7 +1586,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
         if cfg.get("permitir_transpasse", True) and p >= 1.85 and corte_lamina <= corte_max and pen_p1 <= 0.0:
             bonus = -0.20 if fotos[0].get("destaque") else 0.0
             opcoes.append({
-                "custo": 0.25 + PESO_CORTE * math.log(max(1.0, corte_lamina)) ** 2 * 0.5 + bonus,
+                "custo": 0.25 + bonus,
                 "espacos": [_espaco(produto, area_lamina_util, fotos[0]["caminho"])],
                 "sobreposicoes": [],
                 "modelo": None,
@@ -1418,94 +1600,31 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             for i_q, f in enumerate(fotos):
                 if _corte_quadro(f["proporcao"], quadros[i_q]) > corte_max:
                     quadros[i_q] = caixa_proporcao_padrao(f["proporcao"], quadros[i_q])
-        corte = max(_corte_quadro(f["proporcao"], q) for f, q in zip(fotos, quadros))
         opcoes.append({
-            "custo": PESO_CORTE * math.log(max(1.0, corte)) ** 2,
+            "custo": 0.0,
             "espacos": [_espaco(produto, q, f["caminho"]) for f, q in zip(fotos, quadros)],
             "sobreposicoes": [sobre] if sobre else [],
             "modelo": modelo["id"],
         })
 
+    # Nos layouts especiais, "custo" traz só o ajuste de estilo (destaque, rosto na dobra);
+    # a qualidade geométrica de todas as opções sai de _custo_lamina, abaixo.
     if cfg.get("permitir_transpasse", True):
-        for op_transpasse in _layouts_transpasse_central(fotos, produto, cfg):
-            opcoes.append(op_transpasse)
-
+        opcoes.extend(_layouts_transpasse_central(fotos, produto, cfg))
     if cfg.get("permitir_meio_termo", True):
-        for op_meio in _layouts_meio_termo(fotos, produto, cfg):
-            opcoes.append(op_meio)
-
+        opcoes.extend(_layouts_meio_termo(fotos, produto, cfg))
     if cfg.get("permitir_sangria_total", True):
-        for op_max in _layouts_preenchimento_maximo(fotos, produto, cfg):
-            opcoes.append(op_max)
+        opcoes.extend(_layouts_preenchimento_maximo(fotos, produto, cfg))
 
-    if paginas == 1:
-        divisoes = [(n,)]
-    else:
-        divisoes = [(k, n - k) for k in range(0, n + 1)]
+    opcoes.extend(_opcoes_grade(fotos, produto, cfg, modelos_pagina, max_pagina, corte_max, maximo))
 
-    for divisao in divisoes:
-        if any(k > max_pagina for k in divisao):
-            continue
-        por_pagina = []
-        inicio = 0
-        for pagina, k in enumerate(divisao):
-            grupo = fotos[inicio:inicio + k]
-            inicio += k
-            area = area_util_pagina_mm(produto, pagina, margem, respeitar_seguranca=True)
-            por_pagina.append((
-                grupo,
-                pagina,
-                layouts_pagina(
-                    [f["proporcao"] for f in grupo],
-                    area,
-                    espaco,
-                    modelos_pagina,
-                    produto,
-                    pagina,
-                    maximo=4,
-                    corte_max=corte_max,
-                ),
-            ))
-        vazias = sum(1 for k in divisao if k == 0)
-        penalidade = 0.0
-        if vazias:
-            penalidade = PESO_PAGINA_VAZIA if n > 1 else 0.12
-        if len(divisao) == 2 and n > 1:
-            penalidade += PESO_DESEQUILIBRIO * abs(divisao[0] - divisao[1])
-        penalidade += _penalidade_pagina_vazia_demais(divisao, n, min_pagina)
-
-        for combinacao in itertools.product(*[p[2] for p in por_pagina]):
-            custo = penalidade + sum(c[0] for c in combinacao)
-            espacos = []
-            sobreposicoes = []
-            ids = []
-            sem_corte = False
-            for (grupo, pagina, _ops), (_c, quadros, modelo, ordem) in zip(por_pagina, combinacao):
-                for quadro, indice in zip(quadros, ordem):
-                    espacos.append(_espaco(produto, quadro, grupo[indice]["caminho"]))
-                if modelo == "__sem_corte__":
-                    sem_corte = True
-                elif isinstance(modelo, dict):
-                    ids.append(modelo["id"])
-                    _esp, sobre = espacos_do_modelo(modelo, produto, pagina)
-                    if sobre:
-                        sobreposicoes.append(sobre)
-            opcoes.append({
-                "custo": custo,
-                "espacos": espacos,
-                "sobreposicoes": sobreposicoes,
-                "modelo": "+".join(ids) if ids else None,
-            })
-            if sem_corte:
-                opcoes[-1]["tipo_layout"] = "sem_corte"
-
-    # Aplica a proteção inteligente de múltiplos rostos / pessoas para nunca cortar ninguém
-    if cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True):
-        for op in opcoes:
-            if not op.get("sobreposicoes"):
-                esp_seguros, pen_pessoas = _proteger_espacos_contra_corte_pessoas(op["espacos"], fotos, produto, cfg)
-                op["espacos"] = esp_seguros
-                op["custo"] = float(op.get("custo", 0.0)) + pen_pessoas
+    proteger = cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True)
+    for op in opcoes:
+        ajuste = float(op.get("custo", 0.0))
+        if proteger and not op.get("sobreposicoes"):
+            op["espacos"], pen_pessoas = _proteger_espacos_contra_corte_pessoas(op["espacos"], fotos, produto, cfg)
+            ajuste += pen_pessoas
+        op["custo"] = _custo_lamina(op["espacos"], fotos, produto, cfg) + ajuste
 
     opcoes.sort(key=lambda o: o["custo"])
     unicas = []
@@ -1540,9 +1659,10 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
             break
 
     # Garante que as variações Meio Termo, Sangria Total e Transpasse 60/40 e 70/30 apareçam nas sugestões quando forem viáveis
-    if maximo >= 6:
+    if maximo >= 6 and unicas:
+        melhor_custo = float(unicas[0].get("custo", 0.0))
         for op_esp in reserva_especiais:
-            if float(op_esp.get("custo", 0.0)) > 2.2:
+            if float(op_esp.get("custo", 0.0)) > melhor_custo + 2.0:
                 continue
             if not any(u.get("tipo_layout") == op_esp.get("tipo_layout") for u in unicas):
                 if len(unicas) >= maximo:
@@ -2629,14 +2749,51 @@ def _nome_bloco(bloco):
     return nome
 
 
+def _juntar_blocos_vizinhos(blocos, alvo):
+    """
+    Junta blocos vizinhos até sobrarem `alvo`: primeiro os do mesmo grupo numerado (pastas diferentes),
+    e entre eles o par com menos fotos. Devolve (blocos, nomes de cada junção feita).
+    """
+    blocos = [list(b) for b in blocos]
+    nomes = [[_nome_bloco(b)] for b in blocos]
+    while len(blocos) > max(1, alvo):
+        def chave(i):
+            mesmo_grupo = int(blocos[i][0].get("grupo_ordem") or 1) == int(blocos[i + 1][0].get("grupo_ordem") or 1)
+            return (0 if mesmo_grupo else 1, len(blocos[i]) + len(blocos[i + 1]), i)
+
+        i = min(range(len(blocos) - 1), key=chave)
+        blocos[i:i + 2] = [blocos[i] + blocos[i + 1]]
+        nomes[i:i + 2] = [nomes[i] + nomes[i + 1]]
+    juncoes = [list(dict.fromkeys(n)) for n in nomes if len(n) > 1]
+    return blocos, juncoes
+
+
+def _repartir_laminas(tamanhos, total):
+    """
+    Lâminas de cada bloco somando `total` (no máximo uma por foto): cada bloco começa com uma e as
+    demais vão sempre para o bloco com mais fotos por lâmina, o que deixa as lâminas equilibradas.
+    """
+    alocadas = [1] * len(tamanhos)
+    while sum(alocadas) < total:
+        candidatos = [i for i, n in enumerate(tamanhos) if alocadas[i] < n]
+        if not candidatos:
+            break
+        i = max(candidatos, key=lambda k: (tamanhos[k] / float(alocadas[k]), -k))
+        alocadas[i] += 1
+    return alocadas
+
+
 def planejar_distribuicao(fotos, produto, cfg):
     """
     Divide as fotos em lâminas, nesta ordem de prioridade:
-    1. nunca passa do máximo de fotos por lâmina (e por página);
-    2. não mistura grupos numerados nem, com separar_pastas, pastas;
-    3. cada lâmina com pelo menos o mínimo ("Fotos por página"), salvo um bloco que já tem menos fotos;
-    4. o nº de lâminas desejadas, quando cabe entre o mínimo e o máximo (senão o mínimo vence, com aviso);
-    5. cortes preferidos na troca de cenário ou num intervalo de horário, com lâminas equilibradas.
+    1. o nº de lâminas desejadas (limitado ao máximo do produto e ao nº de fotos) sai exato, mesmo que
+       as lâminas fiquem abaixo do mínimo ou acima do máximo de fotos — equilibradas e com aviso;
+    2. não mistura grupos numerados nem, com separar_pastas, pastas; se houver mais blocos que lâminas
+       desejadas, junta os vizinhos menores (com aviso);
+    3. lâminas entre o mínimo ("Fotos por página") e o máximo sempre que o nº de lâminas permite;
+    4. cortes preferidos na troca de cenário ou num intervalo de horário, com lâminas equilibradas.
+    Sem nº desejado, usa laminas_ideais dentro do que o mínimo e o máximo de cada bloco permitem.
+    Só sobram fotos quando nem o máximo de lâminas do produto com o máximo de fotos comporta todas.
     Devolve {"grupos", "sobras", "avisos", "minimo", "maximo", "desejadas", "laminas"}.
     """
     minimo, maximo = faixa_fotos_lamina(produto, cfg)
@@ -2646,77 +2803,70 @@ def planejar_distribuicao(fotos, produto, cfg):
         if cfg.get("respeitar_grupos_manuais", True)
         else _ordenar_bloco_por_pessoas(list(fotos), cfg.get("ordem_pessoas_grupo", "manter"))
     )
-    total_fotos = len(ordenadas)
     try:
-        desejadas = int(cfg.get("laminas_desejadas") or 0)
+        pedidas = int(cfg.get("laminas_desejadas") or 0)
     except (TypeError, ValueError):
-        desejadas = 0
-    if desejadas <= 0:
-        desejadas = laminas_ideais(total_fotos, produto, cfg)
+        pedidas = 0
+    desejadas = pedidas if pedidas > 0 else laminas_ideais(len(ordenadas), produto, cfg)
     plano = {"grupos": [], "sobras": [], "avisos": [], "minimo": minimo, "maximo": maximo,
              "desejadas": desejadas, "laminas": 0}
     if not ordenadas:
         return plano
+    avisos = plano["avisos"]
 
-    blocos = _blocos_duros(ordenadas, cfg)
-
-    def faixa(bloco):
-        n = len(bloco)
-        menor = max(1, int(math.ceil(n / float(maximo))))
-        return [menor, max(menor, n // minimo)]
-
-    faixas = [faixa(b) for b in blocos]
-
-    # O produto tem um limite de lâminas: o que não cabe nem com o máximo por lâmina fica de fora
     sobras = []
-    while blocos and sum(f[0] for f in faixas) > laminas_max:
-        excesso = sum(f[0] for f in faixas) - laminas_max
-        ultimo = blocos[-1]
-        manter = max(0, faixas[-1][0] - excesso) * maximo
-        sobras = ultimo[manter:] + sobras
-        if manter <= 0:
-            blocos.pop()
-            faixas.pop()
-        else:
-            blocos[-1] = ultimo[:manter]
-            faixas[-1] = faixa(blocos[-1])
-    if sobras:
-        plano["avisos"].append(
+    capacidade = laminas_max * maximo
+    if len(ordenadas) > capacidade:
+        sobras = ordenadas[capacidade:]
+        ordenadas = ordenadas[:capacidade]
+        avisos.append(
             "%d foto(s) não couberam: o produto vai até %d lâminas com no máximo %d fotos cada."
             % (len(sobras), laminas_max, maximo)
         )
+    usadas = len(ordenadas)
+    blocos = _blocos_duros(ordenadas, cfg)
 
-    soma_min = sum(f[0] for f in faixas)
-    soma_max = min(laminas_max, sum(f[1] for f in faixas))
-    total = max(soma_min, min(soma_max, desejadas))
-    usadas = total_fotos - len(sobras)
-    if total < desejadas:
-        if soma_max == laminas_max and sum(f[1] for f in faixas) > laminas_max:
-            plano["avisos"].append("O produto vai até %d lâminas; foram usadas %d, não %d." % (laminas_max, total, desejadas))
-        else:
-            plano["avisos"].append(
-                "Com no mínimo %d foto(s) por lâmina, as %d fotos dão %d lâmina(s), não %d."
-                % (minimo, usadas, total, desejadas)
-            )
-    elif total > desejadas:
-        motivo = " e sem misturar grupos/pastas" if len(blocos) > 1 else ""
-        plano["avisos"].append(
-            "Com no máximo %d foto(s) por lâmina%s, foram precisas %d lâmina(s), não %d."
-            % (maximo, motivo, total, desejadas)
+    if pedidas > 0:
+        total = desejadas
+        if total > laminas_max:
+            avisos.append("O produto vai até %d lâminas; foram usadas %d, não %d." % (laminas_max, laminas_max, total))
+            total = laminas_max
+        if total > usadas:
+            avisos.append("Só há %d foto(s): ficou uma por lâmina, em %d lâmina(s), não %d." % (usadas, usadas, total))
+            total = usadas
+    else:
+        soma_min = sum(max(1, int(math.ceil(len(b) / float(maximo)))) for b in blocos)
+        soma_max = sum(max(1, int(math.ceil(len(b) / float(maximo))), len(b) // minimo) for b in blocos)
+        total = max(soma_min, min(soma_max, laminas_max, desejadas))
+
+    if len(blocos) > total:
+        blocos, juncoes = _juntar_blocos_vizinhos(blocos, total)
+        avisos.append(
+            "Para fechar %d lâmina(s), foram juntados grupos/pastas vizinhos na mesma lâmina: %s."
+            % (total, "; ".join(" + ".join(nomes) for nomes in juncoes))
         )
 
-    # Reparte as lâminas entre os blocos, sempre para o bloco mais cheio por lâmina
-    alocadas = [f[0] for f in faixas]
-    while sum(alocadas) < total:
-        candidatos = [i for i in range(len(blocos)) if alocadas[i] < faixas[i][1]]
-        if not candidatos:
-            break
-        i = max(candidatos, key=lambda k: len(blocos[k]) / float(alocadas[k]))
-        alocadas[i] += 1
-
     grupos = []
-    for bloco, s in zip(blocos, alocadas):
-        grupos.extend(_dividir_bloco_unico(bloco, minimo, maximo, s))
+    abaixo = acima = 0
+    for bloco, s in zip(blocos, _repartir_laminas([len(b) for b in blocos], total)):
+        partes = _dividir_bloco_unico(bloco, minimo, max(maximo, int(math.ceil(len(bloco) / float(s)))), s)
+        for parte in partes:
+            if len(parte) < minimo <= len(bloco):
+                abaixo += 1
+            elif len(parte) > maximo:
+                acima += 1
+        grupos.extend(partes)
+    tamanhos = [len(g) for g in grupos]
+    if abaixo:
+        avisos.append(
+            "Para fechar %d lâminas com %d fotos, %d lâmina(s) ficaram abaixo do mínimo de %d fotos (a menor com %d)."
+            % (len(grupos), usadas, abaixo, minimo, min(tamanhos))
+        )
+    if acima:
+        avisos.append(
+            "Para fechar %d lâminas com %d fotos, %d lâmina(s) passaram do máximo de %d fotos (a maior com %d)."
+            % (len(grupos), usadas, acima, maximo, max(tamanhos))
+        )
 
     pequenos = [b for b in blocos if len(b) < minimo]
     if pequenos:
@@ -2810,8 +2960,10 @@ def previa_diagramacao(fotos, produto, cfg):
 def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=None):
     """
     fotos: [{"caminho", "proporcao", "data", "destaque", "grupo_ordem", "ordem_manual", "pasta"}] na ordem do álbum.
+    Cada layout é calculado na hora pelas proporções das fotos; `modelos` salvos só entram se o
+    chamador os passar de propósito (a diagramação automática do programa não passa).
     Devolve (lâminas, sobras). Com `avisos` (lista), recebe as mensagens da distribuição
-    (lâminas a menos ou a mais que as desejadas, blocos abaixo do mínimo, lâminas vazias).
+    (lâminas abaixo do mínimo ou acima do máximo para fechar as desejadas, pastas juntadas, lâminas vazias).
     """
     plano = planejar_distribuicao(list(fotos), produto, cfg)
     grupos, sobras = plano["grupos"], plano["sobras"]

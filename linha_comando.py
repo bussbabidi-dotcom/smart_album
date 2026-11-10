@@ -18,7 +18,7 @@ import analise
 import diagramar
 import exportar
 import projeto as proj
-from produtos import adivinhar_produto, carregar_produto, listar_modelos
+from produtos import adivinhar_produto, carregar_produto
 
 
 def main(argv=None):
@@ -61,9 +61,7 @@ def main(argv=None):
     if not a.projeto:
         proj.ordenar_fotos(projeto, info, a.ordem)
         cfg = diagramar.configuracao(produto, projeto.get("config"))
-        laminas, sobras = diagramar.diagramar_album(
-            proj.fotos_para_diagramar(projeto, info), produto, cfg, listar_modelos(),
-        )
+        laminas, sobras = diagramar.diagramar_album(proj.fotos_para_diagramar(projeto, info), produto, cfg)
         projeto["laminas"] = laminas
         print("Diagramado: %s lâminas" % len(laminas))
         if sobras:

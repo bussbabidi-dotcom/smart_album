@@ -47,12 +47,14 @@ def _pasta(grupo):
 # Mínimo e máximo
 # ------------------------------------------------------------
 
-@pytest.mark.parametrize("desejadas", [8, 15, 25, 40])
-def test_toda_lamina_fica_entre_o_minimo_e_o_maximo(produto, desejadas):
+@pytest.mark.parametrize("desejadas", [15, 20, 25, 30])
+def test_toda_lamina_fica_entre_o_minimo_e_o_maximo_quando_o_numero_desejado_permite(produto, desejadas):
     fotos = _fotos(70, "D:/t/Baile") + _fotos(45, "D:/t/Jaleco") + _fotos(23, "D:/t/Externas")
     plano = _plano(fotos, produto, laminas_desejadas=desejadas)
+    assert len(plano["grupos"]) == desejadas
     for grupo in plano["grupos"]:
         assert plano["minimo"] <= len(grupo) <= plano["maximo"], [len(g) for g in plano["grupos"]]
+    assert not plano["avisos"]
 
 
 def test_so_fica_abaixo_do_minimo_a_pasta_que_ja_e_menor(produto):
@@ -67,11 +69,6 @@ def test_cenario_a_cada_foto_nao_gera_lamina_de_uma_foto(produto):
     plano = _plano(_fotos(60, cenario_a_cada=1), produto, laminas_desejadas=10)
     assert min(len(g) for g in plano["grupos"]) >= plano["minimo"]
     assert len(plano["grupos"]) == 10
-
-
-def test_maximo_nunca_e_passado_mesmo_com_poucas_laminas_desejadas(produto):
-    plano = _plano(_fotos(100), produto, laminas_desejadas=3)
-    assert max(len(g) for g in plano["grupos"]) <= plano["maximo"]
 
 
 def test_laminas_ficam_equilibradas(produto):
@@ -91,16 +88,63 @@ def test_numero_desejado_e_exato_quando_cabe(produto):
     assert not plano["avisos"]
 
 
-def test_desejadas_demais_para_o_minimo_usa_menos_e_avisa(produto):
+# O nº de lâminas desejadas vence o mínimo e o máximo de fotos por lâmina (pedido do usuário):
+# sai exatamente esse nº, com as lâminas equilibradas e um aviso.
+
+def test_desejadas_demais_para_o_minimo_fica_exato_abaixo_do_minimo_e_avisa(produto):
     plano = _plano(_fotos(40), produto, laminas_desejadas=30)
-    assert len(plano["grupos"]) == 40 // plano["minimo"]
-    assert any("no mínimo" in a for a in plano["avisos"])
+    tamanhos = [len(g) for g in plano["grupos"]]
+    assert len(tamanhos) == 30
+    assert sum(tamanhos) == 40 and not plano["sobras"]
+    assert max(tamanhos) - min(tamanhos) <= 2, tamanhos
+    assert any("abaixo do mínimo" in a for a in plano["avisos"])
 
 
-def test_desejadas_de_menos_para_o_maximo_usa_mais_e_avisa(produto):
+def test_desejadas_de_menos_para_o_maximo_fica_exato_acima_do_maximo_e_avisa(produto):
     plano = _plano(_fotos(100), produto, laminas_desejadas=3)
-    assert len(plano["grupos"]) > 3
-    assert any("no máximo" in a for a in plano["avisos"])
+    tamanhos = [len(g) for g in plano["grupos"]]
+    assert len(tamanhos) == 3
+    assert sum(tamanhos) == 100 and not plano["sobras"]
+    assert max(tamanhos) > plano["maximo"]
+    assert max(tamanhos) - min(tamanhos) <= 3, tamanhos
+    assert any("passaram do máximo" in a for a in plano["avisos"])
+
+
+@pytest.mark.parametrize("desejadas", [8, 15, 40])
+def test_numero_desejado_e_sempre_exato_com_varias_pastas(produto, desejadas):
+    fotos = _fotos(70, "D:/t/Baile") + _fotos(45, "D:/t/Jaleco") + _fotos(23, "D:/t/Externas")
+    plano = _plano(fotos, produto, laminas_desejadas=desejadas)
+    assert len(plano["grupos"]) == desejadas
+    assert sum(len(g) for g in plano["grupos"]) == len(fotos) and not plano["sobras"]
+    for grupo in plano["grupos"]:
+        assert len({f["pasta"] for f in grupo}) == 1
+
+
+def test_mais_pastas_que_laminas_junta_as_vizinhas_menores_e_avisa(produto):
+    fotos = (_fotos(12, "D:/t/Baile") + _fotos(3, "D:/t/Extra") + _fotos(2, "D:/t/Bolo")
+             + _fotos(10, "D:/t/Jaleco") + _fotos(9, "D:/t/Externas"))
+    plano = _plano(fotos, produto, laminas_desejadas=3)
+    assert len(plano["grupos"]) == 3
+    assert sum(len(g) for g in plano["grupos"]) == len(fotos)
+    pastas = [[f["pasta"].rsplit("/", 1)[-1] for f in g] for g in plano["grupos"]]
+    # A ordem do álbum é mantida e cada pasta fica inteira numa lâmina só
+    assert [p for g in pastas for p in dict.fromkeys(g)] == ["Baile", "Extra", "Bolo", "Jaleco", "Externas"]
+    assert sum(len(set(g)) for g in pastas) == 5
+    assert "Extra" in set(pastas[0]) | set(pastas[1]) and "Bolo" in set(pastas[0]) | set(pastas[1])
+    aviso = next(a for a in plano["avisos"] if "juntados" in a)
+    assert "Extra" in aviso and "Bolo" in aviso
+
+
+def test_desejadas_acima_do_numero_de_fotos_fica_uma_por_lamina(produto):
+    plano = _plano(_fotos(6), produto, laminas_desejadas=20)
+    assert [len(g) for g in plano["grupos"]] == [1] * 6
+    assert any("uma por lâmina" in a for a in plano["avisos"])
+
+
+def test_desejadas_acima_do_limite_do_produto_usa_o_limite(produto):
+    plano = _plano(_fotos(200), produto, laminas_desejadas=produto["laminas_max"] + 10)
+    assert len(plano["grupos"]) == produto["laminas_max"]
+    assert any("vai até" in a for a in plano["avisos"])
 
 
 def test_sem_desejadas_usa_o_numero_ideal(produto):
@@ -161,16 +205,21 @@ def test_numero_ideal_fica_no_meio_da_faixa(produto):
 
 def test_laminas_vazias_so_para_o_minimo_do_produto():
     produto = carregar_produto("20X20")
+    # 20 desejadas com 8 fotos: uma foto por lâmina; as vazias só completam o mínimo do produto (10)
     cfg = diagramar.configuracao(produto, {"laminas_desejadas": 20, "auto_fundos": False,
                                            "auto_degrade": False, "auto_molduras": False})
     avisos = []
     laminas, _ = diagramar.diagramar_album(_fotos(8), produto, cfg, (), avisos=avisos)
     com_fotos = [l for l in laminas if l["espacos"]]
-    assert len(com_fotos) == 2
+    assert len(com_fotos) == 8
     assert len(laminas) == produto["laminas_min"]
     assert any("vazias" in a for a in avisos)
 
     sem_minimo = dict(produto, laminas_min=0)
+    laminas, _ = diagramar.diagramar_album(_fotos(8), sem_minimo, cfg, ())
+    assert len(laminas) == 8
+
+    cfg["laminas_desejadas"] = 2
     laminas, _ = diagramar.diagramar_album(_fotos(8), sem_minimo, cfg, ())
     assert len(laminas) == 2
 

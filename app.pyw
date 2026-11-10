@@ -6757,7 +6757,6 @@ class Aplicativo:
         if escopo in ("pasta", "nao_usadas"):
             produto["laminas_min"] = 0
             cfg["laminas_desejadas"] = diagramar.laminas_ideais(len(fotos), produto, cfg)
-        modelos = self._modelos()
         avisos = []
 
         def trabalho(t):
@@ -6767,7 +6766,7 @@ class Aplicativo:
                 fotos_usadas, removidas = self._sem_repetidas(fotos, t.parar, t.progresso)
                 if fotos_usadas is None:
                     return None
-            resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, modelos, ao_progresso=t.progresso, avisos=avisos)
+            resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, ao_progresso=t.progresso, avisos=avisos)
             return resultado, removidas
 
         def fim(resultado, erro):
@@ -7012,7 +7011,7 @@ class Aplicativo:
             fotos = [e["foto"] for e in lamina["espacos"] if e.get("foto")]
         if marcar:
             self.marcar_historico()
-        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), self._modelos(), maximo=12)
+        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), maximo=12)
         if not opcoes:
             return
         atual_geom = tuple((round(e["x"], 3), round(e["y"], 3), round(e["w"], 3), round(e["h"], 3))
@@ -7056,14 +7055,14 @@ class Aplicativo:
             return
         grupos = [[e["foto"] for e in l["espacos"] if e.get("foto")] for l in self.projeto["laminas"]]
         infos = [self._fotos_info(g) for g in grupos]
-        produto, cfg, modelos = self.produto, self._cfg(), self._modelos()
+        produto, cfg = self.produto, self._cfg()
 
         def trabalho(t):
             saida = []
             for n, fotos in enumerate(infos, start=1):
                 if t.parar():
                     return None
-                saida.append(diagramar.opcoes_lamina(fotos, produto, cfg, modelos, maximo=1)[0])
+                saida.append(diagramar.opcoes_lamina(fotos, produto, cfg, maximo=1)[0])
                 t.progresso(n, len(infos))
             return saida
 
@@ -7203,7 +7202,6 @@ class Aplicativo:
         self.marcar_historico()
         novas_laminas = []
         cfg = self._cfg()
-        modelos = self._modelos()
         laminas_divididas = 0
         for lam in laminas_atuais:
             ch_l, nm_l, distintas = proj.pasta_da_lamina(self.projeto, lam)
@@ -7228,7 +7226,7 @@ class Aplicativo:
                 infos_p = self._fotos_info(cams_p, lam)
                 if not infos_p:
                     continue
-                melhor = diagramar.opcoes_lamina(infos_p, self.produto, cfg, modelos, maximo=1)[0]
+                melhor = diagramar.opcoes_lamina(infos_p, self.produto, cfg, maximo=1)[0]
                 nova_l = diagramar.lamina_vazia(cfg)
                 nova_l["fundo"] = lam.get("fundo", cfg.get("fundo", "#ffffff"))
                 if lam.get("fundo_imagem"):
@@ -11852,14 +11850,13 @@ class Aplicativo:
                 caminhos_f,
                 round(float(cfg_atual.get("margem_mm", 0)), 2),
                 round(float(cfg_atual.get("espacamento_mm", 0)), 2),
-                len(self._modelos()),
                 self.versao_fotos,
             )
             if getattr(self, "_chave_cache_sugestoes", None) != chave_sug:
                 self._chave_cache_sugestoes = chave_sug
                 fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
                 self._sugestoes = (
-                    diagramar.opcoes_lamina(fotos, self.produto, cfg_atual, self._modelos(), maximo=12)
+                    diagramar.opcoes_lamina(fotos, self.produto, cfg_atual, maximo=12)
                     if fotos
                     else []
                 )

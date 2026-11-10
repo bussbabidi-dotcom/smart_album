@@ -121,6 +121,105 @@ def test_corte_respeita_o_limite(album):
             assert corte <= maximo + 1e-3, (lamina.get("tipo_layout"), e, corte)
 
 
+# ------------------------------------------------------------
+# Preenchimento da área útil e orientação (álbum sintético, sem arquivos)
+# ------------------------------------------------------------
+
+def _album_misturado(nome_produto, semente=7):
+    """60 fotos de orientações misturadas em 15 lâminas (~4 por lâmina, onde sobrava mais espaço em branco)."""
+    import random
+
+    sorteio = random.Random(semente)
+    fotos = []
+    for pasta, qtd in (("Baile", 24), ("Jaleco", 20), ("Externas", 16)):
+        for i in range(qtd):
+            fotos.append({
+                "caminho": "D:/t/%s/f%03d.jpg" % (pasta, i),
+                "proporcao": sorteio.choice([1.5, 1.5, 1.5, 0.667, 0.667, 1.0, 2.4]),
+                "pasta": "D:/t/" + pasta,
+                "nome_pasta": pasta,
+                "grupo_ordem": 1,
+                "ordem_manual": len(fotos),
+                "data": len(fotos) * 30,
+            })
+    produto = carregar_produto(nome_produto)
+    cfg = diagramar.configuracao(produto, {"laminas_desejadas": 15, "auto_fundos": False,
+                                           "auto_degrade": False, "auto_molduras": False})
+    laminas, sobras = diagramar.diagramar_album(fotos, produto, cfg, ())
+    return fotos, produto, cfg, laminas, sobras
+
+
+def _coberturas_das_paginas(laminas, produto, cfg):
+    from produtos import area_util_pagina_mm
+
+    lw, lh = lamina_mm(produto)
+    saida = []
+    for lamina in laminas:
+        espacos = _espacos_com_foto(lamina)
+        if not espacos:
+            continue
+        for pagina in range(produto["paginas_por_lamina"]):
+            ux, uy, uw, uh = area_util_pagina_mm(produto, pagina, cfg["margem_mm"], respeitar_seguranca=True)
+            coberto = 0.0
+            for e in espacos:
+                x, y, w, h = e["x"] * lw, e["y"] * lh, e["w"] * lw, e["h"] * lh
+                coberto += max(0.0, min(x + w, ux + uw) - max(x, ux)) * max(0.0, min(y + h, uy + uh) - max(y, uy))
+            saida.append(coberto / (uw * uh))
+    return saida
+
+
+@pytest.mark.parametrize("nome_produto", ["20X20", "30X20", "30X22"])
+def test_layouts_preenchem_a_area_util(nome_produto):
+    _fotos, produto, cfg, laminas, _sobras = _album_misturado(nome_produto)
+    coberturas = _coberturas_das_paginas(laminas, produto, cfg)
+    assert sum(coberturas) / len(coberturas) >= 0.96, sum(coberturas) / len(coberturas)
+    assert sum(1 for c in coberturas if c < 0.80) <= 1, sorted(coberturas)[:6]
+
+
+@pytest.mark.parametrize("nome_produto", ["20X20", "30X20", "30X22"])
+def test_foto_vertical_nunca_fica_em_quadro_horizontal_nem_o_contrario(nome_produto):
+    fotos, produto, cfg, laminas, sobras = _album_misturado(nome_produto)
+    lw, lh = lamina_mm(produto)
+    props = {f["caminho"]: f["proporcao"] for f in fotos}
+    limite = diagramar._limite_corte_cfg(cfg)
+    usadas = []
+    for lamina in laminas:
+        for a, b in itertools.combinations(_espacos_com_foto(lamina), 2):
+            ix = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+            iy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+            assert ix <= TOLERANCIA or iy <= TOLERANCIA
+        for e in _espacos_com_foto(lamina):
+            usadas.append(e["foto"])
+            p_foto = props[e["foto"]]
+            p_quadro = (e["w"] * lw) / (e["h"] * lh)
+            if p_foto >= 1.05:
+                assert p_quadro > 1.0, (p_foto, p_quadro)
+            elif p_foto <= 0.95:
+                assert p_quadro < 1.0, (p_foto, p_quadro)
+            corte = max(p_foto / p_quadro, p_quadro / p_foto)
+            assert corte <= limite * (FOLGA_SANGRADO if _eh_sangrado(e) else 1.0) + 1e-3
+    assert sorted(usadas) == sorted(f["caminho"] for f in fotos) and not sobras
+    assert sum(1 for l in laminas if _espacos_com_foto(l)) == 15
+
+
+def test_divisao_entre_paginas_casa_as_orientacoes():
+    # Duas verticais e duas horizontais: lado a lado, as verticais fecham uma página e a outra
+    # recebe as horizontais (ou cada página mistura uma de cada), nunca deixando página pela metade.
+    produto = carregar_produto("30X20")
+    cfg = diagramar.configuracao(produto)
+    fotos = [{"caminho": "f%d.jpg" % i, "proporcao": p} for i, p in enumerate([1.5, 0.667, 1.5, 0.667])]
+    melhor = diagramar.opcoes_lamina(fotos, produto, cfg, maximo=1)[0]
+    coberturas = _coberturas_das_paginas([melhor], produto, cfg)
+    assert min(coberturas) >= 0.85, (melhor.get("tipo_layout"), coberturas)
+
+
+def test_uma_opcao_por_pagina_nao_troca_o_preenchimento_pela_versao_sem_corte():
+    area = (0.0, 0.0, 268.0, 168.0)
+    [(_custo, quadros, marcador, _ordem)] = diagramar.layouts_pagina([0.667, 0.667], area, 4.0, maximo=1)
+    assert marcador != "__sem_corte__"
+    assert sum(w * h for _x, _y, w, h in quadros) / (268.0 * 168.0) >= 0.95
+
+
 def test_sem_corte_nao_corta_nenhuma_foto(tmp_path):
     from conftest import montar_album
 
