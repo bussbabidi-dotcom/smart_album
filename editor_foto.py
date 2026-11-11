@@ -11,6 +11,7 @@ Os ajustes ficam no projeto e só são aplicados no álbum; a foto original não
 
 import math
 import os
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -19,8 +20,10 @@ from tkinter import messagebox, ttk
 from PIL import Image, ImageTk
 
 import analise
+import ia_cena
 import recorte
 import tema
+from comum import normalizar_caminho
 from composicao import rosto_de
 
 LADO_PREVIA_FINAL = 240
@@ -64,6 +67,9 @@ class EditorFoto(tk.Toplevel):
         self._ultima_marca = 0.0
         self._sincronizando = False
         self._agendado = None
+        self._cache_ia = None
+        self._ia_calculando = None
+        self._diag_foto = ""
         self._montar()
         tema.configurar_janela_secundaria(
             self,
@@ -200,6 +206,22 @@ class EditorFoto(tk.Toplevel):
         btn_orig.pack(side="left", fill="x", expand=True, padx=(2, 0))
         tema.dica(btn_orig, "Restaura a luz e a cor originais da foto")
 
+        ttk.Label(auto_box, text="Com IA (roda neste PC, sem internet):", style="Fraco.TLabel").pack(anchor="w", pady=(5, 2))
+        linha_ia = ttk.Frame(auto_box)
+        linha_ia.pack(fill="x")
+        self.botoes_ia = []
+        for nivel_ia, texto_ia, estilo_ia, dica_ia in (
+            ("leve", "🤖 IA Leve", "Compacto.TButton", "Estilo da IA a 40% + correção suave por cena e pelo rosto"),
+            ("medio", "🤖 Auto IA", "PrimarioCompacto.TButton",
+             "Edição automática por IA (3D LUT adaptativa, estilo 70%) com alvo pela cena e luz dos rostos.\n"
+             "Os controles continuam ajustáveis depois."),
+            ("pesado", "🤖 IA Pesado", "Compacto.TButton", "Estilo da IA a 100% para fotos bem ruins"),
+        ):
+            botao_ia = ttk.Button(linha_ia, text=texto_ia, style=estilo_ia, command=lambda n=nivel_ia: self.aplicar_auto_ia(n))
+            botao_ia.pack(side="left", fill="x", expand=True, padx=2)
+            tema.dica(botao_ia, dica_ia)
+            self.botoes_ia.append(botao_ia)
+
         ttk.Label(auto_box, text="Edição em Lote (Lâmina ou Álbum Inteiro):", style="Fraco.TLabel").pack(anchor="w", pady=(6, 2))
         linha_lote_1c = ttk.Frame(auto_box)
         linha_lote_1c.pack(fill="x")
@@ -233,6 +255,15 @@ class EditorFoto(tk.Toplevel):
         menu_1c.add_command(
             label="🔥 Aplicar 1-Clique PESADO no Álbum Inteiro",
             command=lambda: self.app.aplicar_lote_inteligente(escopo="album", nivel="pesado"),
+        )
+        menu_1c.add_separator()
+        menu_1c.add_command(
+            label="🤖 Auto IA (Seleção / Lâmina Atual)",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="auto", nivel="medio", usar_ia=True),
+        )
+        menu_1c.add_command(
+            label="🤖 Auto IA no Álbum Inteiro",
+            command=lambda: self.app.aplicar_lote_inteligente(escopo="album", nivel="medio", usar_ia=True),
         )
         menu_1c.add_separator()
         menu_1c.add_command(
@@ -274,6 +305,10 @@ class EditorFoto(tk.Toplevel):
             qf = ttk.LabelFrame(lado, text=titulo_grupo, padding=6)
             qf.pack(fill="x", pady=3)
             quadros_lr[nome_grupo] = qf
+
+        self.ia_lut_forca = tk.DoubleVar(value=0)
+        self._linha_escala(quadros_lr["Luz"], "Estilo IA", self.ia_lut_forca, 0, 100, "ia_lut_forca",
+                           "Força do estilo automático da IA (3D LUT), aplicado antes dos outros controles")
 
         for chave, texto_rot, de, ate, grupo, dica_txt in CONTROLES_LIGHTROOM:
             var = tk.DoubleVar(value=0)
@@ -359,14 +394,33 @@ class EditorFoto(tk.Toplevel):
             self.rotulo_lugar.configure(text="Erro ao abrir: %s" % e)
             return
         self._chave_transformada = None
+        self._cache_ia = None
         if hasattr(self, "rotulo_diagnostico"):
             try:
-                diag = recorte.analisar_fotometria_rapida(self._fonte).get("diagnostico", "Equilibrada")
-                self.rotulo_diagnostico.configure(text="Diagnóstico da foto: %s" % diag)
+                self._diag_foto = recorte.analisar_fotometria_rapida(self._fonte).get("diagnostico", "Equilibrada")
             except Exception:
-                self.rotulo_diagnostico.configure(text="Diagnóstico da foto: Pronta para ajuste")
+                self._diag_foto = "Pronta para ajuste"
+            self._mostrar_diagnostico()
+            self.app.pedir_ia_se_preciso(self.espaco["foto"])
         self._sincronizar_controles()
         self._desenhar()
+
+    def _dados_foto(self):
+        if not self.espaco or not self.espaco.get("foto"):
+            return {}
+        return self.app.info.get(normalizar_caminho(self.espaco["foto"])) or {}
+
+    def _mostrar_diagnostico(self, prefixo="Diagnóstico da foto"):
+        texto = "%s: %s" % (prefixo, self._diag_foto or "Pronta para ajuste")
+        cena = ia_cena.texto_curto(self._dados_foto().get("cena")) if self.app.ia_cfg().get("reconhecer_cenas") else ""
+        if cena:
+            texto += "\nCena (IA): %s" % cena
+        self.rotulo_diagnostico.configure(text=texto)
+
+    def ia_atualizada(self, caminho):
+        """A análise de IA desta foto terminou em segundo plano."""
+        if self.espaco and self.espaco.get("foto") and normalizar_caminho(self.espaco["foto"]) == normalizar_caminho(caminho):
+            self._mostrar_diagnostico()
 
     @property
     def ed(self):
@@ -408,7 +462,7 @@ class EditorFoto(tk.Toplevel):
             ed = recorte.edicao_padrao()
             ed.update(self.ed)
             self.zoom.set(self._zoom_para_escala(self._corte()["zoom"]))
-            for chave in ("angulo",) + recorte.CHAVES_AJUSTES:
+            for chave in ("angulo", "ia_lut_forca") + recorte.CHAVES_AJUSTES:
                 val = float(ed.get(chave) or 0)
                 getattr(self, chave).set(val)
                 formato = "%.1f" % val if chave == "angulo" and abs(val - round(val)) > 0.05 else "%d" % round(val)
@@ -438,12 +492,49 @@ class EditorFoto(tk.Toplevel):
         dw, dh = max(1, int(img.width * s)), max(1, int(img.height * s))
         ox, oy = (cw - dw) // 2, (ch - dh) // 2
         self._escala, self._origem = s, (ox, oy)
-        exibida = recorte.aplicar_ajustes(img.resize((dw, dh), Image.BILINEAR), self.ed)
+        base = self._com_ia(img.resize((dw, dh), Image.BILINEAR), (dw, dh))
+        exibida = recorte.aplicar_ajustes(base, recorte.sem_ia(self.ed))
         self._tk_grande = ImageTk.PhotoImage(exibida)
         self.canvas.delete("all")
         self.canvas.create_image(ox, oy, image=self._tk_grande, anchor="nw")
         self._desenhar_moldura()
         self._desenhar_previa()
+
+    def _com_ia(self, base, tamanho):
+        """A imagem grande com o estilo da IA: calculada numa thread e guardada; enquanto isso mostra a anterior."""
+        chave_ia = recorte.chave_ia(self.ed)
+        if not chave_ia:
+            return base
+        chave = (self._chave_transformada, tamanho, chave_ia)
+        if self._cache_ia is not None and self._cache_ia[0] == chave:
+            return self._cache_ia[1]
+        if self._ia_calculando != chave:
+            self._ia_calculando = chave
+            edicao = dict(self.ed)
+
+            def calcular():
+                try:
+                    pronta = recorte.aplicar_ia(base, edicao)
+                except Exception:
+                    pronta = base
+                self.app.fila.put(("chamar", lambda: self._ia_pronta(chave, pronta)))
+
+            threading.Thread(target=calcular, daemon=True).start()
+        if self._cache_ia is not None and self._cache_ia[0][:2] == chave[:2]:
+            return self._cache_ia[1]
+        return base
+
+    def _ia_pronta(self, chave, imagem):
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self._ia_calculando == chave:
+            self._ia_calculando = None
+        self._cache_ia = (chave, imagem)
+        if self.espaco and recorte.chave_ia(self.ed) == chave[2]:
+            self._agendar_desenho()
 
     def _desenhar_moldura(self):
         self.canvas.delete("moldura")
@@ -551,8 +642,27 @@ class EditorFoto(tk.Toplevel):
         numero = round(float(valor), 1 if chave == "angulo" else 0)
         rotulo.configure(text="%g" % numero)
         self.ed[chave] = numero
+        if chave == "ia_lut_forca" and numero > 0 and not self.ed.get("ia_lut"):
+            self._buscar_pesos_ia()
         self._agendar_desenho()
         self._avisar(rapido=True)
+
+    def _buscar_pesos_ia(self):
+        foto = self.espaco.get("foto") if self.espaco else None
+        if not foto:
+            return
+        dados = self._dados_foto()
+        if dados.get("ia_lut"):
+            self.ed["ia_lut"] = list(dados["ia_lut"])
+            return
+
+        def chegou(dados_novos):
+            if self.espaco and self.espaco.get("foto") == foto and dados_novos and dados_novos.get("ia_lut"):
+                self.ed["ia_lut"] = list(dados_novos["ia_lut"])
+                self._agendar_desenho()
+                self._avisar()
+
+        self.app.pedir_ia_foto(foto, chegou)
 
     def _zerar_um(self, chave, variavel):
         self._marcar(True)
@@ -629,6 +739,9 @@ class EditorFoto(tk.Toplevel):
         for chave in recorte.CHAVES_AJUSTES:
             self.ed[chave] = 0
         self.ed["pb"] = False
+        if "ia_lut_forca" in self.ed or "ia_lut" in self.ed:
+            self.ed["ia_lut_forca"] = 0
+            self.ed.pop("ia_lut", None)
         if self.espaco and self.espaco.get("foto"):
             self.app.salvar_edicao_padrao_foto(self.espaco["foto"], self.ed)
         self._sincronizar_controles()
@@ -647,6 +760,8 @@ class EditorFoto(tk.Toplevel):
         )
         for chave in recorte.CHAVES_AJUSTES:
             self.ed[chave] = novos.get(chave, 0)
+        if self.ed.get("ia_lut_forca"):
+            self.ed["ia_lut_forca"] = 0
         self.ed["nivel_auto"] = nivel
         if self.espaco.get("foto"):
             self.app.salvar_edicao_padrao_foto(self.espaco["foto"], self.ed)
@@ -659,6 +774,54 @@ class EditorFoto(tk.Toplevel):
         self._sincronizar_controles()
         self._desenhar()
         self._avisar()
+
+    def aplicar_auto_ia(self, nivel="medio"):
+        """Auto IA nesta foto: os pesos da 3D LUT (e a cena) vêm do cache ou são calculados numa thread."""
+        if self._fonte is None or not self.espaco or not self.espaco.get("foto"):
+            return
+        if not self.app.ia_cfg().get("edicao_ia"):
+            messagebox.showinfo("Auto IA", "A edição automática por IA está desligada em Configurações.", parent=self)
+            return
+        foto = self.espaco["foto"]
+        nome_nivel = {"leve": "Leve", "medio": "Médio", "pesado": "Pesado"}.get(nivel, nivel)
+        self.rotulo_diagnostico.configure(text="🤖 Auto IA %s: analisando a foto..." % nome_nivel)
+        for botao in self.botoes_ia:
+            botao.state(["disabled"])
+
+        def chegou(dados):
+            try:
+                if not self.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            for botao in self.botoes_ia:
+                botao.state(["!disabled"])
+            if not self.espaco or self.espaco.get("foto") != foto or self._fonte is None:
+                return
+            if not dados or not dados.get("ia_lut"):
+                self._mostrar_diagnostico()
+                messagebox.showinfo(
+                    "Auto IA",
+                    "O modelo de edição por IA não está instalado ou não pôde ser lido.\n"
+                    "Veja Configurações › Inteligência Artificial (dá para importar os modelos de um arquivo .zip).",
+                    parent=self,
+                )
+                return
+            ia = {"pesos": dados["ia_lut"], "rosto": dados.get("rosto")}
+            if self.app.ia_cfg().get("reconhecer_cenas"):
+                ia["cena"] = dados.get("cena")
+            self._marcar(True)
+            novos = recorte.calcular_ajuste_inteligente(self._fonte, nivel=nivel, base_edicao=self.ed, ia=ia)
+            for chave in recorte.CHAVES_AJUSTES + ("ia_lut_forca", "ia_lut"):
+                self.ed[chave] = novos.get(chave, 0)
+            self.ed["nivel_auto"] = nivel + "_ia"
+            self.app.salvar_edicao_padrao_foto(foto, self.ed)
+            self._mostrar_diagnostico(prefixo="🤖 Auto IA %s aplicado · Diagnóstico" % nome_nivel)
+            self._sincronizar_controles()
+            self._desenhar()
+            self._avisar()
+
+        self.app.pedir_ia_foto(foto, chegou)
 
     def copiar_ajustes_para_lote(self, escopo):
         """Replicar os ajustes atuais de Luz, Cor e Saturação para a lâmina atual ou álbum inteiro."""
@@ -705,6 +868,8 @@ class EditorFoto(tk.Toplevel):
         for chave in recorte.CHAVES_AJUSTES:
             self.ed[chave] = 0
         self.ed["pb"] = False
+        self.ed["ia_lut_forca"] = 0
+        self.ed.pop("ia_lut", None)
         self.ed.pop("nivel_auto", None)
         self.app.salvar_edicao_padrao_foto(caminho, self.ed)
         analise.esquecer(caminho)

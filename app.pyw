@@ -39,6 +39,8 @@ import capa as atalho_capa
 import diagramar
 import entrada
 import exportar
+import ia_cena
+import ia_modelos
 import produtos as modelos_lamina
 import photoshop
 import projeto as proj
@@ -171,6 +173,18 @@ def ler_arranjo():
     if arranjo["lateral"] not in ("direita", "esquerda"):
         arranjo["lateral"] = "direita"
     return arranjo
+
+
+def _baixar_prioridade_thread():
+    """Thread da IA abaixo do normal no Windows: a janela e a análise normal continuam na frente."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.SetThreadPriority(k32.GetCurrentThread(), -1)
+    except Exception:
+        pass
 
 
 def definir_cursor(widget, cursor):
@@ -411,6 +425,7 @@ class Aplicativo:
         self._botoes_atalhos_ui = {}
         self._teclas_vinculadas = []
 
+        self._ia_iniciar()
         self._montar()
         self.root.bind("<Map>", self._algo_apareceu, add="+")
         self._atalhos()
@@ -806,6 +821,8 @@ class Aplicativo:
             command=self._alternou_separar_pastas,
         ).pack(anchor="w", pady=2)
 
+        self._montar_config_ia(corpo, jan)
+
         sec_exibir = ttk.LabelFrame(corpo, text="Exibir e Posição dos Painéis", padding=8)
         sec_exibir.pack(fill="x", pady=(0, 8))
 
@@ -898,6 +915,68 @@ class Aplicativo:
             min_largura=360,
             min_altura=380,
         )
+
+    def _montar_config_ia(self, corpo, jan):
+        sec_ia = ttk.LabelFrame(corpo, text="🤖 Inteligência Artificial (offline · nenhuma foto sai do computador)", padding=8)
+        sec_ia.pack(fill="x", pady=(0, 8))
+        cfg = ia_modelos.config()
+        variaveis = {chave: tk.BooleanVar(value=bool(cfg.get(chave))) for chave in ia_modelos.CONFIG_PADRAO}
+
+        def mudou():
+            novo = ia_modelos.salvar_config({k: v.get() for k, v in variaveis.items()})
+            self._aplicar_cfg_ia()
+            caixa_tema.state(["!disabled"] if novo.get("reconhecer_cenas") else ["disabled"])
+            if not novo.get("modo_leve") and (novo.get("reconhecer_cenas") or novo.get("edicao_ia")):
+                self._agendar_ia_fundo([f["caminho"] for f in self.projeto.get("fotos", [])])
+            self.registrar("Configurações de IA salvas.")
+
+        for chave, texto, dica in (
+            ("reconhecer_cenas", "Reconhecer cenas (Places365: palco, baile, igreja, externa, estúdio...)",
+             "Mostra a cena na dica da foto e no editor, ajuda a separar eventos e sugere o nome do evento (você aceita ou não)."),
+            ("cena_no_tema", "    Usar a cena para escolher o tema do fundo quando a pasta não tem nome de evento",
+             "Desligado = os temas automáticos continuam vindo só do nome da pasta/grupo, como antes."),
+            ("edicao_ia", "Edição automática por IA (botões 🤖 Auto IA no editor e no lote)",
+             "3D LUT adaptativa pré-treinada (estilo de editores profissionais do MIT-Adobe FiveK)."),
+            ("modo_leve", "Modo PC leve (1 thread; analisa só a foto aberta, não na importação)",
+             "Para computadores fracos: nada roda em segundo plano ao carregar as fotos."),
+        ):
+            caixa = ttk.Checkbutton(sec_ia, text=texto, variable=variaveis[chave], command=mudou)
+            caixa.pack(anchor="w", pady=1)
+            tema.dica(caixa, dica)
+            if chave == "cena_no_tema":
+                caixa_tema = caixa
+        if not cfg.get("reconhecer_cenas"):
+            caixa_tema.state(["disabled"])
+
+        rotulo_estado = ttk.Label(sec_ia, text="Verificando os modelos...", style="Fraco.TLabel", justify="left")
+        rotulo_estado.pack(anchor="w", pady=(6, 4))
+
+        def atualizar_estado(recalcular=False):
+            def ler():
+                try:
+                    ia_modelos.estado_modelos(recalcular=recalcular)
+                    texto = ia_modelos.texto_estado()
+                except Exception as e:
+                    texto = "Não deu para verificar os modelos: %s" % e
+
+                def mostrar():
+                    try:
+                        if rotulo_estado.winfo_exists():
+                            rotulo_estado.configure(text=texto)
+                    except tk.TclError:
+                        pass
+
+                self.fila.put(("chamar", mostrar))
+
+            threading.Thread(target=ler, daemon=True, name="ia_estado_cfg").start()
+
+        linha = ttk.Frame(sec_ia)
+        linha.pack(fill="x")
+        ttk.Button(linha, text="📦 Importar modelos de um arquivo (.zip)...", style="Compacto.TButton",
+                   command=lambda: self.importar_modelos_ia(jan, ao_terminar=lambda: atualizar_estado(True))).pack(side="left")
+        ttk.Button(linha, text="↻ Verificar", style="Compacto.TButton",
+                   command=lambda: atualizar_estado(True)).pack(side="left", padx=(4, 0))
+        atualizar_estado()
 
     def _montar_ferramentas_esquerda(self, barra):
         """Barra vertical esquerda unificando ferramentas de edição de foto/espaço e os botões das abas."""
@@ -1063,6 +1142,9 @@ class Aplicativo:
         self.canvas_fotos.bind("<ButtonRelease-1>", self._soltar_arrasto)
         self.canvas_fotos.bind("<Double-Button-1>", self._fotos_duplo)
         self.canvas_fotos.bind("<Button-3>", self._fotos_menu)
+        self.canvas_fotos.bind("<Motion>", self._fotos_passou)
+        for sequencia in ("<Leave>", "<ButtonPress>", "<MouseWheel>"):
+            self.canvas_fotos.bind(sequencia, self._esconder_dica_foto_painel, add="+")
 
     def _montar_timeline(self, pai):
         caixa = ttk.Frame(pai, padding=(6, 4, 6, 2))
@@ -4003,6 +4085,9 @@ class Aplicativo:
         elif tipo == "analisada":
             self.info[normalizar_caminho(msg[1])] = msg[2]
             self._depois_de_trocar_foto(msg[1])
+            self._agendar_ia_fundo([msg[1]])
+        elif tipo == "ia_pronta":
+            self._receber_ia(msg[1], msg[2])
         elif tipo == "chamar":
             msg[1]()
         return ultimo_progresso
@@ -4467,6 +4552,7 @@ class Aplicativo:
             for caminho, mensagem in erros.items():
                 self.registrar("Não deu para ler %s: %s" % (Path(caminho).name, mensagem))
             self.registrar("%s foto(s) adicionada(s)." % len(info))
+            self._agendar_ia_fundo(novas)
             if destino:
                 self._colocar_no_destino(novas, destino)
             elif perguntar_diagramar:
@@ -4519,6 +4605,7 @@ class Aplicativo:
             if resultado:
                 self.info.update(resultado[0])
             self.atualizar_tudo()
+            self._agendar_ia_fundo(caminhos)
 
         self.executar_quando_livre("Lendo as fotos do álbum", trabalho, fim)
 
@@ -6093,6 +6180,10 @@ class Aplicativo:
                     qtd_em_grupo,
                     qtd_cen_grupo,
                 )
+                sug_g = g.get("sugestao_evento")
+                if sug_g and sug_g.get("nome") and sug_g["nome"] != g["nome"]:
+                    resumo_g += "  ·  💡 IA sugere: %s (%d%%) — aceite em 'Opções de Evento'" % (
+                        sug_g["nome"], int(round(float(sug_g.get("confianca") or 0) * 100)))
                 if recolhido:
                     resumo_g += "  ·  [Aba fechada — solte fotos aqui ou clique p/ abrir]"
 
@@ -6360,6 +6451,14 @@ class Aplicativo:
                 state="disabled",
             )
             menu_ev.add_separator()
+            sug_ev = estado_grupos[idx_alvo].get("sugestao_evento")
+            if sug_ev and sug_ev.get("nome") and sug_ev["nome"] != atual_nome:
+                menu_ev.add_command(
+                    label="💡 Aceitar sugestão da IA: %s (cena %s, %d%%)" % (
+                        sug_ev["nome"], sug_ev.get("cena", ""), int(round(float(sug_ev.get("confianca") or 0) * 100))),
+                    command=lambda v=sug_ev["nome"]: _definir_nome_evento_grupo(idx_alvo, v),
+                )
+                menu_ev.add_separator()
             for rotulo_op, valor_op in OPCOES_EVENTO_MENU:
                 prefixo = "✓ " if atual_nome.strip().lower() == valor_op.lower() else "   "
                 menu_ev.add_command(
@@ -6653,6 +6752,7 @@ class Aplicativo:
 
         def _separar_por_evento_automatico():
             todas_ev = []
+            usar_cena = ia_modelos.config().get("reconhecer_cenas")
             for g_ev in estado_grupos:
                 for f_ev in g_ev["fotos"]:
                     ch_ev = normalizar_caminho(f_ev["caminho"])
@@ -6660,6 +6760,8 @@ class Aplicativo:
                     copia_ev = dict(f_ev)
                     if dados_ev.get("cenario"):
                         copia_ev["cenario"] = dados_ev["cenario"]
+                    if usar_cena and dados_ev.get("cena"):
+                        copia_ev["cena"] = dados_ev["cena"]
                     todas_ev.append(copia_ev)
             if not todas_ev:
                 return
@@ -6673,6 +6775,9 @@ class Aplicativo:
                     "Fotos separadas automaticamente em %d evento(s)/capítulo(s): %s"
                     % (len(novos_ev), ", ".join(g["nome"] for g in novos_ev))
                 )
+                sugeridos = [g for g in novos_ev if g.get("sugestao_evento")]
+                if sugeridos:
+                    self.registrar("💡 A IA sugeriu nome para %d grupo(s); aceite em '🎓 Opções de Evento' de cada grupo." % len(sugeridos))
 
         def _dividir_por_pastas():
             todas = [f for g in estado_grupos for f in g["fotos"]]
@@ -13505,6 +13610,10 @@ class Aplicativo:
                     destino[ch] = round(float(val), 2)
                 else:
                     destino.pop(ch, None)
+        if destino.get("ia_lut_forca") and origem.get("ia_lut"):
+            destino["ia_lut"] = [float(p) for p in origem["ia_lut"][:3]]
+        else:
+            destino.pop("ia_lut", None)
         return destino
 
     def salvar_edicao_padrao_foto(self, caminho, edicao):
@@ -13538,7 +13647,7 @@ class Aplicativo:
     def zerar_ajustes_luz_cor_foto(self, caminho):
         """Remove ajustes não-destrutivos de luz/cor de todas as instâncias de `caminho` (mantendo corte/giro/máscara)."""
         ch = normalizar_caminho(caminho)
-        chaves_limpar = set(recorte.PADRAO_EDICAO.keys()) - {"giro", "espelhar", "ignorar_rosto"}
+        chaves_limpar = (set(recorte.PADRAO_EDICAO.keys()) | {"ia_lut"}) - {"giro", "espelhar", "ignorar_rosto"}
         for lam in self.projeto.get("laminas", []):
             for esp in lam.get("espacos", []):
                 if esp.get("foto") and normalizar_caminho(esp["foto"]) == ch:
@@ -13652,12 +13761,15 @@ class Aplicativo:
         extras=None,
         janela_pai=None,
         silencioso=False,
+        usar_ia=False,
     ):
         """
         Analisa fotometricamente cada foto do escopo e aplica melhoria inteligente 1-Clique
         (Leve, Médio, Pesado ou Manual) + ajustes finos extras de luz, cor e saturação,
-        com suporte total a Ctrl+Z.
+        com suporte total a Ctrl+Z. usar_ia=True = Auto IA (3D LUT + cena), sempre numa thread.
         """
+        if usar_ia and nivel in recorte.FORCA_IA_NIVEL:
+            return self._aplicar_lote_ia(fotos_alvo, escopo, nivel, extras, janela_pai, silencioso)
         fotos = self._resolver_fotos_lote(fotos_alvo=fotos_alvo, escopo=escopo)
         if not fotos:
             if not silencioso:
@@ -13755,6 +13867,86 @@ class Aplicativo:
             _aplicar_resultado_edicoes(resultado)
 
         self.executar("Aplicando %s em %d fotos" % (nomes_nivel.get(nivel, "Melhoria"), len(fotos)), trabalho, fim)
+        return len(fotos)
+
+    def calcular_edicoes_ia(self, fotos, nivel, extras, bases, t=None):
+        """{caminho normalizado: edição} do Auto IA (roda numa thread). Sem modelo, a foto fica com o 1-Clique por regras."""
+        cfg = ia_modelos.config()
+        mapa, sem_ia = {}, 0
+        total = len(fotos)
+        for idx, cam in enumerate(fotos, 1):
+            if t is not None and t.parar():
+                break
+            ch = normalizar_caminho(cam)
+            if t is not None:
+                t.aviso("Auto IA (%d/%d): %s" % (idx, total, Path(cam).name))
+            ia = None
+            try:
+                dados = analise.analisar_ia(cam, cena=bool(cfg.get("reconhecer_cenas")), lut=True)
+                self.fila.put(("ia_pronta", cam, dados))
+                if dados.get("ia_lut"):
+                    ia = {"pesos": dados["ia_lut"], "rosto": dados.get("rosto")}
+                    if cfg.get("reconhecer_cenas"):
+                        ia["cena"] = dados.get("cena")
+            except Exception:
+                registrar_erro("Auto IA: %s" % cam, eco=False)
+            if ia is None:
+                sem_ia += 1
+            ed_calc = recorte.calcular_ajuste_inteligente(cam, nivel=nivel, extras=extras, base_edicao=bases.get(ch, {}), ia=ia)
+            if "pb" in (extras or {}):
+                ed_calc["pb"] = bool(extras["pb"])
+            mapa[ch] = ed_calc
+            if t is not None:
+                t.progresso(idx, total)
+        analise.gravar_cache()
+        return mapa, sem_ia
+
+    def _aplicar_lote_ia(self, fotos_alvo, escopo, nivel, extras, janela_pai, silencioso):
+        fotos = self._resolver_fotos_lote(fotos_alvo=fotos_alvo, escopo=escopo)
+        if not fotos:
+            if not silencioso:
+                messagebox.showinfo("Sem Fotos", "Selecione uma foto, lâmina ou carregue fotos no projeto primeiro.",
+                                    parent=janela_pai or self.root)
+            return 0
+        if not ia_modelos.config().get("edicao_ia"):
+            messagebox.showinfo("Auto IA", "A edição automática por IA está desligada em Configurações.", parent=janela_pai or self.root)
+            return 0
+        extras = dict(extras or {})
+        bases = {normalizar_caminho(c): self.obter_edicao_foto(c) for c in fotos}
+        somente_lamina = (escopo == "lamina")
+
+        def trabalho(t):
+            return self.calcular_edicoes_ia(fotos, nivel, extras, bases, t)
+
+        def fim(resultado, erro):
+            if erro or not resultado:
+                return
+            mapa, sem_ia = resultado
+            self.marcar_historico()
+            laminas_iter = [self._lamina()] if somente_lamina and self._lamina() else self.projeto.get("laminas", [])
+            for lam in laminas_iter:
+                for esp in (lam or {}).get("espacos", []):
+                    cam = esp.get("foto")
+                    if cam and normalizar_caminho(cam) in mapa:
+                        self._copiar_chaves_luz_cor(mapa[normalizar_caminho(cam)], esp.setdefault("edicao", {}))
+            for cam in fotos:
+                ch = normalizar_caminho(cam)
+                if ch in mapa:
+                    self.salvar_edicao_padrao_foto(cam, mapa[ch])
+                    recorte.limpar_cache_espaco_rapido(cam)
+            self._cache_laminas.clear()
+            self._marcar_modificado()
+            self.atualizar_tudo()
+            nome_n = {"leve": "Leve", "medio": "Médio", "pesado": "Pesado"}.get(nivel, nivel)
+            texto = "🤖 Auto IA %s aplicado em %d foto(s)! Use Ctrl+Z se quiser desfazer." % (nome_n, len(mapa))
+            if sem_ia:
+                texto += " (%d sem modelo de IA ficaram com o 1-Clique por regras)" % sem_ia
+            self.registrar(texto)
+            if self.editor is not None and self.editor.espaco:
+                self.editor.recarregar()
+
+        if not self.executar("Auto IA %s em %d foto(s)" % (nivel, len(fotos)), trabalho, fim, janela=janela_pai):
+            return 0
         return len(fotos)
 
     # ==================================================================
@@ -13863,6 +14055,249 @@ class Aplicativo:
         if self.editor and self.editor.espaco and self.editor.espaco.get("foto") and \
                 normalizar_caminho(self.editor.espaco["foto"]) == normalizar_caminho(caminho):
             self.editor.recarregar()
+
+    # ==================================================================
+    # IA local (cena e edição automática) em segundo plano
+    # ==================================================================
+
+    def _ia_iniciar(self):
+        self._ia_pendentes = OrderedDict()
+        self._ia_trava = threading.Lock()
+        self._ia_trabalhadores = 0
+        self._ia_em_andamento = set()
+        self._aplicar_cfg_ia()
+        threading.Thread(target=self._ia_aquecer, daemon=True, name="ia_estado").start()
+
+    @staticmethod
+    def _ia_aquecer():
+        try:
+            ia_modelos.estado_modelos()
+        except Exception:
+            registrar_erro("estado dos modelos de IA", eco=False)
+
+    def ia_cfg(self):
+        return ia_modelos.config()
+
+    def _aplicar_cfg_ia(self):
+        cfg = ia_modelos.config()
+        diagramar.USAR_CENA_TEMA = bool(cfg.get("reconhecer_cenas") and cfg.get("cena_no_tema"))
+
+    def _agendar_ia_fundo(self, caminhos, primeiro=False):
+        """Fila de baixa prioridade: cena e pesos da IA de cada foto, depois da análise normal, 1–2 threads."""
+        cfg = ia_modelos.config()
+        if cfg.get("modo_leve") or not (cfg.get("reconhecer_cenas") or cfg.get("edicao_ia")) or not caminhos:
+            return
+        with self._ia_trava:
+            for c in caminhos:
+                ch = normalizar_caminho(c)
+                self._ia_pendentes[ch] = str(c)
+                if primeiro:
+                    self._ia_pendentes.move_to_end(ch, last=False)
+            limite = min(2, max(1, (os.cpu_count() or 2) // 4))
+            novos = max(0, limite - self._ia_trabalhadores)
+            self._ia_trabalhadores += novos
+        for _ in range(novos):
+            threading.Thread(target=self._ia_trabalhador, daemon=True, name="ia_fundo").start()
+
+    def _ia_trabalhador(self):
+        _baixar_prioridade_thread()
+        feitas = 0
+        try:
+            while True:
+                with self._ia_trava:
+                    if not self._ia_pendentes:
+                        break
+                    ch, caminho = self._ia_pendentes.popitem(last=False)
+                while self.tarefa is not None:
+                    time.sleep(0.4)
+                cfg = ia_modelos.config()
+                cena, lut = bool(cfg.get("reconhecer_cenas")), bool(cfg.get("edicao_ia"))
+                if cfg.get("modo_leve") or not (cena or lut):
+                    with self._ia_trava:
+                        self._ia_pendentes.clear()
+                    break
+                try:
+                    if not ia_modelos.disponivel("cena") and not ia_modelos.disponivel("edicao"):
+                        with self._ia_trava:
+                            self._ia_pendentes.clear()
+                        break
+                    anterior = self.info.get(ch)
+                    if anterior is not None and not analise.falta_ia(anterior, cena, lut):
+                        continue
+                    if not Path(caminho).is_file():
+                        continue
+                    dados = analise.analisar_ia(caminho, cena=cena, lut=lut)
+                    self.fila.put(("ia_pronta", caminho, dados))
+                    feitas += 1
+                    if feitas % 40 == 0:
+                        analise.gravar_cache()
+                except Exception:
+                    registrar_erro("IA em segundo plano: %s" % caminho, eco=False)
+        finally:
+            with self._ia_trava:
+                self._ia_trabalhadores -= 1
+            if feitas:
+                analise.gravar_cache()
+
+    def pedir_ia_foto(self, caminho, ao_terminar=None):
+        """Cena e pesos da IA de uma foto agora (numa thread); ao_terminar(dados) volta na janela."""
+        cfg = ia_modelos.config()
+
+        def trabalho():
+            dados = None
+            try:
+                dados = analise.analisar_ia(caminho, cena=bool(cfg.get("reconhecer_cenas")), lut=True)
+                if dados and dados.get("ia_lut"):
+                    import ia_edicao
+                    ia_edicao.lut_combinada(dados["ia_lut"])
+            except Exception:
+                registrar_erro("IA da foto %s" % caminho, eco=False)
+            finally:
+                self._ia_em_andamento.discard(normalizar_caminho(caminho))
+            self.fila.put(("ia_pronta", caminho, dados))
+            if ao_terminar is not None:
+                self.fila.put(("chamar", lambda: ao_terminar(dados)))
+
+        self._ia_em_andamento.add(normalizar_caminho(caminho))
+        threading.Thread(target=trabalho, daemon=True, name="ia_foto").start()
+
+    def pedir_ia_se_preciso(self, caminho):
+        """Foto aberta no editor sem a análise de IA: calcula só ela (no Modo PC leve é o único momento)."""
+        cfg = ia_modelos.config()
+        if not caminho or not (cfg.get("reconhecer_cenas") or cfg.get("edicao_ia")):
+            return
+        ch = normalizar_caminho(caminho)
+        dados = self.info.get(ch) or {}
+        tem = (dados.get("cena") or not cfg.get("reconhecer_cenas")) and (dados.get("ia_lut") or not cfg.get("edicao_ia"))
+        if tem or ch in self._ia_em_andamento:
+            return
+        if cfg.get("modo_leve"):
+            self._ia_em_andamento.add(ch)
+            threading.Thread(target=self._ia_uma_leve, args=(caminho, cfg), daemon=True, name="ia_leve").start()
+        else:
+            self._agendar_ia_fundo([caminho], primeiro=True)
+
+    def _ia_uma_leve(self, caminho, cfg):
+        _baixar_prioridade_thread()
+        dados = None
+        try:
+            dados = analise.analisar_ia(caminho, cena=bool(cfg.get("reconhecer_cenas")), lut=bool(cfg.get("edicao_ia")))
+        except Exception:
+            registrar_erro("IA da foto %s" % caminho, eco=False)
+        finally:
+            self._ia_em_andamento.discard(normalizar_caminho(caminho))
+        if dados is not None:
+            self.fila.put(("ia_pronta", caminho, dados))
+
+    def _receber_ia(self, caminho, dados):
+        """Resultado da IA chegou: só atualiza os dados, a dica e o diagnóstico (sem redesenhar a lâmina)."""
+        if not isinstance(dados, dict):
+            return
+        ch = normalizar_caminho(caminho)
+        if ch in self.info or proj.registro_foto(self.projeto, caminho) is not None:
+            self.info[ch] = dados
+        if self.editor is not None:
+            try:
+                self.editor.ia_atualizada(caminho)
+            except tk.TclError:
+                pass
+        dica = getattr(self, "_dica_foto_painel", None)
+        if dica is not None and dica.get("chave") == ch:
+            self._mostrar_dica_foto_painel(dica["item"], dica["x_root"], dica["y_root"], forcar=True)
+
+    def _texto_dica_foto(self, caminho):
+        if not ia_modelos.config().get("reconhecer_cenas"):
+            return ""
+        dados = self.info.get(normalizar_caminho(caminho)) or {}
+        cena = dados.get("cena")
+        if not isinstance(cena, dict) or not cena.get("rotulo"):
+            return ""
+        linhas = [Path(caminho).name, "Cena (IA): %s" % ia_cena.texto_curto(cena)]
+        top = ", ".join(str(c[0]) for c in (cena.get("top5") or [])[:3])
+        if top:
+            linhas.append("Places365: %s" % top)
+        linhas.append("Ambiente: %s" % ("externo" if cena.get("io") == "externa" else "interno"))
+        return "\n".join(linhas)
+
+    def _fotos_passou(self, evento):
+        if not ia_modelos.config().get("reconhecer_cenas"):
+            return
+        if evento.state & 0x0100 or getattr(self, "_arrasto", None):
+            self._esconder_dica_foto_painel()
+            return
+        item = self._item_painel_fotos_em(evento)
+        if not item or item.get("tipo") != "foto":
+            self._esconder_dica_foto_painel()
+            return
+        ch = normalizar_caminho(item["foto"]["caminho"])
+        atual = getattr(self, "_dica_foto_painel", None)
+        if atual is not None and atual.get("chave") == ch:
+            return
+        self._esconder_dica_foto_painel()
+        self._dica_foto_painel = {"chave": ch, "item": item, "x_root": evento.x_root, "y_root": evento.y_root, "janela": None}
+        self.agendar("dica_foto_painel", 450, lambda: self._mostrar_dica_foto_painel(item, evento.x_root, evento.y_root))
+
+    def _mostrar_dica_foto_painel(self, item, x_root, y_root, forcar=False):
+        dica = getattr(self, "_dica_foto_painel", None)
+        if dica is None or dica.get("item") is not item:
+            return
+        texto = self._texto_dica_foto(item["foto"]["caminho"])
+        if dica.get("janela") is not None:
+            if not forcar:
+                return
+            try:
+                dica["janela"].destroy()
+            except tk.TclError:
+                pass
+            dica["janela"] = None
+        if not texto:
+            return
+        jan = tk.Toplevel(self.root)
+        jan.overrideredirect(True)
+        jan.attributes("-topmost", True)
+        borda = tk.Frame(jan, bg=tema.BORDA_CLARA, padx=1, pady=1)
+        borda.pack()
+        tk.Label(borda, text=texto, bg=tema.PAINEL, fg=tema.TEXTO, padx=8, pady=3, font=tema.FONTE, justify="left").pack()
+        jan.geometry("+%d+%d" % (x_root + 14, max(0, y_root - 70)))
+        dica["janela"] = jan
+
+    def _esconder_dica_foto_painel(self, _evento=None):
+        self.cancelar_agendado("dica_foto_painel")
+        dica = getattr(self, "_dica_foto_painel", None)
+        self._dica_foto_painel = None
+        if dica is not None and dica.get("janela") is not None:
+            try:
+                dica["janela"].destroy()
+            except tk.TclError:
+                pass
+
+    def importar_modelos_ia(self, janela_pai=None, ao_terminar=None):
+        arquivo = filedialog.askopenfilename(
+            parent=janela_pai or self.root,
+            title="Importar modelos de IA (.zip)",
+            filetypes=[("Pacote de modelos (*.zip)", "*.zip"), ("Todos os arquivos", "*.*")],
+        )
+        if not arquivo:
+            return
+
+        def trabalho():
+            try:
+                ok, mensagem = ia_modelos.importar_zip(arquivo)
+            except Exception as e:
+                ok, mensagem = False, str(e)
+                registrar_erro("importar modelos de IA", eco=False)
+
+            def fim():
+                (messagebox.showinfo if ok else messagebox.showerror)("Modelos de IA", mensagem, parent=janela_pai or self.root)
+                self.registrar(mensagem)
+                if ok:
+                    self._agendar_ia_fundo([f["caminho"] for f in self.projeto.get("fotos", [])])
+                if ao_terminar is not None:
+                    ao_terminar()
+
+            self.fila.put(("chamar", fim))
+
+        threading.Thread(target=trabalho, daemon=True, name="ia_importar").start()
 
     # ==================================================================
     # Janelas de tratamento e exportação, programa de capas

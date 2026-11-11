@@ -10,6 +10,7 @@ para servir tanto na miniatura da prévia quanto na foto inteira:
   Luz: exposicao, brilho, contraste, realces, sombras (-100 a 100)
   Cor: temperatura, matiz, vibracao, saturacao (-100 a 100) e pb (preto e branco)
   Efeitos: nitidez (0 a 100), vinheta (-100 a 100)
+  IA: ia_lut_forca (0 a 100) com ia_lut (3 pesos da 3D LUT), aplicada antes dos controles manuais
 """
 
 import functools
@@ -38,6 +39,10 @@ FATORES_NIVEL_AUTO = {
     "medio": 0.88,
     "pesado": 1.28,
 }
+FORCA_IA_NIVEL = {"leve": 40, "medio": 70, "pesado": 100}
+FATOR_REGRAS_COM_IA = 0.45
+LUZ_ROSTO_ALVO = {"Externa": 156.0, "Baile/Festa": 136.0, "Colação/Palco": 142.0, "Estúdio": 150.0}
+LUZ_ROSTO_PADRAO = 148.0
 
 _CACHE_VINHETA_BASE = None
 _CACHE_ESPACO_RAPIDO = OrderedDict()
@@ -65,6 +70,7 @@ def edicao_padrao():
         "vibracao": 0, "saturacao": 0,
         "nitidez": 0, "vinheta": 0,
         "pb": False,
+        "ia_lut_forca": 0,
     }
 
 
@@ -92,7 +98,7 @@ def _chave_edicao_cache(edicao, rosto, dobra_x):
         round(float(rosto.get("cy", 0.5)), 4),
     ) if isinstance(rosto, dict) else None
     ajustes_t = tuple(round(float(ed.get(k) or 0), 1) for k in CHAVES_AJUSTES)
-    return (
+    chave = (
         int(ed.get("rot") or 0) % 360,
         bool(ed.get("espelhar")),
         round(float(ed.get("angulo") or 0), 2),
@@ -103,6 +109,38 @@ def _chave_edicao_cache(edicao, rosto, dobra_x):
         bool(ed.get("ignorar_rosto")),
         ajustes_t,
     )
+    ia_t = chave_ia(ed)
+    return chave + (ia_t,) if ia_t else chave
+
+
+def chave_ia(edicao):
+    """(força, pesos) do estilo da IA quando ele está ligado na edição; None quando não muda a foto."""
+    if not isinstance(edicao, dict):
+        return None
+    try:
+        forca = round(float(edicao.get("ia_lut_forca") or 0), 1)
+        pesos = edicao.get("ia_lut")
+        if forca <= 0 or not pesos or len(pesos) < 3:
+            return None
+        return (forca, tuple(round(float(p), 5) for p in pesos[:3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def sem_ia(edicao):
+    """Cópia da edição sem o estilo da IA (para aplicar só os controles manuais sobre uma imagem já estilizada)."""
+    ed = dict(edicao or {})
+    ed["ia_lut_forca"] = 0
+    return ed
+
+
+def aplicar_ia(img, edicao):
+    """Só o estilo da IA (3D LUT) da edição; sem modelo ou desligado devolve a imagem como veio."""
+    chave = chave_ia(edicao)
+    if not chave:
+        return img
+    import ia_edicao
+    return ia_edicao.aplicar_lut(img, list(chave[1]), chave[0])
 
 
 # ------------------------------------------------------------
@@ -492,6 +530,7 @@ def aplicar_ajustes(img, edicao):
     ed = _ed(edicao)
     if img.mode != "RGB":
         img = img.convert("RGB")
+    img = aplicar_ia(img, ed)
 
     exposicao = round(float(ed.get("exposicao") or 0), 1)
     brilho = round(float(ed.get("brilho") or 0), 1)
@@ -596,7 +635,7 @@ def tem_ajuste_luz_cor(edicao):
     """Retorna True se o dicionário de edição possuir algum ajuste de luz, cor, nitidez, vinheta ou P&B."""
     if not isinstance(edicao, dict):
         return False
-    if bool(edicao.get("pb")):
+    if bool(edicao.get("pb")) or chave_ia(edicao):
         return True
     for ch in CHAVES_AJUSTES:
         try:
@@ -766,14 +805,17 @@ def analisar_fotometria_rapida(img_ou_caminho):
     return resultado
 
 
-def calcular_ajuste_inteligente(img_ou_caminho, nivel="medio", extras=None, base_edicao=None):
+def calcular_ajuste_inteligente(img_ou_caminho, nivel="medio", extras=None, base_edicao=None, ia=None):
     """
     Calcula os ajustes ideais de Luz, Cor, Saturação e Nitidez para deixar uma foto
     ruim/apagada bonita em 1 clique, escalado pelo nível ('leve', 'medio', 'pesado')
     e somado aos ajustes manuais extras do lote.
+    Com ia={"pesos", "cena", "rosto"} usa a 3D LUT (força 40/70/100) + correções por cena e pelo rosto.
     """
-    ed_saida = dict(base_edicao) if isinstance(base_edicao, dict) else {}
     nivel_norm = str(nivel or "medio").strip().lower()
+    if isinstance(ia, dict) and ia.get("pesos") and nivel_norm in FORCA_IA_NIVEL:
+        return _ajuste_com_ia(img_ou_caminho, nivel_norm, extras, base_edicao, ia)
+    ed_saida = dict(base_edicao) if isinstance(base_edicao, dict) else {}
 
     if nivel_norm in ("original", "zerar", "nenhum", "reset"):
         for ch in CHAVES_AJUSTES:
@@ -786,6 +828,8 @@ def calcular_ajuste_inteligente(img_ou_caminho, nivel="medio", extras=None, base
                     ed_saida[ch] = int(round(max(lim_min, min(100, float(extras[ch])))))
             if "pb" in extras:
                 ed_saida["pb"] = bool(extras["pb"])
+        if ed_saida.get("ia_lut_forca"):
+            ed_saida["ia_lut_forca"] = 0
         return ed_saida
 
     fator = FATORES_NIVEL_AUTO.get(nivel_norm, FATORES_NIVEL_AUTO["medio"])
@@ -879,7 +923,76 @@ def calcular_ajuste_inteligente(img_ou_caminho, nivel="medio", extras=None, base
         ed_saida["pb"] = bool(extras_dict["pb"])
     else:
         ed_saida.setdefault("pb", False)
+    if ed_saida.get("ia_lut_forca"):
+        ed_saida["ia_lut_forca"] = 0
 
+    return ed_saida
+
+
+def _ajuste_com_ia(img_ou_caminho, nivel, extras, base_edicao, ia):
+    """
+    1-Clique com IA: a 3D LUT faz a correção global (força pelo nível) e as regras entram só como
+    complemento, medidas na foto já estilizada; depois vêm o alvo de cada cena e a luz dos rostos.
+    """
+    import ia_edicao
+
+    forca = FORCA_IA_NIVEL[nivel]
+    pesos = [round(float(p), 6) for p in ia["pesos"][:3]]
+    if isinstance(img_ou_caminho, Image.Image):
+        img = img_ou_caminho.convert("RGB")
+        if max(img.size) > 320:
+            img = img.copy()
+            img.thumbnail((320, 320), Image.BILINEAR)
+    else:
+        img = analise.miniatura(str(img_ou_caminho), analise.LADO_MINIATURA)
+    estilizada = ia_edicao.aplicar_lut(img, pesos, forca)
+    regras = calcular_ajuste_inteligente(estilizada, nivel=nivel, base_edicao={})
+    stats = analisar_fotometria_rapida(estilizada)
+    cena = str((ia.get("cena") or {}).get("rotulo") or "")
+
+    calc = {ch: float(regras.get(ch) or 0) * FATOR_REGRAS_COM_IA for ch in CHAVES_AJUSTES}
+    calc["nitidez"] = float(regras.get("nitidez") or 0)
+    calc["vinheta"] = 0.0
+
+    luz_rosto = ia_edicao.luminancia_rostos(estilizada, ia.get("rosto"))
+    if luz_rosto is not None:
+        alvo = LUZ_ROSTO_ALVO.get(cena, LUZ_ROSTO_PADRAO)
+        pelo_rosto = max(-18.0, min(26.0, (alvo - luz_rosto) * 0.45)) * FATORES_NIVEL_AUTO[nivel]
+        calc["exposicao"] = calc["exposicao"] * 0.4 + pelo_rosto * 0.6
+
+    estouradas = float(stats.get("frac_estouradas") or 0)
+    if cena == "Estúdio":
+        calc["realces"] = min(calc["realces"], -10.0 - 40.0 * estouradas)
+        calc["exposicao"] = min(calc["exposicao"], 16.0)
+        calc["vibracao"] *= 0.8
+    elif cena == "Externa":
+        calc["realces"] = min(calc["realces"], -14.0 - 70.0 * estouradas)
+        if estouradas > 0.04:
+            calc["exposicao"] = min(calc["exposicao"], 10.0)
+    elif cena == "Colação/Palco":
+        calc["exposicao"] = min(calc["exposicao"], 14.0)
+        calc["sombras"] = min(calc["sombras"], 20.0)
+        calc["brilho"] = min(calc["brilho"], 6.0)
+        calc["temperatura"] *= 0.5
+        calc["matiz"] *= 0.5
+    elif cena == "Baile/Festa":
+        calc["exposicao"] = min(calc["exposicao"], 10.0)
+        calc["sombras"] = min(calc["sombras"], 8.0)
+        calc["brilho"] = min(calc["brilho"], 3.0)
+        calc["contraste"] = max(calc["contraste"], 6.0)
+
+    ed_saida = dict(base_edicao) if isinstance(base_edicao, dict) else {}
+    extras_dict = extras if isinstance(extras, dict) else {}
+    for ch in CHAVES_AJUSTES:
+        soma = calc.get(ch, 0.0) + float(extras_dict.get(ch) or 0.0)
+        lim_min = 0 if ch == "nitidez" else -100
+        ed_saida[ch] = int(round(max(lim_min, min(100, soma))))
+    ed_saida["ia_lut_forca"] = forca
+    ed_saida["ia_lut"] = pesos
+    if "pb" in extras_dict:
+        ed_saida["pb"] = bool(extras_dict["pb"])
+    else:
+        ed_saida.setdefault("pb", False)
     return ed_saida
 
 

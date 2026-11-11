@@ -1,0 +1,20 @@
+Modelos de IA usados pelo Diagramador Inteligente (rodam só neste computador, sem internet)
+
+1) Reconhecimento de cena: ResNet18-Places365
+   Autores: Bolei Zhou, Agata Lapedriza, Aditya Khosla, Aude Oliva, Antonio Torralba (MIT CSAIL).
+   "Places: A 10 million Image Database for Scene Recognition", IEEE TPAMI, 2017. http://places2.csail.mit.edu
+   Pesos: http://places2.csail.mit.edu/models_places365/resnet18_places365.pth.tar
+   Licença dos modelos pré-treinados: Creative Commons Atribuição (CC BY) - dar crédito aos autores.
+   Código do repositório CSAILVision/places365: MIT License, Copyright (c) 2017 Bolei Zhou and MIT CSAIL Computer Vision.
+   Convertido para ONNX (pesos em float16 quando a validação aprova) sem outras alterações.
+
+2) Edição automática: Image-Adaptive 3D LUT (modelo pré-treinado sRGB / MIT-Adobe FiveK)
+   Hui Zeng, Jianrui Cai, Lida Li, Zisheng Cao, Lei Zhang. "Learning Image-adaptive 3D Lookup Tables for
+   High Performance Photo Enhancement in Real-time", IEEE TPAMI, 2020. https://github.com/HuiZeng/Image-Adaptive-3DLUT
+   Licença do repositório (código e pesos publicados nele): Apache License 2.0.
+   Classificador convertido para ONNX (sem a camada Upsample, feita antes com redimensionamento bilinear);
+   as 3 LUTs base foram copiadas para lut3d_base.npz sem alteração.
+   ATENÇÃO: o modelo foi treinado com as fotos do MIT-Adobe FiveK, cujas licenças (LicenseAdobe.txt e
+   LicenseAdobeMIT.txt) permitem usar as FOTOS só para pesquisa, sem fins comerciais. As licenças não falam
+   de modelos treinados com elas; para uso comercial, avalie esse ponto (ou troque por um modelo treinado
+   com fotos próprias usando o mesmo formato).

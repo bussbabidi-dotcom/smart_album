@@ -18,6 +18,7 @@ import lightroom
 import photoshop
 import recorte
 import tema
+from comum import normalizar_caminho
 
 ALTURA_MINIATURA = 46
 MINIATURAS_MAXIMO = 40
@@ -57,6 +58,7 @@ class JanelaTratamento(tk.Toplevel):
             escopo_ini = "projeto"
         self.escopo = tk.StringVar(value=escopo_ini)
         self.nivel_auto_lote = tk.StringVar(value="medio")
+        self.usar_ia_lote = tk.BooleanVar(value=False)
         self.pb_lote = tk.BooleanVar(value=False)
         self.vars_lote = {}
         self.rotulos_lote = {}
@@ -185,6 +187,25 @@ class JanelaTratamento(tk.Toplevel):
         )
         btn_1c_zerar.grid(row=0, column=3, sticky="ew", padx=(4, 0))
         tema.dica(btn_1c_zerar, "Remove todos os filtros de luz, cor e saturação das fotos do escopo selecionado (suporta Ctrl+Z).")
+
+        linha_ia = ttk.Frame(lote_box)
+        linha_ia.pack(fill="x", pady=(0, 8))
+        btn_auto_ia = ttk.Button(
+            linha_ia,
+            text="🤖 Auto IA no escopo",
+            style="PrimarioCompacto.TButton",
+            command=lambda: self._executar_lote_no_projeto(nivel="medio", usar_ia=True),
+        )
+        btn_auto_ia.pack(side="left")
+        tema.dica(btn_auto_ia, "Edição automática por IA (3D LUT adaptativa + alvo por cena e pelos rostos), "
+                               "calculada neste PC em segundo plano. Suporta Ctrl+Z.")
+        caixa_ia = ttk.Checkbutton(
+            linha_ia,
+            text="🤖 Usar IA nos botões Leve / Médio / Pesado e no 'Modo base'",
+            variable=self.usar_ia_lote,
+        )
+        caixa_ia.pack(side="left", padx=(10, 0))
+        tema.dica(caixa_ia, "Ligado: Leve/Médio/Pesado usam o estilo da IA a 40/70/100% + correções por regras.")
 
         # Seletor do modo base + Sliders de ajuste fino em lote
         modo_linha = ttk.Frame(lote_box)
@@ -463,12 +484,24 @@ class JanelaTratamento(tk.Toplevel):
         nivel = self.nivel_auto_lote.get()
         self._executar_lote_no_projeto(nivel=nivel)
 
-    def _executar_lote_no_projeto(self, nivel):
+    def _executar_lote_no_projeto(self, nivel, usar_ia=None):
         fotos = self.fotos()
         if not fotos:
             messagebox.showinfo("Edição em Lote", "Nenhuma foto escolhida neste escopo.", parent=self)
             return
         extras = self._obter_extras_lote()
+        if usar_ia is None:
+            usar_ia = bool(self.usar_ia_lote.get())
+        if usar_ia and nivel in recorte.FORCA_IA_NIVEL:
+            qtd = self.app.aplicar_lote_inteligente(
+                fotos_alvo=fotos, escopo=self.escopo.get(), nivel=nivel, extras=extras,
+                janela_pai=self, silencioso=True, usar_ia=True,
+            )
+            if qtd:
+                msg = "🤖 Auto IA (%s) calculando %d foto(s) em segundo plano... (Suporta Ctrl+Z)" % (nivel, qtd)
+                self.aviso(msg)
+                self.rotulo_resumo.configure(text=msg, foreground=tema.VERDE)
+            return
         if nivel == "manual" and not extras:
             messagebox.showinfo(
                 "Edição em Lote",
@@ -528,6 +561,8 @@ class JanelaTratamento(tk.Toplevel):
         ):
             return
         app = self.app
+        usar_ia = bool(self.usar_ia_lote.get()) and nivel in recorte.FORCA_IA_NIVEL
+        bases = {caminho: app.obter_edicao_foto(caminho) for caminho in dict.fromkeys(fotos)}
 
         def trabalho(t):
             trocadas, erros = [], []
@@ -539,13 +574,17 @@ class JanelaTratamento(tk.Toplevel):
                 nome_arq = Path(caminho).name
                 t.aviso("Gravando melhoria (%d/%d): %s" % (idx, total, nome_arq))
                 try:
-                    ed_atual = app.obter_edicao_foto(caminho)
-                    ed_final = recorte.calcular_ajuste_inteligente(
-                        caminho,
-                        nivel=nivel,
-                        extras=extras,
-                        base_edicao=ed_atual,
-                    )
+                    ed_atual = bases.get(caminho) or {}
+                    if usar_ia:
+                        mapa_ia, _sem = app.calcular_edicoes_ia([caminho], nivel, extras, {normalizar_caminho(caminho): ed_atual})
+                        ed_final = next(iter(mapa_ia.values()))
+                    else:
+                        ed_final = recorte.calcular_ajuste_inteligente(
+                            caminho,
+                            nivel=nivel,
+                            extras=extras,
+                            base_edicao=ed_atual,
+                        )
                     if extras.get("pb"):
                         ed_final["pb"] = True
                     recorte.gravar_ajustes_no_arquivo_original(caminho, ed_final)

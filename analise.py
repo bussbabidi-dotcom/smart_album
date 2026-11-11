@@ -28,6 +28,7 @@ from comum import (
 LADO_ANALISE = 1024
 LADO_PREVIA = 1600
 LADO_MINIATURA = 220
+LADO_IA = 512
 TOLERANCIA_QUADRADO = 0.08
 VERSAO_CACHE = 4
 
@@ -530,6 +531,53 @@ def analisar_foto(caminho):
     with _trava_cache:
         _carregar_cache()["fotos"][chave] = dados
         _cache_sujo = True
+    return dados
+
+
+def falta_ia(dados, cena=True, lut=True):
+    """Se faltam (ou estão de outra versão do modelo) os campos de IA desta análise."""
+    import ia_modelos
+    if not isinstance(dados, dict):
+        return False
+    v_cena = ia_modelos.assinatura("cena") if cena else ""
+    v_lut = ia_modelos.assinatura("edicao") if lut else ""
+    return bool((v_cena and (dados.get("cena") or {}).get("versao") != v_cena)
+                or (v_lut and dados.get("ia_lut_versao") != v_lut))
+
+
+def analisar_ia(caminho, cena=True, lut=True):
+    """
+    Cena (Places365) e pesos da 3D LUT da foto, calculados uma vez sobre uma versão de 512 px e guardados
+    no mesmo cache da análise, em chaves próprias: a análise normal já feita continua valendo.
+    """
+    global _cache_sujo
+    import ia_modelos
+    dados = analisar_foto(caminho)
+    v_cena = ia_modelos.assinatura("cena") if cena else ""
+    v_lut = ia_modelos.assinatura("edicao") if lut else ""
+    falta_cena = bool(v_cena) and (dados.get("cena") or {}).get("versao") != v_cena
+    falta_lut = bool(v_lut) and dados.get("ia_lut_versao") != v_lut
+    if not (falta_cena or falta_lut):
+        return dados
+    img = _abrir_reduzida(caminho, LADO_IA)
+    novos = {}
+    if falta_cena:
+        import ia_cena
+        resultado = ia_cena.reconhecer(img, dados.get("rosto"))
+        if resultado:
+            resultado["versao"] = v_cena
+            novos["cena"] = resultado
+    if falta_lut:
+        import ia_edicao
+        pesos = ia_edicao.pesos_lut(img)
+        if pesos:
+            novos["ia_lut"] = pesos
+            novos["ia_lut_versao"] = v_lut
+            novos["ia_luz_rosto"] = ia_edicao.luminancia_rostos(img, dados.get("rosto"))
+    if novos:
+        with _trava_cache:
+            dados.update(novos)
+            _cache_sujo = True
     return dados
 
 

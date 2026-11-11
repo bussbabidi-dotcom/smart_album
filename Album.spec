@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('produtos', 'produtos'), ('modelos', 'modelos'), ('recursos', 'recursos'), ('lightroom_plugin', 'lightroom_plugin')]
 binaries = []
-hiddenimports = ['win32timezone', 'janela_tratamento', 'editor_foto', 'exportar_psd']
+hiddenimports = ['win32timezone', 'janela_tratamento', 'editor_foto', 'exportar_psd', 'ia_modelos', 'ia_cena', 'ia_edicao']
 tmp_ret = collect_all('tkinterdnd2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

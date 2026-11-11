@@ -2139,6 +2139,64 @@ TEMA_DO_EVENTO = {
     "Ensaio Fotográfico": "ensaio_linho",
 }
 
+# Cena reconhecida pela IA (ia_cena) -> evento sugerido. Só vira nome quando o usuário aceita.
+EVENTO_DA_CENA = {
+    "Colação/Palco": "Colação 2",
+    "Baile/Festa": "Baile de Gala",
+    "Culto/Igreja": "Culto Ecumênico",
+    "Externa": "Fotos Externas",
+    "Estúdio": "Estúdio",
+}
+CONFIANCA_CENA_TEMA = 0.5
+CONFIANCA_CENA_SINAL = 0.45
+# Ligado pela opção "usar a cena para escolher o tema" (desligado = comportamento de sempre).
+USAR_CENA_TEMA = False
+
+
+def _cena_confiavel(foto, minimo):
+    cena = foto.get("cena") if isinstance(foto, dict) else None
+    if not isinstance(cena, dict) or not cena.get("rotulo"):
+        return None
+    try:
+        confianca = float(cena.get("confianca") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (cena["rotulo"], confianca) if confianca >= minimo else None
+
+
+def _distancia_com_cena(f_a, f_b, distancia):
+    """Cena diferente (com confiança) afasta as fotos; a mesma cena aproxima. Sem cena não muda nada."""
+    cena_a = _cena_confiavel(f_a, CONFIANCA_CENA_SINAL)
+    cena_b = _cena_confiavel(f_b, CONFIANCA_CENA_SINAL)
+    if not (cena_a and cena_b):
+        return distancia
+    if cena_a[0] != cena_b[0]:
+        return distancia + 0.12 * min(cena_a[1], cena_b[1])
+    return distancia * 0.85
+
+
+def sugestao_evento_das_fotos(fotos):
+    """{"nome", "cena", "confianca"} do evento mais provável pela cena das fotos, ou None (nunca é aplicado sozinho)."""
+    from collections import Counter
+
+    votos = Counter()
+    lista = [f for f in (fotos or []) if isinstance(f, dict)]
+    for f in lista:
+        achado = _cena_confiavel(f, CONFIANCA_CENA_SINAL)
+        if achado and achado[0] in EVENTO_DA_CENA:
+            votos[achado[0]] += achado[1]
+    if not votos or not lista:
+        return None
+    cena, soma = votos.most_common(1)[0]
+    confianca = soma / float(len(lista))
+    if confianca < 0.35:
+        return None
+    nome = EVENTO_DA_CENA[cena]
+    brancas = [float((f.get("cena") or {}).get("roupa_branca") or 0) for f in lista]
+    if cena in ("Colação/Palco", "Estúdio") and brancas and sorted(brancas)[len(brancas) // 2] >= 0.45:
+        return {"nome": "Cerimônia do Jaleco", "cena": cena, "confianca": round(min(0.4, confianca), 2)}
+    return {"nome": nome, "cena": cena, "confianca": round(confianca, 2)}
+
 
 def evento_por_palavras(texto):
     txt = str(texto or "").lower()
@@ -2163,6 +2221,10 @@ def tema_evento_das_fotos(fotos, info=None, preferido=None):
     for foto in lista:
         nome = detectar_nome_evento_foto(foto, info)
         tema = TEMA_DO_EVENTO.get(nome) or TEMA_DO_EVENTO.get(evento_por_palavras(nome))
+        if not tema and not nome and USAR_CENA_TEMA:
+            achado = _cena_confiavel(foto, CONFIANCA_CENA_TEMA)
+            if achado:
+                tema = TEMA_DO_EVENTO.get(EVENTO_DA_CENA.get(achado[0], ""))
         if tema:
             votos[tema] += 1
     if not votos:
@@ -2223,13 +2285,14 @@ def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
             if (ult["centroide"] and vetor and len(ult["centroide"]) == len(vetor))
             else d_ult
         )
-        d_efetiva = min(d_ult, d_centro * 0.95)
+        d_efetiva = _distancia_com_cena(ult["fotos"][-1], f, min(d_ult, d_centro * 0.95))
 
         retorno_logo_apos = False
         if not mudou_pasta and not mudou_ev and d_efetiva > lim and (i + 1) < len(lista):
             v_prox = _assinatura_de_foto(lista[i + 1], info=info)
             if ult["centroide"] and v_prox and len(ult["centroide"]) == len(v_prox):
                 d_prox = 0.5 * sum(abs(a - b) for a, b in zip(ult["centroide"], v_prox))
+                d_prox = _distancia_com_cena(ult["fotos"][-1], lista[i + 1], d_prox)
                 if d_prox <= lim * 0.95:
                     retorno_logo_apos = True
 
@@ -2294,11 +2357,16 @@ def separar_fotos_por_evento_automatico(fotos, info=None, limiar=0.28):
                 nome_final = "%s %d" % (base_n, num_oc)
             else:
                 nome_final = b["ev_exp"]
-        resultado.append({
+        grupo = {
             "nome": nome_final,
             "fotos": b["fotos"],
             "recolhido": False,
-        })
+        }
+        if not base_n:
+            sugestao = sugestao_evento_das_fotos(b["fotos"])
+            if sugestao:
+                grupo["sugestao_evento"] = sugestao
+        resultado.append(grupo)
     return resultado
 
 

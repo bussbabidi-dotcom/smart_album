@@ -365,6 +365,8 @@ def ordenar_fotos(projeto, info, por="nome"):
 
 def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=None):
     """Fotos analisadas, na ordem do projeto, com grupo numerado, ordem manual, cenário visual, tipo individual/grupo, pasta e rosto para o diagramar."""
+    from diagramar import USAR_CENA_TEMA
+
     ja_usadas = usos(projeto) if somente_nao_usadas else Counter()
     chave_pasta_alvo = normalizar_caminho(pasta_alvo) if pasta_alvo else None
     saida = []
@@ -380,7 +382,7 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
         ord_m = int(foto.get("ordem_manual") or idx)
         tp = str(foto.get("tipo_pessoas") or "auto").strip().lower()
         ass_cen = dados.get("cenario") or foto.get("cenario")
-        saida.append({
+        meta = {
             "caminho": foto["caminho"],
             "proporcao": dados_proporcao(dados),
             "data": dados.get("data"),
@@ -396,7 +398,10 @@ def fotos_para_diagramar(projeto, info, somente_nao_usadas=False, pasta_alvo=Non
             "pasta": ch_pasta,
             "nome_pasta": nome_pasta_da_foto(foto),
             "edicao": dict(foto.get("edicao_padrao") or {}),
-        })
+        }
+        if USAR_CENA_TEMA and dados.get("cena"):
+            meta["cena"] = dados["cena"]
+        saida.append(meta)
     return saida
 
 
