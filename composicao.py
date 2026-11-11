@@ -11,7 +11,7 @@ import analise
 import texturas_fundo
 from comum import cor_rgb, normalizar_caminho, pasta_fundos_temporarios
 from produtos import caixa_px
-from recorte import foto_no_espaco
+from recorte import _marca_arquivo, foto_no_espaco
 
 MODOS_FUNDO = ("preencher", "esticar", "ajustar", "repetir")
 DIRECOES_DEGRADE = ("direita", "esquerda", "baixo", "cima", "radial", "bordas_h")
@@ -499,7 +499,7 @@ def criar_dados_fundo_gerado(espec, materializar=True):
 
 
 def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8, padrao_filtro="ambos",
-                                     medidas_mm=None):
+                                     medidas_mm=None, materializar=True):
     """
     Gera uma galeria de fundos nos dois padrões, com cor forte das fotos (FATOR_COR_FUNDO) e textura:
       - Padrão Preto + Cores da Foto (veludo ou concreto)
@@ -629,7 +629,7 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
         if medidas_mm and medidas_mm[0] and medidas_mm[1]:
             espec["largura_mm"] = round(float(medidas_mm[0]), 1)
             espec["altura_mm"] = round(float(medidas_mm[1]), 1)
-        galeria.append(criar_dados_fundo_gerado(espec, materializar=True))
+        galeria.append(criar_dados_fundo_gerado(espec, materializar=materializar))
     return galeria
 
 
@@ -847,7 +847,7 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
     if W * H <= 4_000_000:
         with _TRAVA_COMP_CACHE:
             _CACHE_FUNDO_GERADO[chave_cache] = saida
-            while len(_CACHE_FUNDO_GERADO) > 64:
+            while len(_CACHE_FUNDO_GERADO) > 8:
                 _CACHE_FUNDO_GERADO.popitem(last=False)
     return saida.copy()
 
@@ -956,7 +956,8 @@ def fundo_posicionado(fundo_imagem, tamanho, rapido=False):
         fonte = analise.imagem_para(caminho_arq, int(round(max(W, H) * max(1.0, min(2.0, escala_zoom)))))
         chave_fp = (
             normalizar_caminho(caminho_arq),
-            id(fonte),
+            _marca_arquivo(caminho_arq),
+            fonte.size,
             W,
             H,
             modo,

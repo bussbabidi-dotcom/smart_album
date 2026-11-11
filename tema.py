@@ -253,8 +253,27 @@ def criar_corpo_rolavel(pai, padding=12, bg=PAINEL):
             pass
 
     janela_top = pai.winfo_toplevel()
-    janela_top.bind("<MouseWheel>", _roda_mouse, add="+")
+    canvas._roda_rolavel = _roda_mouse
+    if not getattr(janela_top, "_roda_rolavel_instalada", False):
+        janela_top._roda_rolavel_instalada = True
+        janela_top.bind("<MouseWheel>", lambda e, j=janela_top: _despachar_roda(j, e), add="+")
     return interno, container, canvas
+
+
+def _despachar_roda(janela_top, evento):
+    """Rola só a área rolável que está sob o ponteiro (a mais interna)."""
+    try:
+        w = janela_top.winfo_containing(evento.x_root, evento.y_root)
+    except (tk.TclError, KeyError):
+        return
+    while w is not None:
+        funcao = getattr(w, "_roda_rolavel", None)
+        if funcao is not None:
+            funcao(evento)
+            return
+        if w is janela_top:
+            return
+        w = getattr(w, "master", None)
 
 
 def area_util_tela(janela):
@@ -414,23 +433,38 @@ class Dica:
 
     def _entrou(self, _evento=None):
         self._cancelar()
-        self.agendado = self.widget.after(self.ATRASO_MS, self.mostrar)
+        try:
+            self.agendado = self.widget.after(self.ATRASO_MS, self.mostrar)
+        except tk.TclError:
+            self.agendado = None
 
     def _saiu(self, _evento=None):
         self._cancelar()
         if self.janela is not None:
-            self.janela.destroy()
+            try:
+                self.janela.destroy()
+            except tk.TclError:
+                pass
             self.janela = None
 
     def _cancelar(self):
         if self.agendado:
-            self.widget.after_cancel(self.agendado)
+            try:
+                self.widget.after_cancel(self.agendado)
+            except tk.TclError:
+                pass
             self.agendado = None
 
     def mostrar(self):
         self.agendado = None
-        if self.janela is not None or not self.widget.winfo_ismapped() or not self.texto:
-            return
+        try:
+            if self.janela is not None or not self.texto or not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+                return
+            self._criar_janela()
+        except tk.TclError:
+            self.janela = None
+
+    def _criar_janela(self):
         self.janela = tk.Toplevel(self.widget)
         self.janela.overrideredirect(True)
         self.janela.attributes("-topmost", True)

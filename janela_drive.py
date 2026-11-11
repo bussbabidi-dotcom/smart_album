@@ -2,12 +2,10 @@
 """
 Janela "Importar do Google Drive": pede o link (e a chave da API, opcional) e baixa as
 fotos numa pasta temporária que o programa apaga ao fechar. A rede fica em drive.py.
+No fim mostra um relatório com as que faltaram (e o motivo) e permite tentar de novo.
 """
 
-import concurrent.futures
-import re
 import tempfile
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -113,6 +111,229 @@ def abrir(app):
     janela.grab_set()
 
 
+def _baixar_com_gdown(drive_id, pasta_destino):
+    try:
+        import gdown
+    except ImportError:
+        return []
+    try:
+        try:
+            arqs = gdown.download_folder(
+                id=drive_id,
+                output=str(pasta_destino),
+                quiet=True,
+                use_cookies=False,
+                remaining_ok=True,
+            ) or []
+        except TypeError:
+            arqs = gdown.download_folder(
+                id=drive_id,
+                output=str(pasta_destino),
+                quiet=True,
+                use_cookies=False,
+            ) or []
+    except Exception:
+        return []
+    return [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES and Path(a).is_file()]
+
+
+def preparar_e_baixar(tipo_id, drive_id, resourcekey, pasta_base, parar=None, progresso=None, aviso=None):
+    """Lista (ou resolve o arquivo avulso), baixa em paralelo e devolve um drive.Relatorio. Roda fora da janela."""
+    parar = parar or (lambda: False)
+    avisar = aviso or (lambda _texto: None)
+    pasta_base = Path(pasta_base)
+    sessao = drive.Sessao()
+
+    if tipo_id == "arquivo":
+        item, erro = drive.obter_arquivo(drive_id, resourcekey, chave=sessao.chave)
+        rel = drive.Relatorio(sessao=sessao)
+        if erro is not None:
+            rel.aviso_api = "A API do Google Drive recusou a chave: %s." % erro.descricao
+            if erro.recusa_chave:
+                sessao.api_recusada = erro.descricao
+            avisar("Google Drive: " + rel.aviso_api)
+        item.nome = item.nome or ("foto_%s" % drive_id[:8])
+        rel.tarefas = drive.planejar_destinos([item], pasta_base / ("Drive_%s" % drive_id[:6]))
+        rel.resultados = drive.baixar_lote(rel.tarefas, parar=parar, progresso=progresso, sessao=sessao, aviso=avisar)
+        return rel
+
+    listagem = drive.listar(drive_id, resourcekey, parar=parar, chave=sessao.chave)
+    rel = drive.Relatorio(
+        limitada=listagem.limitada,
+        aviso_api=listagem.aviso_api,
+        pastas_limitadas=listagem.pastas_limitadas,
+        sessao=sessao,
+    )
+    if listagem.aviso_api:
+        avisar("Google Drive: " + listagem.aviso_api)
+        if listagem.chave_recusada:
+            sessao.api_recusada = listagem.aviso_api
+    if listagem.limitada:
+        avisar("Google Drive: usando a página pública da pasta, que mostra no máximo ~%d fotos por pasta; podem faltar fotos."
+               % drive.LIMITE_PASTA_PUBLICA)
+    pasta = pasta_base / (drive.limpar_nome(listagem.titulo or "") or ("Drive_%s" % drive_id[:6]))
+    pasta.mkdir(parents=True, exist_ok=True)
+    if listagem.itens:
+        avisar("Google Drive: %d foto(s) encontrada(s), baixando..." % len(listagem.itens))
+        rel.tarefas = drive.planejar_destinos(listagem.itens, pasta)
+        rel.resultados = drive.baixar_lote(rel.tarefas, parar=parar, progresso=progresso, sessao=sessao, aviso=avisar)
+        return rel
+    if not parar():
+        rel.extras = _baixar_com_gdown(drive_id, pasta)
+    return rel
+
+
+def precisa_relatorio(relatorio):
+    return bool(relatorio.faltando or relatorio.reduzidas or relatorio.limitada or relatorio.aviso_api)
+
+
+def texto_aviso(relatorio):
+    if relatorio.limitada:
+        motivo = relatorio.aviso_api or "Sem chave da API do Google."
+        return (
+            "%s A listagem usou a página pública do Google Drive, que mostra no máximo ~%d fotos por pasta: "
+            "podem existir mais fotos no link. Confira a chave da API (com a Google Drive API ativada no "
+            "Google Cloud) e importe de novo para listar tudo." % (motivo, drive.LIMITE_PASTA_PUBLICA)
+        )
+    return relatorio.aviso_api or ""
+
+
+def linhas_relatorio(relatorio):
+    """[(texto, tag)] do quadro do relatório; tag é "titulo", "erro", "alerta" ou ""."""
+    linhas = []
+    faltando = relatorio.faltando
+    if faltando:
+        linhas.append(("Faltaram (%d):" % len(faltando), "titulo"))
+        for item, destino, motivo in faltando:
+            nome = "%s/%s" % (item.subpasta, item.nome or destino.name) if item.subpasta else (item.nome or destino.name)
+            linhas.append(("  • %s — %s" % (nome, motivo), "erro"))
+        linhas.append(("", ""))
+    reduzidas = relatorio.reduzidas
+    if reduzidas:
+        linhas.append(("Baixadas em resolução reduzida (%d):" % len(reduzidas), "titulo"))
+        for item, res in reduzidas:
+            nome = res.caminho.name if res.caminho else item.nome
+            linhas.append(("  • %s — baixada em resolução reduzida (o Google só liberou a miniatura)" % nome, "alerta"))
+        linhas.append(("", ""))
+    if relatorio.pastas_limitadas:
+        linhas.append(("Pastas listadas pela página pública (máx. ~%d itens cada):" % drive.LIMITE_PASTA_PUBLICA, "titulo"))
+        for nome, qtd in relatorio.pastas_limitadas:
+            extra = " — provavelmente incompleta" if qtd >= drive.LIMITE_PASTA_PUBLICA - 5 else ""
+            linhas.append(("  • %s (%d itens)%s" % (nome or "(pasta principal)", qtd, extra), "alerta" if extra else ""))
+    if not linhas:
+        linhas.append(("Todas as fotos encontradas foram baixadas em resolução original.", ""))
+    return linhas
+
+
+def _existe(janela):
+    try:
+        return bool(janela.winfo_exists())
+    except tk.TclError:
+        return False
+
+
+def abrir_relatorio(app, relatorio):
+    janela = tk.Toplevel(app.root)
+    janela.title("Relatório do Google Drive")
+    janela.configure(bg=tema.PAINEL)
+    janela.transient(app.root)
+    tema.criar_cabecalho_janela(
+        janela,
+        "Relatório do Download do Google Drive",
+        "Fotos que faltaram, baixadas em resolução reduzida e limites da listagem",
+        icone="☁",
+    )
+
+    rodape = tk.Frame(janela, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=14, pady=8)
+    rodape.pack(side="bottom", fill="x")
+    quadro = ttk.Frame(janela, padding=14)
+    quadro.pack(fill="both", expand=True)
+
+    lbl_resumo = ttk.Label(quadro, style="Titulo.TLabel")
+    lbl_resumo.pack(anchor="w")
+    lbl_aviso = tk.Label(quadro, bg=tema.PAINEL, fg=tema.ALERTA, font=tema.FONTE, justify="left", anchor="w")
+    quadro.bind("<Configure>", lambda e: lbl_aviso.configure(wraplength=max(320, e.width - 28)), add="+")
+
+    area = tk.Frame(quadro, bg=tema.PAINEL)
+    area.pack(fill="both", expand=True, pady=(8, 0))
+    texto = tk.Text(
+        area, bg=tema.FUNDO, fg=tema.TEXTO, insertbackground=tema.TEXTO, relief="flat", wrap="word",
+        font=tema.FONTE, highlightthickness=1, highlightbackground=tema.BORDA, padx=8, pady=6, height=12,
+    )
+    rolagem = ttk.Scrollbar(area, orient="vertical", command=texto.yview)
+    texto.configure(yscrollcommand=rolagem.set)
+    rolagem.pack(side="right", fill="y")
+    texto.pack(side="left", fill="both", expand=True)
+    texto.tag_configure("titulo", foreground=tema.DESTAQUE, font=tema.FONTE_FORTE)
+    texto.tag_configure("erro", foreground=tema.ERRO)
+    texto.tag_configure("alerta", foreground=tema.ALERTA)
+
+    botoes = ttk.Frame(rodape)
+    botoes.pack(fill="x")
+    ttk.Button(botoes, text="Fechar", command=janela.destroy).pack(side="right", padx=(0, 10))
+    botao_tentar = ttk.Button(botoes, text="Tentar de novo as que faltaram", style="Primario.TButton")
+    botao_tentar.pack(side="right", padx=(0, 6))
+
+    def atualizar():
+        if not _existe(janela):
+            return
+        lbl_resumo.configure(
+            text="Encontradas no link: %d   ·   Baixadas: %d   ·   Resolução reduzida: %d   ·   Faltaram: %d"
+            % (relatorio.total, len(relatorio.baixadas), len(relatorio.reduzidas), len(relatorio.faltando))
+        )
+        aviso = texto_aviso(relatorio)
+        lbl_aviso.configure(text=aviso)
+        if aviso:
+            lbl_aviso.pack(anchor="w", fill="x", pady=(6, 0), after=lbl_resumo)
+        else:
+            lbl_aviso.pack_forget()
+        texto.configure(state="normal")
+        texto.delete("1.0", "end")
+        for linha, tag in linhas_relatorio(relatorio):
+            texto.insert("end", linha + "\n", tag or ())
+        texto.configure(state="disabled")
+        botao_tentar.state(["!disabled"] if relatorio.faltando else ["disabled"])
+
+    def tentar_de_novo():
+        if not relatorio.faltando:
+            return
+        ja_tinha_fotos = bool(relatorio.baixadas)
+        botao_tentar.state(["disabled"])
+
+        def trabalho(t):
+            return drive.tentar_novamente(relatorio, parar=t.parar, progresso=t.progresso, aviso=getattr(t, "aviso", None))
+
+        def fim(novos, erro):
+            atualizar()
+            if erro:
+                app.registrar("Google Drive: erro ao tentar de novo (%s)." % erro)
+                return
+            if novos:
+                app.registrar("Google Drive: mais %d foto(s) baixada(s) na nova tentativa." % len(novos))
+                app.adicionar_caminhos([str(p) for p in novos], perguntar_diagramar=not ja_tinha_fotos)
+            else:
+                app.registrar("Google Drive: nenhuma das fotos que faltaram pôde ser baixada.")
+
+        if app.executar("Tentando de novo as fotos do Google Drive", trabalho, fim) is False:
+            atualizar()
+
+    botao_tentar.configure(command=tentar_de_novo)
+    janela.bind("<Escape>", lambda _e: janela.destroy())
+    atualizar()
+    tema.configurar_janela_secundaria(
+        janela,
+        pai=app,
+        chave="janela_drive_relatorio",
+        largura=640,
+        altura=440,
+        min_largura=460,
+        min_altura=300,
+    )
+    janela.atualizar = atualizar
+    janela.botao_tentar = botao_tentar
+    return janela
+
+
 def baixar(app, url):
     tipo_id, drive_id, resourcekey = drive.extrair_id(url)
     if not drive_id:
@@ -121,136 +342,39 @@ def baixar(app, url):
 
     pasta_base = tempfile.mkdtemp(prefix="SmartAlbum_Drive_")
     app._pastas_temp_drive.append(pasta_base)
-    estado_destino = {"pasta": Path(pasta_base) / ("Drive_%s" % drive_id[:6]), "esperadas": 0}
-    estado_destino["pasta"].mkdir(parents=True, exist_ok=True)
 
     def trabalho(t):
-        baixados = []
-        pasta_destino = estado_destino["pasta"]
+        return preparar_e_baixar(
+            tipo_id, drive_id, resourcekey, pasta_base,
+            parar=t.parar, progresso=t.progresso, aviso=getattr(t, "aviso", None),
+        )
 
-        if tipo_id == "arquivo":
-            real_id, real_nome, _real_mime = drive.resolver_atalho(drive_id, resourcekey=resourcekey)
-            nome_arq = re.sub(r'[<>:"/\\|?*]', "_", (real_nome or ("foto_%s.jpg" % drive_id[:8])).strip())
-            if Path(nome_arq).suffix.lower() not in EXTENSOES:
-                nome_arq += ".jpg"
-            dest = pasta_destino / nome_arq
-            estado_destino["esperadas"] = 1
-            if drive.baixar_item(real_id or drive_id, dest) and dest.is_file():
-                baixados.append(dest)
-            return baixados
-
-        # 1. Lista recursivamente as fotos (com chave da API, sem o limite de ~50 por pasta da página pública)
-        achados, titulo_pasta = drive.listar_pasta(drive_id, resourcekey=resourcekey)
-        if titulo_pasta:
-            nome_pasta_limpo = re.sub(r'[<>:"/\\|?*]', "_", titulo_pasta).strip()
-            if nome_pasta_limpo:
-                nova_pasta = Path(pasta_base) / nome_pasta_limpo
-                nova_pasta.mkdir(parents=True, exist_ok=True)
-                pasta_destino = nova_pasta
-                estado_destino["pasta"] = nova_pasta
-
-        if achados:
-            total = len(achados)
-            estado_destino["esperadas"] = total
-            nomes_usados = set()
-            tarefas_dl = []
-            for idx, (fid, nome_arq) in enumerate(achados, start=1):
-                nome_limpo = re.sub(r'[<>:"/\\|?*]', "_", (nome_arq or ("foto_%03d.jpg" % idx)).strip())
-                if Path(nome_limpo).suffix.lower() not in EXTENSOES:
-                    nome_limpo += ".jpg"
-                base_stem = Path(nome_limpo).stem
-                ext_s = Path(nome_limpo).suffix
-                cand = nome_limpo
-                contador_dup = 2
-                while cand.lower() in nomes_usados:
-                    cand = "%s_%d%s" % (base_stem, contador_dup, ext_s)
-                    contador_dup += 1
-                nomes_usados.add(cand.lower())
-                tarefas_dl.append((fid, pasta_destino / cand))
-
-            concluidos = 0
-            faltaram = []
-            # Usa 4 workers paralelos para evitar bloqueio de taxa (HTTP 429) do Google Drive
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futuros = {
-                    pool.submit(drive.baixar_item, fid, dest): (fid, dest)
-                    for fid, dest in tarefas_dl
-                }
-                for fut in concurrent.futures.as_completed(futuros):
-                    if t.parar():
-                        break
-                    fid, dest = futuros[fut]
-                    concluidos += 1
-                    ok = False
-                    try:
-                        if fut.result() and dest.is_file() and dest.stat().st_size > 256:
-                            baixados.append(dest)
-                            ok = True
-                    except Exception:
-                        ok = False
-                    if not ok:
-                        faltaram.append((fid, dest))
-                    t.progresso(concluidos, total)
-
-            # Segunda passagem sequencial de recuperação para fotos que sofreram rate-limit momentâneo
-            if faltaram and not t.parar():
-                time.sleep(1.0)
-                for fid, dest in faltaram:
-                    if t.parar():
-                        break
-                    try:
-                        if drive.baixar_item(fid, dest) and dest.is_file() and dest.stat().st_size > 256:
-                            baixados.append(dest)
-                    except Exception:
-                        pass
-
-            if baixados:
-                # Ordena na mesma ordem exata da listagem da pasta
-                ordem_map = {dest: i for i, (_fid, dest) in enumerate(tarefas_dl)}
-                baixados.sort(key=lambda p: ordem_map.get(p, 999999))
-                return baixados
-
-        # 2. Fallback com gdown (com remaining_ok=True para não parar em 50 arquivos)
-        try:
-            import gdown
-            try:
-                arqs = gdown.download_folder(
-                    id=drive_id,
-                    output=str(pasta_destino),
-                    quiet=True,
-                    use_cookies=False,
-                    remaining_ok=True,
-                ) or []
-            except TypeError:
-                arqs = gdown.download_folder(
-                    id=drive_id,
-                    output=str(pasta_destino),
-                    quiet=True,
-                    use_cookies=False,
-                ) or []
-            baixados = [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES and Path(a).is_file()]
-        except Exception:
-            pass
-        return baixados
-
-    def fim(baixados, erro):
-        if erro or not baixados:
+    def fim(relatorio, erro):
+        if erro or relatorio is None or not (relatorio.baixadas or relatorio.faltando):
             try:
                 if pasta_base in app._pastas_temp_drive:
                     app._pastas_temp_drive.remove(pasta_base)
                 apagar_pasta(pasta_base, tentativas=5, pausa=0.15)
             except Exception:
                 pass
-            messagebox.showwarning(
-                "Google Drive",
-                "Não foi possível baixar fotos desse link.\nVerifique se a pasta do Google Drive está com acesso 'Qualquer pessoa com o link'.",
-                parent=app.root,
+            mensagem = (
+                "Não foi possível baixar fotos desse link.\n"
+                "Verifique se a pasta do Google Drive está com acesso 'Qualquer pessoa com o link'."
             )
+            if relatorio is not None and relatorio.aviso_api:
+                mensagem += "\n\n" + relatorio.aviso_api
+            messagebox.showwarning("Google Drive", mensagem, parent=app.root)
             return
-        esperadas = estado_destino.get("esperadas") or len(baixados)
+        baixadas = relatorio.baixadas
         app.registrar(
-            "Google Drive: %d de %d foto(s) baixada(s) na pasta temporária (auto-excluída ao fechar)." % (len(baixados), esperadas)
+            "Google Drive: %d de %d foto(s) baixada(s) na pasta temporária (auto-excluída ao fechar)."
+            % (len(baixadas), relatorio.total)
         )
-        app.adicionar_caminhos([str(p) for p in baixados], perguntar_diagramar=True)
+        if relatorio.faltando:
+            app.registrar("Google Drive: faltaram %d foto(s); veja o relatório." % len(relatorio.faltando))
+        if baixadas:
+            app.adicionar_caminhos([str(p) for p in baixadas], perguntar_diagramar=True)
+        if precisa_relatorio(relatorio):
+            abrir_relatorio(app, relatorio)
 
     app.executar("Baixando fotos do Google Drive", trabalho, fim)

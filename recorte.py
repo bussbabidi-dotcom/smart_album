@@ -14,6 +14,7 @@ para servir tanto na miniatura da prévia quanto na foto inteira:
 
 import functools
 import math
+import os
 import threading
 from collections import OrderedDict
 
@@ -42,8 +43,17 @@ _CACHE_VINHETA_BASE = None
 _CACHE_ESPACO_RAPIDO = OrderedDict()
 _CACHE_FOTOMETRIA = OrderedDict()
 _TRAVA_CACHE_ESPACO = threading.Lock()
-_LIMITE_CACHE_ESPACO = 240
+_LIMITE_CACHE_ESPACO = 160
+_LIMITE_PIXELS_CACHE_ESPACO = 30_000_000
 _LIMITE_CACHE_FOTOMETRIA = 800
+
+
+def _marca_arquivo(caminho):
+    try:
+        st = os.stat(caminho)
+        return (st.st_mtime_ns, st.st_size)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def edicao_padrao():
@@ -540,11 +550,10 @@ def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapid
     """
     tw, th = max(1, int(tamanho[0])), max(1, int(tamanho[1]))
     if rapido:
-        fonte = analise.imagem_para(caminho, max(tw, th) * 1.5)
         cor_f = cor_rgb(fundo)
         chave_cache = (
             normalizar_caminho(caminho),
-            id(fonte),
+            _marca_arquivo(caminho),
             tw,
             th,
             cor_f,
@@ -555,6 +564,7 @@ def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapid
             if guardada is not None:
                 _CACHE_ESPACO_RAPIDO.move_to_end(chave_cache)
                 return guardada.copy()
+        fonte = analise.imagem_para(caminho, max(tw, th) * 1.5)
     else:
         fonte, _icc, _dpi = analise.abrir_imagem(caminho)
 
@@ -570,6 +580,9 @@ def foto_no_espaco(caminho, edicao, rosto, tamanho, fundo=(255, 255, 255), rapid
             _CACHE_ESPACO_RAPIDO[chave_cache] = pronta
             _CACHE_ESPACO_RAPIDO.move_to_end(chave_cache)
             while len(_CACHE_ESPACO_RAPIDO) > _LIMITE_CACHE_ESPACO:
+                _CACHE_ESPACO_RAPIDO.popitem(last=False)
+            while len(_CACHE_ESPACO_RAPIDO) > 1 and sum(
+                    i.width * i.height for i in _CACHE_ESPACO_RAPIDO.values()) > _LIMITE_PIXELS_CACHE_ESPACO:
                 _CACHE_ESPACO_RAPIDO.popitem(last=False)
         return pronta.copy()
     return pronta

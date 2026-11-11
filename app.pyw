@@ -45,9 +45,9 @@ import projeto as proj
 import recorte
 import tema
 from comum import (
-    EXTENSOES, apagar_pasta, cor_hex, cor_rgb, gravar_json, ler_json,
+    EXTENSOES, apagar_pasta, cor_hex, cor_rgb, gravar_json, gravar_texto, ler_json,
     limpar_fundos_temporarios, limpar_temporarios_disco, listar_fundos_temporarios,
-    normalizar_caminho, pasta_dados, pasta_fundos_temporarios,
+    normalizar_caminho, pasta_dados, pasta_fundos_temporarios, registrar_erro, texto_json,
 )
 import fundos
 import janela_drive
@@ -75,6 +75,9 @@ DESBOTAR_USADA = 0.65
 OPACIDADE_USADA = 0.55
 PROPORCAO_TIMELINE = 150 / 64.0
 MARGEM_LAMINA = 36
+LARGURA_MAX_RENDER = 3000
+LIMITE_CACHE_LAMINAS = 12
+PIXELS_CACHE_LAMINAS = 16_000_000
 ARRASTO_MINIMO = 6
 BORDA_ROLAGEM_TIMELINE = 50
 ARQUIVO_JANELA = pasta_dados() / "janela.json"
@@ -170,6 +173,15 @@ def ler_arranjo():
     return arranjo
 
 
+def definir_cursor(widget, cursor):
+    """Só reconfigura quando muda: configure() no canvas força redesenho e aviso de rolagem."""
+    try:
+        if str(widget.cget("cursor")) != cursor:
+            widget.configure(cursor=cursor)
+    except tk.TclError:
+        pass
+
+
 def geometria_valida(texto, root):
     """A geometria guardada, se ainda couber na área útil real da tela (ex: 1440x900, 1366x768)."""
     achado = re.match(r"^(\d+)x(\d+)\+?(-?\d+)\+?(-?\d+)$", str(texto or ""))
@@ -191,7 +203,8 @@ class Pintor:
     - Pool de threads separado para miniaturas da linha do tempo ("tl:*"), sem nunca bloquear o canvas central.
     """
 
-    def __init__(self):
+    def __init__(self, ao_descartar=None):
+        self.ao_descartar = ao_descartar
         self.pedidos_principal = OrderedDict()
         self.pedidos_tl = OrderedDict()
         self.cond_principal = threading.Condition()
@@ -202,6 +215,7 @@ class Pintor:
 
     def pedir(self, chave, funcao):
         eh_principal = chave in ("principal", "frente")
+        descartados = []
         if eh_principal:
             with self.cond_principal:
                 self.pedidos_principal.pop(chave, None)
@@ -214,30 +228,33 @@ class Pintor:
                 self.pedidos_tl.pop(chave, None)
                 self.pedidos_tl[chave] = funcao
                 while len(self.pedidos_tl) > 36:
-                    self.pedidos_tl.popitem(last=False)
+                    descartados.append(self.pedidos_tl.popitem(last=False)[0])
                 self.cond_tl.notify()
+        if self.ao_descartar is not None:
+            for chave_d in descartados:
+                self.ao_descartar(chave_d)
 
     def _rodar_principal(self):
         while True:
             with self.cond_principal:
                 while not self.pedidos_principal:
                     self.cond_principal.wait()
-                _chave, funcao = self.pedidos_principal.popitem(last=False)
+                chave, funcao = self.pedidos_principal.popitem(last=False)
             try:
                 funcao()
             except Exception:
-                traceback.print_exc()
+                registrar_erro("pintor '%s'" % chave)
 
     def _rodar_tl(self):
         while True:
             with self.cond_tl:
                 while not self.pedidos_tl:
                     self.cond_tl.wait()
-                _chave, funcao = self.pedidos_tl.popitem(last=True)
+                chave, funcao = self.pedidos_tl.popitem(last=True)
             try:
                 funcao()
             except Exception:
-                traceback.print_exc()
+                registrar_erro("pintor '%s'" % chave[:120])
 
 
 class Tarefa:
@@ -278,13 +295,16 @@ class Aplicativo:
         root.bind("<F11>", lambda _e: self.alternar_tela_cheia())
 
         self.fila = queue.Queue()
-        self.pintor = Pintor()
+        self._instalar_registro_erros(root)
+        self.pintor = Pintor(ao_descartar=lambda chave: self.fila.put(("descartado", chave)))
+        self._pedidos_miniatura = {}
         self.observador = Observador(lambda c: self.fila.put(("arquivo_mudou", c)))
         self.produtos = listar_produtos()
         self.produto = self.produtos[0] if self.produtos else None
         self.projeto = proj.novo(self.produto["nome"] if self.produto else "")
         self.caminho_projeto = None
         self.modificado = False
+        self._versao_modificacao = 0
         self.info = {}
         self.historico = proj.Historico()
         self.atual = 0
@@ -316,7 +336,7 @@ class Aplicativo:
         self._lista_fotos = []
         self._itens_painel_fotos = []
         self._xs_painel_fotos = []
-        self._miniaturas_pendentes = set()
+        self._miniaturas_pendentes = {}
         self.igualar_no_grupo = tk.BooleanVar(value=False)
         self.guias = tk.BooleanVar(value=True)
         self.zoom = 1.0
@@ -345,6 +365,8 @@ class Aplicativo:
         self._arrasto = None
         self._fantasma = None
         self._agendados = {}
+        self.contagem_desenhos = {"timeline": 0, "galeria": 0}
+        self._paineis_pendentes = set()
         self._sugestoes = []
         self._modelo_sel = None
         self._carregando = False
@@ -390,6 +412,7 @@ class Aplicativo:
         self._teclas_vinculadas = []
 
         self._montar()
+        self.root.bind("<Map>", self._algo_apareceu, add="+")
         self._atalhos()
         self._registrar_drop()
         self.root.protocol("WM_DELETE_WINDOW", self.sair)
@@ -400,6 +423,28 @@ class Aplicativo:
         threading.Thread(target=entrada.registrar_associacao_arquivos_windows, daemon=True).start()
         if argumentos:
             self.root.after(300, lambda: self.adicionar_caminhos(list(argumentos), vindo_linha_comando=True))
+
+    @staticmethod
+    def _instalar_registro_erros(root):
+        """Erros de callbacks do Tk e de threads também vão para erros.log (sem tirar o tratamento que já existe)."""
+        anterior = root.report_callback_exception
+
+        def ao_erro_callback(tipo, valor, tb):
+            registrar_erro("callback do Tk", (tipo, valor, tb), eco=False)
+            anterior(tipo, valor, tb)
+
+        root.report_callback_exception = ao_erro_callback
+        if not getattr(threading.excepthook, "_smart_album", False):
+            hook_anterior = threading.excepthook
+
+            def ao_erro_thread(args):
+                if args.exc_type is not SystemExit:
+                    nome = getattr(args.thread, "name", "?")
+                    registrar_erro("thread '%s'" % nome, (args.exc_type, args.exc_value, args.exc_traceback), eco=False)
+                hook_anterior(args)
+
+            ao_erro_thread._smart_album = True
+            threading.excepthook = ao_erro_thread
 
     # ==================================================================
     # Montagem da janela
@@ -1049,9 +1094,10 @@ class Aplicativo:
         self.canvas_timeline = tk.Canvas(caixa, height=90, width=180, bg=tema.PAINEL, highlightthickness=0)
         self.barra_tl_h.configure(command=self.canvas_timeline.xview)
         self.barra_tl_v.configure(command=self.canvas_timeline.yview)
+        self._tl_vista = {"x": None, "y": None}
         self.canvas_timeline.configure(
-            xscrollcommand=lambda a, b: (self.barra_tl_h.set(a, b), self.agendar("timeline", 14, self.desenhar_timeline)),
-            yscrollcommand=lambda a, b: (self.barra_tl_v.set(a, b), self.agendar("timeline", 14, self.desenhar_timeline)),
+            xscrollcommand=lambda a, b: self._timeline_rolou("x", self.barra_tl_h, a, b),
+            yscrollcommand=lambda a, b: self._timeline_rolou("y", self.barra_tl_v, a, b),
             xscrollincrement=20,
             yscrollincrement=20,
         )
@@ -1063,6 +1109,12 @@ class Aplicativo:
         self.canvas_timeline.bind("<ButtonRelease-1>", self._soltar_arrasto)
         self.canvas_timeline.bind("<ButtonPress-2>", self._timeline_scroll_pressionou)
         self.canvas_timeline.bind("<Button-3>", self._timeline_menu)
+
+    def _timeline_rolou(self, eixo, barra, a, b):
+        barra.set(a, b)
+        if self._tl_vista.get(eixo) != (a, b):
+            self._tl_vista[eixo] = (a, b)
+            self.agendar("timeline", 14, self.desenhar_timeline)
 
     # ---------------- arranjo dos painéis ----------------
 
@@ -1575,8 +1627,8 @@ class Aplicativo:
         self.canvas_sugestoes = tk.Canvas(quadro, bg=tema.PAINEL, highlightthickness=0, height=130)
         self.canvas_sugestoes.pack(side="top", fill="both", expand=True, pady=(4, 2))
         self.canvas_sugestoes.bind("<ButtonPress-1>", self._sugestao_clicada)
-        self.canvas_sugestoes.bind("<Configure>", lambda e: self.desenhar_sugestoes())
-        self.canvas_sugestoes.bind("<MouseWheel>", lambda e: self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"))
+        self.canvas_sugestoes.bind("<Configure>", lambda e: self.agendar("desenhar_sugestoes", 40, self.desenhar_sugestoes))
+        self.canvas_sugestoes.bind("<MouseWheel>", lambda e: (self.canvas_sugestoes.yview_scroll(-int(e.delta / 120), "units"), "break")[1])
 
     def _secao_modelos(self, quadro):
         self.so_compativeis = tk.BooleanVar(value=True)
@@ -1648,8 +1700,8 @@ class Aplicativo:
         self.canvas_modelos.pack(side="top", fill="both", expand=True, pady=4)
         self.canvas_modelos.bind("<ButtonPress-1>", self._modelo_clicado)
         self.canvas_modelos.bind("<Double-Button-1>", lambda e: self.aplicar_modelo_selecionado())
-        self.canvas_modelos.bind("<MouseWheel>", lambda e: self.canvas_modelos.yview_scroll(-int(e.delta / 120), "units"))
-        self.canvas_modelos.bind("<Configure>", lambda e: self.desenhar_modelos())
+        self.canvas_modelos.bind("<MouseWheel>", lambda e: (self.canvas_modelos.yview_scroll(-int(e.delta / 120), "units"), "break")[1])
+        self.canvas_modelos.bind("<Configure>", lambda e: self.agendar("desenhar_modelos", 40, self.desenhar_modelos))
 
     def _montar_edicao_layout(self, quadro):
         caixa = ttk.LabelFrame(quadro, text="Ferramentas de Espaço (Estilo Photoshop)", padding=6)
@@ -2108,6 +2160,7 @@ class Aplicativo:
             self._galeria_gerados_pressionou,
             lambda _c: self.abrir_editor_fundo(),
             self._galeria_gerados_menu,
+            contagem=self.contagem_desenhos,
         )
         self.galeria_fundos_gerados.canvas.configure(height=118)
         self.galeria_fundos_gerados.pack(side="top", fill="x")
@@ -2146,6 +2199,8 @@ class Aplicativo:
             self.abrir_editor_fundo,
             self._galeria_menu,
             eh_favorito=lambda c: fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, c),
+            favoritos=lambda: fundos.favoritos_fundo(ARQUIVO_FUNDOS),
+            contagem=self.contagem_desenhos,
         )
         self.galeria_fundos.pack(side="top", fill="both", expand=True)
         self.galeria_fundos.canvas.bind("<B1-Motion>", self._mover_arrasto)
@@ -3474,7 +3529,7 @@ class Aplicativo:
             except tk.TclError:
                 pass
             except Exception:
-                traceback.print_exc()
+                registrar_erro("agendado '%s'" % chave)
 
         try:
             self._agendados[chave] = self.root.after(max(1, int(ms)), rodar)
@@ -3563,7 +3618,12 @@ class Aplicativo:
         self.registrar(texto)
 
     def _marcar_modificado(self):
+        self._versao_modificacao += 1
+        if self.modificado:
+            self.agendar("titulo", 250, self._atualizar_titulo)
+            return
         self.modificado = True
+        self.cancelar_agendado("titulo")
         self._atualizar_titulo()
 
     def _atualizar_titulo(self):
@@ -3704,12 +3764,6 @@ class Aplicativo:
         barra = getattr(self, "barra_abas_albuns", None)
         if barra is None or not barra.winfo_exists():
             return
-        for w in barra.winfo_children():
-            w.destroy()
-
-        tk.Label(
-            barra, text="ÁLBUNS ABERTOS:", bg=tema.PAINEL_2, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA
-        ).pack(side="left", padx=(0, 6))
 
         ids_exportando = set()
         job_at = getattr(self, "_job_exportacao_atual", None)
@@ -3719,6 +3773,7 @@ class Aplicativo:
             if isinstance(j, dict) and j.get("id_aba"):
                 ids_exportando.add(j["id_aba"])
 
+        dados_abas = []
         for i, aba in enumerate(getattr(self, "abas_albuns", [])):
             ativa = (i == getattr(self, "aba_album_ativa", 0))
             proj_a = aba["projeto"] if not ativa else self.projeto
@@ -3731,7 +3786,34 @@ class Aplicativo:
             em_exp = aba.get("id") in ids_exportando
             selo_exp = " ⚡Exportando" if em_exp else ""
             rotulo = "%s%s · %s (%d)%s" % (curto, " *" if mod_a else "", tam_txt, qtd_l, selo_exp)
+            dica_a = ("Clique para alternar para '%s' · Duplo clique para renomear o álbum (subpasta: '%s')"
+                      % (nome_a, exportar.nome_pasta_album(prod_a, proj_a)))
+            dados_abas.append((aba.get("id"), ativa, em_exp, rotulo, dica_a))
 
+        estrutura = tuple(d[0] for d in dados_abas)
+        widgets_ui = getattr(self, "_widgets_abas_albuns", None)
+        if widgets_ui and widgets_ui[0] == estrutura and all(q.winfo_exists() for q, _b, _f in widgets_ui[1]):
+            for (_id, ativa, em_exp, rotulo, dica_a), (quadro_aba, bt_aba, bt_fechar) in zip(dados_abas, widgets_ui[1]):
+                cor = tema.DESTAQUE_ESCURO if ativa else tema.PAINEL
+                quadro_aba.configure(bg=cor, highlightbackground=tema.DESTAQUE if ativa else ("#f59e0b" if em_exp else tema.BORDA))
+                bt_aba.configure(text=rotulo, bg=cor, fg="#ffffff" if ativa else ("#fbbf24" if em_exp else tema.TEXTO),
+                                 font=tema.FONTE_FORTE if ativa else tema.FONTE_NORMAL)
+                if getattr(bt_aba, "_dica", None) is not None:
+                    bt_aba._dica.texto = dica_a
+                if bt_fechar is not None:
+                    bt_fechar.configure(bg=cor)
+            return
+
+        for w in barra.winfo_children():
+            w.destroy()
+        widgets_abas = []
+        self._widgets_abas_albuns = (estrutura, widgets_abas)
+
+        tk.Label(
+            barra, text="ÁLBUNS ABERTOS:", bg=tema.PAINEL_2, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA
+        ).pack(side="left", padx=(0, 6))
+
+        for i, (_id, ativa, em_exp, rotulo, dica_a) in enumerate(dados_abas):
             quadro_aba = tk.Frame(
                 barra,
                 bg=tema.DESTAQUE_ESCURO if ativa else tema.PAINEL,
@@ -3757,12 +3839,9 @@ class Aplicativo:
             )
             bt_aba.pack(side="left", padx=(2, 2))
             bt_aba.bind("<Double-Button-1>", lambda _e, idx=i: self.renomear_aba_album(idx))
-            tema.dica(
-                bt_aba,
-                "Clique para alternar para '%s' · Duplo clique para renomear o álbum (subpasta: '%s')"
-                % (nome_a, exportar.nome_pasta_album(prod_a, proj_a)),
-            )
+            tema.dica(bt_aba, dica_a)
 
+            bt_fechar = None
             if len(self.abas_albuns) > 1:
                 bt_fechar = tk.Button(
                     quadro_aba,
@@ -3779,6 +3858,7 @@ class Aplicativo:
                 )
                 bt_fechar.pack(side="left")
                 tema.dica(bt_fechar, "Fechar esta aba de álbum")
+            widgets_abas.append((quadro_aba, bt_aba, bt_fechar))
 
         self._botao(
             barra,
@@ -3851,7 +3931,10 @@ class Aplicativo:
         ultimo_render = None
         try:
             while (time.perf_counter() - inicio_tick) < 0.012:
-                msg = self.fila.get_nowait()
+                try:
+                    msg = self.fila.get_nowait()
+                except queue.Empty:
+                    break
                 tipo = msg[0]
                 if tipo == "progresso":
                     ultimo_progresso = msg
@@ -3859,62 +3942,70 @@ class Aplicativo:
                 if tipo == "render":
                     ultimo_render = msg
                     continue
-                janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
-                if tipo == "aviso":
-                    self.registrar(msg[1])
+                try:
+                    ultimo_progresso = self._tratar_mensagem(msg, ultimo_progresso)
+                except tk.TclError:
+                    pass
+                except Exception:
+                    registrar_erro("mensagem da fila '%s'" % tipo)
+            try:
+                if ultimo_progresso is not None:
+                    janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
+                    self.barra.configure(maximum=max(1, ultimo_progresso[2]), value=ultimo_progresso[1])
                     if janela:
-                        janela.aviso(msg[1])
-                elif tipo == "fim":
-                    if ultimo_progresso is not None:
-                        self.barra.configure(maximum=max(1, ultimo_progresso[2]), value=ultimo_progresso[1])
-                        ultimo_progresso = None
-                    _t, ao_fim, resultado, erro = msg
-                    self.tarefa = None
-                    self.janela_tarefa = None
-                    self.botao_parar.configure(state="disabled")
-                    self.barra.configure(value=0)
-                    if ao_fim:
-                        try:
-                            ao_fim(resultado, erro)
-                        except Exception as e:
-                            traceback.print_exc()
-                            messagebox.showerror("Erro", str(e), parent=self.root)
-                    elif erro:
-                        messagebox.showerror("Erro", str(erro), parent=self.root)
-                elif tipo == "miniatura_timeline":
-                    self._receber_timeline(*msg[1:])
-                elif tipo == "miniatura_foto":
-                    self._receber_miniatura_foto(*msg[1:])
-                elif tipo == "foto_trocada":
-                    self._foto_trocada(msg[1], msg[2])
-                elif tipo == "arquivo_mudou":
-                    self._foto_trocada(msg[1], msg[1])
-                elif tipo == "analisada":
-                    self.info[normalizar_caminho(msg[1])] = msg[2]
-                    self._depois_de_trocar_foto(msg[1])
-                elif tipo == "chamar":
-                    try:
-                        msg[1]()
-                    except Exception:
-                        traceback.print_exc()
-        except queue.Empty:
-            pass
-        except tk.TclError:
-            pass
-        try:
+                        janela.progresso(ultimo_progresso[1], ultimo_progresso[2])
+                if ultimo_render is not None:
+                    self._receber_render(*ultimo_render[1:])
+            except tk.TclError:
+                pass
+            except Exception:
+                registrar_erro("fila (progresso/render)")
+        finally:
+            try:
+                self.root.after(18, self._ler_fila)
+            except tk.TclError:
+                pass
+
+    def _tratar_mensagem(self, msg, ultimo_progresso):
+        tipo = msg[0]
+        janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
+        if tipo == "aviso":
+            self.registrar(msg[1])
+            if janela:
+                janela.aviso(msg[1])
+        elif tipo == "fim":
             if ultimo_progresso is not None:
-                janela = self.janela_tarefa if self.janela_tarefa is not None and self.janela_tarefa.winfo_exists() else None
                 self.barra.configure(maximum=max(1, ultimo_progresso[2]), value=ultimo_progresso[1])
-                if janela:
-                    janela.progresso(ultimo_progresso[1], ultimo_progresso[2])
-            if ultimo_render is not None:
-                self._receber_render(*ultimo_render[1:])
-        except tk.TclError:
-            pass
-        try:
-            self.root.after(18, self._ler_fila)
-        except tk.TclError:
-            pass
+                ultimo_progresso = None
+            _t, ao_fim, resultado, erro = msg
+            self.tarefa = None
+            self.janela_tarefa = None
+            self.botao_parar.configure(state="disabled")
+            self.barra.configure(value=0)
+            if ao_fim:
+                try:
+                    ao_fim(resultado, erro)
+                except Exception as e:
+                    registrar_erro("fim da tarefa")
+                    messagebox.showerror("Erro", str(e), parent=self.root)
+            elif erro:
+                messagebox.showerror("Erro", str(erro), parent=self.root)
+        elif tipo == "miniatura_timeline":
+            self._receber_timeline(*msg[1:])
+        elif tipo == "miniatura_foto":
+            self._receber_miniatura_foto(*msg[1:])
+        elif tipo == "descartado":
+            self._pedido_descartado(msg[1])
+        elif tipo == "foto_trocada":
+            self._foto_trocada(msg[1], msg[2])
+        elif tipo == "arquivo_mudou":
+            self._foto_trocada(msg[1], msg[1])
+        elif tipo == "analisada":
+            self.info[normalizar_caminho(msg[1])] = msg[2]
+            self._depois_de_trocar_foto(msg[1])
+        elif tipo == "chamar":
+            msg[1]()
+        return ultimo_progresso
 
     # ==================================================================
     # Projeto
@@ -4005,16 +4096,34 @@ class Aplicativo:
                     else:
                         # Se o projeto é apenas temporário (ex.: pasta temporária do Drive) e não foi salvo pelo usuário, não grava lixo em disco
                         return
-                caminho_salvo = proj.salvar(self.projeto, caminho)
-                if not self.caminho_projeto:
-                    self.caminho_projeto = str(caminho_salvo)
-                self.modificado = False
-                self._atualizar_titulo()
-                self.registrar("Auto-salvamento (.album.json): salvo em %s" % Path(caminho_salvo).name)
+                caminho_salvo = proj.caminho_projeto(caminho)
+                texto = texto_json(self.projeto)
+                projeto_salvo, versao_salva = self.projeto, self._versao_modificacao
+
+                def gravar():
+                    try:
+                        gravar_texto(caminho_salvo, texto)
+                    except Exception as e:
+                        erro = e
+                        self.fila.put(("chamar", lambda: self.registrar("Aviso no auto-salvamento: %s" % erro)))
+                        return
+                    self.fila.put(("chamar", lambda: self._auto_salvar_gravado(projeto_salvo, versao_salva, caminho_salvo)))
+
+                threading.Thread(target=gravar, daemon=True).start()
         except Exception as e:
             self.registrar("Aviso no auto-salvamento: %s" % e)
         finally:
             self._reagendar_auto_salvar()
+
+    def _auto_salvar_gravado(self, projeto_salvo, versao_salva, caminho_salvo):
+        if projeto_salvo is not self.projeto:
+            return
+        if not self.caminho_projeto:
+            self.caminho_projeto = str(caminho_salvo)
+        if versao_salva == self._versao_modificacao:
+            self.modificado = False
+            self._atualizar_titulo()
+        self.registrar("Auto-salvamento (.album.json): salvo em %s" % Path(caminho_salvo).name)
 
     def novo_projeto(self, silencioso=False):
         if not silencioso and not self._confirmar_descartar():
@@ -4086,14 +4195,16 @@ class Aplicativo:
             )
             if not caminho:
                 return False
+        caminho = proj.caminho_projeto(caminho)
+        nome_antes = self.projeto.get("nome")
+        self.projeto["nome"] = caminho.name[: -len(proj.EXTENSAO)]
         try:
             caminho = proj.salvar(self.projeto, caminho)
         except OSError as e:
+            self.projeto["nome"] = nome_antes
             messagebox.showerror("Salvar", str(e), parent=self.root)
             return False
         self.caminho_projeto = str(caminho)
-        self.projeto["nome"] = Path(caminho).name[: -len(proj.EXTENSAO)]
-        proj.salvar(self.projeto, caminho)
         self.modificado = False
         self._atualizar_titulo()
         entrada.adicionar_recente("projeto", caminho)
@@ -4144,46 +4255,79 @@ class Aplicativo:
         programa ou ao iniciar/abrir outro projeto.
         """
         try:
-            pastas = [p for p in list(getattr(self, "_pastas_temp_drive", [])) if p and Path(p).exists()]
-            if pastas and self.tarefa is None:
-                projetos_abertos = [self.projeto]
-                for aba in getattr(self, "abas_albuns", []) or []:
-                    if isinstance(aba, dict) and isinstance(aba.get("projeto"), dict):
-                        projetos_abertos.append(aba["projeto"])
+            pastas = [p for p in list(getattr(self, "_pastas_temp_drive", [])) if p]
+            if pastas and self.tarefa is None and not getattr(self, "_limpeza_temp_rodando", False):
+                ativas_no_projeto = self._caminhos_em_uso_abertos()
+                self._limpeza_temp_rodando = True
 
-                ativas_no_projeto = set()
-                for prj in projetos_abertos:
-                    for f in prj.get("fotos", []):
-                        if isinstance(f, dict) and f.get("caminho"):
-                            ativas_no_projeto.add(normalizar_caminho(f["caminho"]))
-                    for e in proj.todos_espacos(prj):
-                        if e.get("foto"):
-                            ativas_no_projeto.add(normalizar_caminho(e["foto"]))
-                    capa = prj.get("capa") or {}
-                    if capa.get("foto"):
-                        ativas_no_projeto.add(normalizar_caminho(capa["foto"]))
-                    for d in proj.fundos_imagem(prj):
-                        if d.get("caminho"):
-                            ativas_no_projeto.add(normalizar_caminho(d["caminho"]))
+                def procurar():
+                    orfaos = []
+                    try:
+                        for p in pastas:
+                            if not Path(p).exists():
+                                continue
+                            for arq in Path(p).rglob("*"):
+                                if arq.is_file():
+                                    ch_norm = normalizar_caminho(arq)
+                                    if ch_norm not in ativas_no_projeto:
+                                        orfaos.append((str(arq), ch_norm))
+                    except Exception:
+                        registrar_erro("limpeza programada dos temporários do Drive")
+                    self.fila.put(("chamar", lambda: self._apagar_orfaos_temp_drive(orfaos)))
 
-                for p in pastas:
-                    for arq in Path(p).rglob("*"):
-                        if arq.is_file():
-                            ch_norm = normalizar_caminho(arq)
-                            if ch_norm not in ativas_no_projeto:
-                                try:
-                                    ch = str(arq)
-                                    if hasattr(self, "observador") and self.observador:
-                                        self.observador.esquecer(ch)
-                                    analise.esquecer_miniaturas(ch)
-                                    arq.unlink(missing_ok=True)
-                                    self.info.pop(ch_norm, None)
-                                except OSError:
-                                    pass
+                threading.Thread(target=procurar, daemon=True).start()
+                return
         except Exception:
-            pass
+            registrar_erro("limpeza programada dos temporários do Drive")
+        self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
+
+    def _caminhos_em_uso_abertos(self):
+        projetos_abertos = [self.projeto]
+        for aba in getattr(self, "abas_albuns", []) or []:
+            if isinstance(aba, dict) and isinstance(aba.get("projeto"), dict):
+                projetos_abertos.append(aba["projeto"])
+        ativas_no_projeto = set()
+        for prj in projetos_abertos:
+            for f in prj.get("fotos", []):
+                if isinstance(f, dict) and f.get("caminho"):
+                    ativas_no_projeto.add(normalizar_caminho(f["caminho"]))
+            for e in proj.todos_espacos(prj):
+                if e.get("foto"):
+                    ativas_no_projeto.add(normalizar_caminho(e["foto"]))
+            capa = prj.get("capa") or {}
+            if capa.get("foto"):
+                ativas_no_projeto.add(normalizar_caminho(capa["foto"]))
+            for d in proj.fundos_imagem(prj):
+                if d.get("caminho"):
+                    ativas_no_projeto.add(normalizar_caminho(d["caminho"]))
+        return ativas_no_projeto
+
+    def _apagar_orfaos_temp_drive(self, orfaos):
+        try:
+            ativas_no_projeto = self._caminhos_em_uso_abertos() if orfaos else set()
+            apagar = []
+            for ch, ch_norm in orfaos:
+                if ch_norm in ativas_no_projeto:
+                    continue
+                if hasattr(self, "observador") and self.observador:
+                    self.observador.esquecer(ch)
+                analise.esquecer_miniaturas(ch)
+                self.info.pop(ch_norm, None)
+                apagar.append(ch)
+            if apagar:
+                def remover():
+                    for ch in apagar:
+                        try:
+                            Path(ch).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                threading.Thread(target=remover, daemon=True).start()
+        except Exception:
+            registrar_erro("limpeza programada dos temporários do Drive")
         finally:
-            self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
+            self._limpeza_temp_rodando = False
+            if not getattr(self, "_limpeza_temp_parada", False):
+                self.agendar("limpeza_temp_drive", 30000, self._executar_limpeza_programada_temp_drive)
 
     def _limpar_pastas_temp_drive(self, limpar_autosave=True):
         """
@@ -4191,6 +4335,7 @@ class Aplicativo:
         quaisquer arquivos temporários/caches órfãos, liberando descritores abertos no Windows.
         """
         self.cancelar_agendado("limpeza_temp_drive")
+        self._limpeza_temp_parada = True
         pastas = list(getattr(self, "_pastas_temp_drive", []))
         for p in pastas:
             if not p:
@@ -6360,10 +6505,10 @@ class Aplicativo:
                 return
             if abs(evento.x - arrasto_interno["x0"]) + abs(evento.y - arrasto_interno["y0"]) >= 6:
                 arrasto_interno["ativo"] = True
-                canvas_g.configure(cursor="fleur")
+                definir_cursor(canvas_g, "fleur")
 
         def _ao_soltar_canvas(evento):
-            canvas_g.configure(cursor="")
+            definir_cursor(canvas_g, "")
             if not arrasto_interno["ativo"] or not arrasto_interno["chaves"]:
                 arrasto_interno["ativo"] = False
                 return
@@ -6860,11 +7005,12 @@ class Aplicativo:
                 if e.get("foto"):
                     edicoes[normalizar_caminho(e["foto"])] = e.get("edicao") or {}
         saida = []
+        mapa_registros = proj.mapa_registros(self.projeto) if caminhos else {}
         for caminho in caminhos:
             chave = normalizar_caminho(caminho)
             dados = self.info.get(chave)
             if dados:
-                registro = proj.registro_foto(self.projeto, caminho) or {}
+                registro = mapa_registros.get(chave) or {}
                 ed_base = dict(registro.get("edicao_padrao") or {})
                 ed_base.update(edicoes.get(chave) or {})
                 prop = self._proporcao_efetiva(caminho, ed_base)
@@ -6982,10 +7128,11 @@ class Aplicativo:
                 ed.pop("corte", None)
                 antigas[normalizar_caminho(espaco["foto"])] = ed
         novos_espacos = []
+        mapa_registros = proj.mapa_registros(self.projeto)
         for e in opcao["espacos"]:
             if e.get("foto"):
                 ch_f = normalizar_caminho(e["foto"])
-                reg_f = proj.registro_foto(self.projeto, e["foto"]) or {}
+                reg_f = mapa_registros.get(ch_f) or {}
                 ed_f = dict(reg_f.get("edicao_padrao") or {})
                 ed_f.update(antigas.get(ch_f, {}))
                 ed_f.pop("corte", None)
@@ -7185,11 +7332,12 @@ class Aplicativo:
             return
 
         misturadas = proj.laminas_com_pastas_misturadas(self.projeto)
+        mapa_registros = proj.mapa_registros(self.projeto)
         if not misturadas:
             # Verifica se há mais de uma pasta carregada e oferece rediagramar mantendo cada pasta em seu bloco
             pastas = proj.listar_pastas_projeto(self.projeto)
             for lam in laminas_atuais:
-                ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lam)
+                ch_l, nm_l, _dist = proj.pasta_da_lamina(self.projeto, lam, mapa_registros)
                 if ch_l:
                     lam["pasta"] = ch_l
                     lam["nome_pasta"] = nm_l
@@ -7220,7 +7368,7 @@ class Aplicativo:
                 cam = esp.get("foto")
                 if not cam:
                     continue
-                reg = proj.registro_foto(self.projeto, cam)
+                reg = mapa_registros.get(normalizar_caminho(cam))
                 ch_p = normalizar_caminho(proj.pasta_da_foto(reg if reg else cam))
                 nm_p = proj.nome_pasta_da_foto(reg if reg else cam)
                 por_pasta.setdefault(ch_p, (nm_p, []))[1].append(cam)
@@ -7740,6 +7888,8 @@ class Aplicativo:
             self.desenhar_modelos()
 
     def aplicar_modelo_selecionado(self):
+        if "modelos" in self._paineis_pendentes:
+            self._verificar_paineis_pendentes()
         lamina = self._lamina()
         if lamina is None or not self._modelo_sel:
             self.registrar("Escolha uma lâmina e um modelo de página.")
@@ -7985,13 +8135,44 @@ class Aplicativo:
             return None
         id_lam = self.projeto["laminas"][item].get("id") or str(item)
         ass = self._assinatura_lamina_render(item, dw, dh)
-        if tk_img is None:
-            tk_img = ImageTk.PhotoImage(img)
-        self._cache_laminas[id_lam] = (ass, (dw, dh), img.copy(), tk_img)
+        self._cache_laminas[id_lam] = [ass, (dw, dh), img, tk_img]
         self._cache_laminas.move_to_end(id_lam)
-        while len(self._cache_laminas) > 24:
-            self._cache_laminas.popitem(last=False)
+        self._podar_cache_laminas()
         return tk_img
+
+    def _podar_cache_laminas(self):
+        cache = self._cache_laminas
+        while len(cache) > LIMITE_CACHE_LAMINAS:
+            cache.popitem(last=False)
+        while len(cache) > 1 and sum(e[2].width * e[2].height for e in cache.values()) > PIXELS_CACHE_LAMINAS:
+            cache.popitem(last=False)
+        for item_cache in list(cache.values())[:-3]:
+            item_cache[3] = None
+
+    def _imagem_na_tela(self, fonte, dw, dh, ox, oy):
+        """PhotoImage só da parte visível da lâmina: no zoom não escala a lâmina inteira."""
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        vx0, vy0 = max(0, int(math.floor(-ox))), max(0, int(math.floor(-oy)))
+        vx1, vy1 = min(dw, int(math.ceil(cw - ox))), min(dh, int(math.ceil(ch - oy)))
+        if vx1 <= vx0 or vy1 <= vy0:
+            return None, ox, oy
+        sw, sh = fonte.size
+        if (vx0, vy0, vx1, vy1) == (0, 0, dw, dh):
+            img = fonte if (sw, sh) == (dw, dh) else fonte.resize((dw, dh), Image.BILINEAR)
+        else:
+            fx, fy = sw / float(dw), sh / float(dh)
+            img = fonte.resize((vx1 - vx0, vy1 - vy0), Image.BILINEAR, box=(vx0 * fx, vy0 * fy, vx1 * fx, vy1 * fy))
+        return ImageTk.PhotoImage(img), ox + vx0, oy + vy0
+
+    def _lamina_inteira_visivel(self, dw, dh, ox, oy):
+        return ox >= 0 and oy >= 0 and ox + dw <= self.canvas.winfo_width() and oy + dh <= self.canvas.winfo_height()
+
+    def _miniatura_timeline_de(self, item):
+        if not (isinstance(item, int) and 0 <= item < len(self.projeto["laminas"])):
+            return None
+        pronta = self._tl_pil.get(self._chave_timeline(item))
+        return pronta[1] if pronta else None
 
     def desenhar_lamina(self, pedir_render=True):
         itens = self._itens_timeline()
@@ -8011,51 +8192,50 @@ class Aplicativo:
         entrada_cache = self._cache_laminas.get(id_lam)
 
         tk_para_exibir = None
+        pos_img = (ox, oy)
         precisa_worker = pedir_render
+        fonte = None
+        inteira = self._lamina_inteira_visivel(dw, dh, ox, oy)
 
         if entrada_cache is not None:
             ass_cache, tam_cache, img_cache, tk_cache = entrada_cache
             self._cache_laminas.move_to_end(id_lam)
+            fonte = img_cache
+            self._imagem_lamina = (self.atual, img_cache)
             if tam_cache == (dw, dh):
-                tk_para_exibir = tk_cache
-                self._tk_lamina = (tk_cache, (self.atual, dw, dh))
-                self._imagem_lamina = (self.atual, img_cache)
                 if ass_cache == ass_atual:
                     precisa_worker = False
-            else:
-                redim = img_cache.resize((dw, dh), Image.BILINEAR)
-                self._tk_lamina_zoom = ImageTk.PhotoImage(redim)
-                tk_para_exibir = self._tk_lamina_zoom
-                self._imagem_lamina = (self.atual, redim)
-        elif self._tk_lamina is not None and self._tk_lamina[1] == (self.atual, dw, dh):
+                if inteira and img_cache.size == (dw, dh):
+                    if tk_cache is None:
+                        tk_cache = entrada_cache[3] = ImageTk.PhotoImage(img_cache)
+                    tk_para_exibir = tk_cache
+                    self._tk_lamina = (tk_cache, (self.atual, dw, dh))
+        elif self._tk_lamina is not None and self._tk_lamina[1] == (self.atual, dw, dh) and inteira:
             tk_para_exibir = self._tk_lamina[0]
-        elif self._imagem_lamina is not None and self._imagem_lamina[0] == self.atual:
-            imagem = self._imagem_lamina[1].resize((dw, dh), Image.BILINEAR)
-            self._tk_lamina_zoom = ImageTk.PhotoImage(imagem)
-            tk_para_exibir = self._tk_lamina_zoom
-        else:
-            # Renderização rápida imediata na troca de lâmina para NUNCA piscar branco
-            try:
-                mini = self._copia_para_render()
-                img_imediata = exportar.renderizar_item(
-                    mini, self.produto, self.info, self.atual,
-                    largura=dw, guias=self.guias.get(), rapido=True
-                )
-                tk_para_exibir = self._guardar_cache_lamina(self.atual, dw, dh, img_imediata)
-                self._tk_lamina = (tk_para_exibir, (self.atual, dw, dh))
-                self._imagem_lamina = (self.atual, img_imediata)
-                precisa_worker = False
-            except Exception:
-                tk_para_exibir = None
+        if tk_para_exibir is None and fonte is None and self._imagem_lamina is not None and self._imagem_lamina[0] == self.atual:
+            fonte = self._imagem_lamina[1]
+        esboco = False
+        if tk_para_exibir is None and fonte is None:
+            fonte = self._miniatura_timeline_de(self.atual)
+            esboco = fonte is None
+        if tk_para_exibir is None and fonte is not None:
+            self._tk_lamina_zoom, x_img, y_img = self._imagem_na_tela(fonte, dw, dh, ox, oy)
+            tk_para_exibir, pos_img = self._tk_lamina_zoom, (x_img, y_img)
 
         self.canvas.delete("all")
         for dx, dy, cor in ((10, 12, "#1a1a1a"), (7, 9, "#222222"), (4, 5, "#2a2a2a")):
             self.canvas.create_rectangle(ox + dx, oy + dy, ox + dw + dx, oy + dh + dy, fill=cor, outline="")
         if tk_para_exibir is not None:
-            self.canvas.create_image(ox, oy, image=tk_para_exibir, anchor="nw", tags="img")
+            self.canvas.create_image(pos_img[0], pos_img[1], image=tk_para_exibir, anchor="nw", tags="img")
         else:
             fundo = (lamina or {}).get("fundo", "#ffffff")
             self.canvas.create_rectangle(ox, oy, ox + dw, oy + dh, fill=cor_hex(fundo), outline="", tags="img")
+            if esboco and lamina:
+                for e in lamina.get("espacos", []):
+                    if e.get("foto"):
+                        x0, y0 = ox + e["x"] * dw, oy + e["y"] * dh
+                        self.canvas.create_rectangle(x0, y0, x0 + e["w"] * dw, y0 + e["h"] * dh,
+                                                     fill="#d4d4d8", outline="", tags="img")
         self._desenhar_remendo()
         self._desenhar_espacos()
         if precisa_worker:
@@ -8567,11 +8747,13 @@ class Aplicativo:
 
     def _desenhar_espacos(self, ocultar=None):
         c = self.canvas
-        c.delete("espaco")
+        c.delete("espaco&&!guia")
         if self._geo is None:
+            c.delete("guia")
             return
         lamina = self._lamina()
         if lamina is None:
+            c.delete("guia")
             return
         dw, dh, ox, oy = self._geo
         editando = self.editar_layout.get()
@@ -8586,24 +8768,31 @@ class Aplicativo:
         elif not selecionados:
             self._ultima_assinatura_anel = None
 
-        # Linhas guias contínuas ciano no estilo Adobe Photoshop (Safe Zone e Sangria)
-        if self.guias.get():
+        # Linhas guias contínuas ciano no estilo Adobe Photoshop (Safe Zone e Sangria).
+        # Ficam no canvas entre um desenho e outro: recriar retângulos do tamanho da lâmina obriga o Tk a repintar tudo.
+        margem_cfg = float(self._cfg()["margem_mm"]) if self.guias.get() else None
+        chave_guias = (self._geo, self.produto["nome"], margem_cfg)
+        if not self.guias.get():
+            c.delete("guia")
+        elif chave_guias != getattr(self, "_chave_guias", None) or not c.find_withtag("guia"):
+            c.delete("guia")
+            etiquetas = ("espaco", "guia")
             lw, lh = self._mm()
             b = float(self.produto["sangria_mm"])
-            margem_cfg = float(self._cfg()["margem_mm"])
             # Linha de Sangria (ciano discreto contínuo)
             sx0, sy0 = ox + (b / lw) * dw, oy + (b / lh) * dh
             sx1, sy1 = ox + ((lw - b) / lw) * dw, oy + ((lh - b) / lh) * dh
-            c.create_rectangle(sx0, sy0, sx1, sy1, outline="#00afdb", width=1, tags="espaco")
+            c.create_rectangle(sx0, sy0, sx1, sy1, outline="#00afdb", width=1, tags=etiquetas)
             # Linhas imaginárias da Safe Zone (ciano vivo contínuo estilo Photoshop #00e5ff)
             for pag in range(self.produto["paginas_por_lamina"]):
                 ux, uy, uw, uh = area_util_pagina_mm(self.produto, pag, margem_cfg, respeitar_seguranca=True)
                 gx0, gy0 = ox + (ux / lw) * dw, oy + (uy / lh) * dh
                 gx1, gy1 = ox + ((ux + uw) / lw) * dw, oy + ((uy + uh) / lh) * dh
-                c.create_rectangle(gx0, gy0, gx1, gy1, outline="#00e5ff", width=1, tags="espaco")
+                c.create_rectangle(gx0, gy0, gx1, gy1, outline="#00e5ff", width=1, tags=etiquetas)
             if self.produto["paginas_por_lamina"] > 1:
                 xm = ox + dw / 2.0
-                c.create_line(xm, oy, xm, oy + dh, fill="#00cfe8", width=1, tags="espaco")
+                c.create_line(xm, oy, xm, oy + dh, fill="#00cfe8", width=1, tags=etiquetas)
+        self._chave_guias = chave_guias
 
         if editando:
             for i, s in enumerate(lamina.get("sobreposicoes") or []):
@@ -8636,11 +8825,74 @@ class Aplicativo:
             for hx, hy in self._alcas(self._item_layout(alvo, lamina)).values():
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
                                    outline=cor, width=1, tags="espaco")
-        self._atualizar_numeros()
-        self._atualizar_enquadramento_inline()
-        self._atualizar_moldura_ui()
-        self._atualizar_sombra_ui()
-        self._atualizar_degrade_ui()
+        assinatura_paineis = (
+            id(self.projeto), self.atual, self._assinatura(self.atual) if isinstance(self.atual, int) else None,
+            self.espaco_sel, tuple(sorted(selecionados)), self.molde_sel, editando, hash(frozenset(self.fotos_sel)),
+        )
+        if assinatura_paineis != getattr(self, "_assinatura_paineis", None):
+            self._assinatura_paineis = assinatura_paineis
+            self._atualizar_paineis_selecao()
+
+    def _atualizar_paineis_selecao(self):
+        """Painéis que mostram a seleção: só quando a seleção ou os dados da lâmina mudam (não a cada quadro de zoom/pan)."""
+        self._atualizar_paineis(("editar", "Moldura", "Sombra", "Degradê"))
+
+    def _paineis_registrados(self):
+        """Nome -> (atributo do widget que indica se o painel está na tela, funções que o atualizam)."""
+        return {
+            "editar": ("canvas_enquadramento", (self._atualizar_numeros, self._atualizar_enquadramento_inline)),
+            "Moldura": ("rotulo_espessura_moldura", (self._atualizar_moldura_ui,)),
+            "Sombra": ("amostra_sombra", (self._atualizar_sombra_ui,)),
+            "Degradê": ("rotulo_alvo_degrade", (self._atualizar_degrade_ui,)),
+            "sugestoes": ("canvas_sugestoes", (self.atualizar_sugestoes,)),
+            "modelos": ("canvas_modelos", (self.desenhar_modelos,)),
+            "gerados": ("galeria_fundos_gerados", (self._atualizar_galeria_gerados,)),
+            "fundos_pasta": ("galeria_fundos", (self._agendar_fundos_pasta,)),
+        }
+
+    def _widget_do_painel(self, atributo):
+        widget = getattr(self, atributo, None)
+        return getattr(widget, "canvas", widget)
+
+    @staticmethod
+    def _na_tela(widget):
+        """winfo_ismapped continua 1 dentro de um painel escondido com pack_forget; viewable olha os pais também."""
+        try:
+            return bool(widget is not None and widget.winfo_exists() and widget.winfo_viewable())
+        except tk.TclError:
+            return False
+
+    def _painel_na_tela(self, nome):
+        visivel = self._na_tela(self._widget_do_painel(self._paineis_registrados()[nome][0]))
+        if not visivel:
+            self._paineis_pendentes.add(nome)
+        return visivel
+
+    def _atualizar_paineis(self, nomes):
+        """Atualiza os painéis visíveis; os escondidos ficam pendentes até aparecerem (mexer neles custa layout do Tk)."""
+        paineis = self._paineis_registrados()
+        for nome in nomes:
+            if self._painel_na_tela(nome):
+                self._paineis_pendentes.discard(nome)
+                for funcao in paineis[nome][1]:
+                    funcao()
+
+    def _algo_apareceu(self, _evento=None):
+        self.agendar("paineis_apareceram", 30, self._verificar_paineis_pendentes)
+
+    def _verificar_paineis_pendentes(self):
+        paineis = self._paineis_registrados()
+        for nome in list(self._paineis_pendentes):
+            if nome not in paineis:
+                self._paineis_pendentes.discard(nome)
+            elif self._na_tela(self._widget_do_painel(paineis[nome][0])):
+                self._paineis_pendentes.discard(nome)
+                for funcao in paineis[nome][1]:
+                    funcao()
+        for atributo in ("galeria_fundos_gerados", "galeria_fundos"):
+            galeria = getattr(self, atributo, None)
+            if galeria is not None and galeria.pendente and self._na_tela(galeria.canvas):
+                galeria.desenhar()
 
     def _desenhar_remendo(self):
         """Depois de soltar, a prévia do arrasto com o fundo limpo fica até a imagem final chegar."""
@@ -8662,16 +8914,20 @@ class Aplicativo:
         self._avisar_fundo_faltando()
         self._versao_render += 1
         versao = self._versao_render
-        mini = self._copia_para_render()
         item = self.atual
+        if isinstance(item, int) and not (0 <= item < len(self.projeto.get("laminas", []))):
+            return
+        mini = self._copia_para_render()
         produto = self.produto
         guias = self.guias.get()
         info = self.info
 
+        largura = min(dw, LARGURA_MAX_RENDER)
+
         def trabalho():
             if versao != self._versao_render:
                 return
-            img = exportar.renderizar_item(mini, produto, info, item, largura=dw, guias=guias, rapido=True)
+            img = exportar.renderizar_item(mini, produto, info, item, largura=largura, guias=guias, rapido=True)
             self.fila.put(("render", versao, item, dw, dh, img))
 
         self.pintor.pedir("principal", trabalho)
@@ -8679,22 +8935,62 @@ class Aplicativo:
     def _receber_render(self, versao, item, dw, dh, img):
         if versao != self._versao_render:
             return
-        tk_img = self._guardar_cache_lamina(item, dw, dh, img)
-        if tk_img is None:
-            tk_img = ImageTk.PhotoImage(img)
-        self._tk_lamina = (tk_img, (item, dw, dh))
-        self._imagem_lamina = (item, img.copy())
+        self._guardar_cache_lamina(item, dw, dh, img)
+        self._imagem_lamina = (item, img)
         if self._geo is None or (item, dw, dh) != (self.atual, self._geo[0], self._geo[1]):
             return
         if self._anim_layout_id is not None:
             return
         _dw, _dh, ox, oy = self._geo
+        if self._lamina_inteira_visivel(dw, dh, ox, oy) and img.size == (dw, dh):
+            tk_img, x_img, y_img = ImageTk.PhotoImage(img), ox, oy
+            item_cache = self._cache_laminas.get((self._lamina(item) or {}).get("id") or str(item))
+            if item_cache is not None and item_cache[2] is img:
+                item_cache[3] = tk_img
+            self._tk_lamina = (tk_img, (item, dw, dh))
+        else:
+            tk_img, x_img, y_img = self._imagem_na_tela(img, dw, dh, ox, oy)
+            self._tk_lamina_zoom = tk_img
         self._remendo = None
         self.canvas.delete("img")
         self.canvas.delete("remendo")
-        self.canvas.create_image(ox, oy, image=tk_img, anchor="nw", tags="img")
+        if tk_img is not None:
+            self.canvas.create_image(x_img, y_img, image=tk_img, anchor="nw", tags="img")
         self.canvas.tag_raise("espaco")
         self.canvas.tag_raise("arrasto")
+        if abs(self.zoom - 1.0) < 0.001:
+            self.agendar("prefetch_laminas", 450, self._prefetch_vizinhas)
+
+    def _prefetch_vizinhas(self):
+        """Com a janela parada, renderiza a lâmina anterior e a próxima para a troca ser instantânea."""
+        if self._geo is None or abs(self.zoom - 1.0) > 0.001 or not isinstance(self.atual, int):
+            return
+        dw, dh = self._geo[:2]
+        produto, info, guias = self.produto, self.info, self.guias.get()
+        for item in (self.atual + 1, self.atual - 1):
+            if not (0 <= item < len(self.projeto["laminas"])):
+                continue
+            lamina = self.projeto["laminas"][item]
+            id_lam = lamina.get("id") or str(item)
+            ass = self._assinatura_lamina_render(item, dw, dh)
+            item_cache = self._cache_laminas.get(id_lam)
+            if item_cache is not None and item_cache[0] == ass:
+                continue
+            mini = {"capa": None, "laminas": {item: copy.deepcopy(lamina)}}
+
+            def trabalho(mini=mini, item=item, id_lam=id_lam, ass=ass):
+                img = exportar.renderizar_item(mini, produto, info, item, largura=min(dw, LARGURA_MAX_RENDER), guias=guias, rapido=True)
+                self.fila.put(("chamar", lambda: self._receber_prefetch(id_lam, ass, dw, dh, img)))
+
+            self.pintor.pedir("pre:" + id_lam, trabalho)
+
+    def _receber_prefetch(self, id_lam, ass, dw, dh, img):
+        for item, lamina in enumerate(self.projeto["laminas"]):
+            if (lamina.get("id") or str(item)) == id_lam:
+                if item != self.atual and self._assinatura_lamina_render(item, dw, dh) == ass:
+                    self._guardar_cache_lamina(item, dw, dh, img)
+                    self._cache_laminas.move_to_end(id_lam, last=False)
+                return
 
     def mudar_zoom(self, fator, centro=None):
         if centro is None:
@@ -8741,8 +9037,21 @@ class Aplicativo:
 
     def _pan_mover(self, evento):
         x0, y0, pan = self._pan_ref
-        self.pan = [pan[0] + evento.x - x0, pan[1] + evento.y - y0]
-        self.agendar("pan", 15, self.desenhar_lamina)
+        self._deslocar_lamina([pan[0] + evento.x - x0, pan[1] + evento.y - y0])
+        self.agendar("pan", 120, self.desenhar_lamina)
+
+    def _deslocar_lamina(self, novo_pan):
+        """Pan sem redesenhar: move o que já está no canvas e acerta a geometria."""
+        dx, dy = novo_pan[0] - self.pan[0], novo_pan[1] - self.pan[1]
+        self.pan = list(novo_pan)
+        if not (dx or dy):
+            return
+        self.canvas.move("all", dx, dy)
+        if self._geo is not None:
+            dw, dh, ox, oy = self._geo
+            self._geo = (dw, dh, ox + dx, oy + dy)
+            if not self._lamina_inteira_visivel(dw, dh, ox + dx, oy + dy):
+                self.agendar("pan_redesenho", 90, lambda: self.desenhar_lamina(pedir_render=False))
 
     def _scroll_click_inicio(self, evento):
         """
@@ -8842,8 +9151,7 @@ class Aplicativo:
         if not moveu and abs(evento.x - x0) + abs(evento.y - y0) < 3:
             return
         self._pan_ref_direito = (x0, y0, pan, True)
-        self.pan = [pan[0] + evento.x - x0, pan[1] + evento.y - y0]
-        self.desenhar_lamina(pedir_render=False)
+        self._deslocar_lamina([pan[0] + evento.x - x0, pan[1] + evento.y - y0])
 
     def _pan_direito_soltar(self, evento):
         estado = getattr(self, "_pan_ref_direito", None)
@@ -8852,9 +9160,8 @@ class Aplicativo:
             return
         del self._pan_ref_direito
         if estado[3]:
-            if self._geo:
-                dw, dh = self._geo[:2]
-                self.agendar("pan_render", 60, lambda: self._pedir_render(dw, dh))
+            self.cancelar_agendado("pan_redesenho")
+            self.desenhar_lamina()
         else:
             self._lamina_menu(evento)
 
@@ -8879,18 +9186,18 @@ class Aplicativo:
     def _lamina_passou(self, evento):
         if not self.projeto.get("laminas"):
             acao_v = self._acao_vazio_em(evento.x, evento.y)
-            self.canvas.configure(cursor="hand2" if acao_v is not None else "")
+            definir_cursor(self.canvas, "hand2" if acao_v is not None else "")
             return
         if self._editando_lamina():
             alca = self._alca_em(evento.x, evento.y)
             if alca:
-                self.canvas.configure(cursor=CURSOR_ALCA[alca])
+                definir_cursor(self.canvas, CURSOR_ALCA[alca])
                 return
             sobre = self._espaco_em(evento.x, evento.y) is not None or self._molde_em(evento.x, evento.y) is not None
-            self.canvas.configure(cursor="fleur" if sobre else "")
+            definir_cursor(self.canvas, "fleur" if sobre else "")
             return
         indice = self._espaco_em(evento.x, evento.y)
-        self.canvas.configure(cursor="hand2" if indice is not None else "")
+        definir_cursor(self.canvas, "hand2" if indice is not None else "")
 
     def _lamina_pressionou(self, evento):
         if self._foco() in getattr(self, "_num_campos", []):
@@ -9076,12 +9383,7 @@ class Aplicativo:
             self.fotos_sel.clear()
             if hasattr(self, "atualizar_fotos"):
                 self.agendar("limpar_sel_tira", 20, self.atualizar_fotos)
-        if hasattr(self, "_atualizar_moldura_ui"):
-            self._atualizar_moldura_ui()
-        if hasattr(self, "_atualizar_sombra_ui"):
-            self._atualizar_sombra_ui()
-        if hasattr(self, "_atualizar_degrade_ui"):
-            self._atualizar_degrade_ui()
+        self._atualizar_paineis(("Moldura", "Sombra", "Degradê"))
 
     def _caixa_selecao_espacos(self, indices=None):
         lamina = self._lamina()
@@ -9905,6 +10207,7 @@ class Aplicativo:
         lado = max(dw, dh)
         a["base_limpa_tk"] = None
         a["previas_grupo"] = {}
+        a.pop("cache_previas_grupo", None)
         a["tks_grupo"] = []
         a["itens_grupo_pos"] = []
         indices_grupo = set(a.get("grupo", {}).keys())
@@ -9962,6 +10265,7 @@ class Aplicativo:
         a["base_limpa_tk"] = None
         a["previa"] = None
         a["tk"] = None
+        a.pop("cache_previas_grupo", None)
 
         # Renderiza a lâmina sem o item ativo para mostrar o fundo verdadeiro por baixo
         try:
@@ -10051,18 +10355,10 @@ class Aplicativo:
                 pw, ph = max(1, x1 - x0), max(1, y1 - y0)
                 previa = previas_g.get(idx)
                 if previa:
-                    img = previa["img"]
-                    W, H = img.size
-                    aspecto = pw / float(ph)
                     dobra_x = None
                     if item["x"] < 0.5 < item["x"] + item["w"] and item["w"] > 0.05:
                         dobra_x = (0.5 - item["x"]) / float(item["w"])
-                    corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto_t"],
-                                                    rosto_ja_transformado=True, dobra_x=dobra_x)
-                    pronta = recorte.recortar(img, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), previa["fundo"], rapido=True)
-                    if previa.get("moldura"):
-                        aplicar_moldura(pronta, previa["moldura"], previa.get("px_mm"))
-                    tk_img = ImageTk.PhotoImage(pronta)
+                    tk_img = self._imagem_previa(a.setdefault("cache_previas_grupo", {}), idx, previa, pw, ph, dobra_x)
                     tks_grupo.append(tk_img)
                     itens_grupo_pos.append(((x0, y0), tk_img))
                     novos_ids_canvas.append(c.create_image(x0, y0, image=tk_img, anchor="nw", tags=etiqueta))
@@ -10083,7 +10379,8 @@ class Aplicativo:
             a["tks_grupo"] = tks_grupo
             a["itens_grupo_pos"] = itens_grupo_pos
             self._desenhar_guias_ima(*a.get("guias", ([], [])))
-            self._atualizar_numeros()
+            if self._painel_na_tela("editar"):
+                self._atualizar_numeros()
             return
 
         c.delete("arrasto_item")
@@ -10097,18 +10394,10 @@ class Aplicativo:
         if a["alvo"][0] == "espaco":
             cor = tema.DESTAQUE
             if previa:
-                img = previa["img"]
-                W, H = img.size
-                aspecto = pw / float(ph)
                 dobra_x = None
                 if item["x"] < 0.5 < item["x"] + item["w"] and item["w"] > 0.05:
                     dobra_x = (0.5 - item["x"]) / float(item["w"])
-                corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto_t"],
-                                                rosto_ja_transformado=True, dobra_x=dobra_x)
-                pronta = recorte.recortar(img, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), previa["fundo"], rapido=True)
-                if previa.get("moldura"):
-                    aplicar_moldura(pronta, previa["moldura"], previa.get("px_mm"))
-                a["tk"] = ImageTk.PhotoImage(pronta)
+                a["tk"] = self._imagem_previa(a.setdefault("cache_previas_grupo", {}), None, previa, pw, ph, dobra_x)
                 c.create_image(x0, y0, image=a["tk"], anchor="nw", tags=etiqueta)
             else:
                 c.create_rectangle(x0, y0, x1, y1, fill=tema.PAINEL_3, outline=tema.BORDA, tags=etiqueta)
@@ -10122,7 +10411,27 @@ class Aplicativo:
         for hx, hy in self._alcas(item).values():
             c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff", outline=cor, tags=etiqueta)
         self._desenhar_guias_ima(*a.get("guias", ([], [])))
-        self._atualizar_numeros()
+        if self._painel_na_tela("editar"):
+            self._atualizar_numeros()
+
+    @staticmethod
+    def _imagem_previa(cache, chave_item, previa, pw, ph, dobra_x):
+        """Foto recortada para a prévia do arrasto; se só a posição mudou, reaproveita a anterior."""
+        chave = (pw, ph, None if dobra_x is None else round(dobra_x, 3))
+        guardada = cache.get(chave_item)
+        if guardada is not None and guardada[0] == chave:
+            return guardada[1]
+        img = previa["img"]
+        W, H = img.size
+        aspecto = pw / float(ph)
+        corte = recorte.corte_do_espaco(W, H, aspecto, previa["edicao"], previa["rosto_t"],
+                                        rosto_ja_transformado=True, dobra_x=dobra_x)
+        pronta = recorte.recortar(img, recorte.caixa_corte(W, H, aspecto, corte), (pw, ph), previa["fundo"], rapido=True)
+        if previa.get("moldura"):
+            aplicar_moldura(pronta, previa["moldura"], previa.get("px_mm"))
+        tk_img = ImageTk.PhotoImage(pronta)
+        cache[chave_item] = (chave, tk_img)
+        return tk_img
 
     def _desenhar_guias_ima(self, guias_x, guias_y):
         self.canvas.delete("guia_ima")
@@ -10578,13 +10887,26 @@ class Aplicativo:
             "zoom": max(1.0, min(3.0, float(zoom))),
         }
         esp["edicao"] = ed
-        self._marcar_modificado()
-        self._atualizar_enquadramento_inline()
         if final:
+            self._marcar_modificado()
+            self.cancelar_agendado("enq_inline")
+            self._atualizar_enquadramento_inline()
             self.atualizar_lamina_atual(timeline=True)
-        elif self._geo:
+            return
+        if not self.modificado:
+            self._marcar_modificado()
+        espera = 0.016 - (time.perf_counter() - getattr(self, "_enq_inline_ultimo", 0.0))
+        if espera <= 0:
+            self._atualizar_enquadramento_inline_agora()
+        else:
+            self.agendar("enq_inline", max(1, int(espera * 1000)), self._atualizar_enquadramento_inline_agora)
+        if self._geo:
             dw, dh = self._geo[:2]
             self.agendar("render_enq_inline", 16, lambda: self._pedir_render(dw, dh))
+
+    def _atualizar_enquadramento_inline_agora(self):
+        self._enq_inline_ultimo = time.perf_counter()
+        self._atualizar_enquadramento_inline()
 
     def _mudou_enquadramento_slider(self, _chave, final=False):
         if getattr(self, "_carregando_enq", False):
@@ -10628,14 +10950,19 @@ class Aplicativo:
             self.atualizar_lamina_atual(timeline=True)
 
     def _enquadramento_roda(self, evento):
-        _idx, esp = self._espaco_enquadramento_ativo()
+        idx, esp = self._espaco_enquadramento_ativo()
         if esp is None or not esp.get("foto"):
             return "break"
-        self.marcar_historico()
+        agora = time.perf_counter()
+        gesto = (self.atual, idx)
+        if gesto != getattr(self, "_gesto_roda_enq", None) or agora - getattr(self, "_ultimo_roda_enq", 0.0) > 0.8:
+            self.marcar_historico()
+        self._gesto_roda_enq, self._ultimo_roda_enq = gesto, agora
         corte, _img_t, _asp = self._corte_atual_espaco(esp)
         fator = 1.08 if evento.delta > 0 else (1.0 / 1.08)
         novo_zoom = max(1.0, min(3.0, float(corte.get("zoom", 1.0)) * fator))
-        self._aplicar_corte_inline(corte.get("cx", 0.5), corte.get("cy", 0.5), novo_zoom, final=True)
+        self._aplicar_corte_inline(corte.get("cx", 0.5), corte.get("cy", 0.5), novo_zoom, final=False)
+        self.agendar("enq_roda_final", 150, lambda: self.atualizar_lamina_atual(timeline=True))
         return "break"
 
     def _resetar_enquadramento_inline(self):
@@ -10816,10 +11143,11 @@ class Aplicativo:
 
     # ---------------- painel de fotos (com divisões por pastas) ----------------
 
-    def _atualizar_combo_pastas(self):
+    def _atualizar_combo_pastas(self, pastas=None):
         if not hasattr(self, "combo_pasta"):
             return
-        pastas = proj.listar_pastas_projeto(self.projeto)
+        if pastas is None:
+            pastas = proj.listar_pastas_projeto(self.projeto)
         self._mapa_pastas_ui = {"Todas as pastas": "todas"}
         opcoes = ["Todas as pastas"]
         nomes_vistos = {}
@@ -10843,8 +11171,9 @@ class Aplicativo:
         self.pasta_filtro.set(mapa.get(escolha, "todas"))
         self.atualizar_fotos()
 
-    def _fotos_filtradas(self):
-        contagem = proj.usos(self.projeto)
+    def _fotos_filtradas(self, contagem=None):
+        if contagem is None:
+            contagem = proj.usos(self.projeto)
         filtro = self.filtro.get()
         pasta_alvo = self.pasta_filtro.get() if hasattr(self, "pasta_filtro") else "todas"
         lista = []
@@ -10859,14 +11188,15 @@ class Aplicativo:
             lista.append((foto, usos))
         return lista
 
-    def _construir_itens_painel_fotos(self):
+    def _construir_itens_painel_fotos(self, pastas_projeto=None):
         """
         Monta a sequência visual da tira de fotos separando cada pasta com um divisor clicável
         (para nunca misturar pastas carregadas). Suporta layout horizontal (embaixo) e vertical (à direita/esquerda).
         """
         cw, ch, _lado = self._celula
         vertical = self._fotos_vertical()
-        pastas_projeto = proj.listar_pastas_projeto(self.projeto)
+        if pastas_projeto is None:
+            pastas_projeto = proj.listar_pastas_projeto(self.projeto)
         mostrar_divisores = len(pastas_projeto) >= 1 and self.pasta_filtro.get() == "todas"
 
         grupos = OrderedDict()
@@ -10968,12 +11298,14 @@ class Aplicativo:
         self._altura_total_fotos = max(1, ch)
 
     def atualizar_fotos(self):
-        self._atualizar_combo_pastas()
-        self._lista_fotos = self._fotos_filtradas()
+        pastas = proj.listar_pastas_projeto(self.projeto)
+        contagem = proj.usos(self.projeto)
+        self._atualizar_combo_pastas(pastas)
+        self._lista_fotos = self._fotos_filtradas(contagem)
         total = len(self.projeto["fotos"])
-        usadas = sum(1 for _f, u in self._fotos_filtradas_todas() if u)
+        usadas = sum(1 for _f, u in self._fotos_filtradas_todas(contagem) if u)
         selecionadas = len(self._fotos_escolhidas())
-        n_pastas = len(proj.listar_pastas_projeto(self.projeto))
+        n_pastas = len(pastas)
         texto = "Fotos  %s/%s no álbum" % (usadas, total)
         if n_pastas > 1:
             texto += " · %d pastas" % n_pastas
@@ -10981,7 +11313,7 @@ class Aplicativo:
             texto += " · %s sel." % selecionadas
         self.rotulo_fotos.configure(text=texto)
         self._celula = self._medidas_fotos()
-        self._construir_itens_painel_fotos()
+        self._construir_itens_painel_fotos(pastas)
         self._area_fotos()
         self._desenhar_fotos_visiveis()
 
@@ -11021,8 +11353,9 @@ class Aplicativo:
             self._area_fotos()
         self.agendar("fotos", 30, self._desenhar_fotos_visiveis)
 
-    def _fotos_filtradas_todas(self):
-        contagem = proj.usos(self.projeto)
+    def _fotos_filtradas_todas(self, contagem=None):
+        if contagem is None:
+            contagem = proj.usos(self.projeto)
         return [(f, contagem.get(normalizar_caminho(f["caminho"]), 0)) for f in self.projeto["fotos"]]
 
     def _rolar_fotos(self, *args):
@@ -11041,13 +11374,14 @@ class Aplicativo:
 
     def _fotos_roda(self, evento):
         if not evento.delta:
-            return
+            return "break"
         passo = -int(evento.delta / 40)
         if self._fotos_vertical():
             self.canvas_fotos.yview_scroll(passo, "units")
         else:
             self.canvas_fotos.xview_scroll(passo, "units")
         self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
+        return "break"
 
     def _miniatura_pil(self, caminho, lado, usada=False):
         """Miniatura do painel de fotos; a já usada no álbum fica meio cinza e meio transparente."""
@@ -11078,7 +11412,7 @@ class Aplicativo:
                 img = self._miniatura_pil(caminho, lado, usada)
                 foto = ImageTk.PhotoImage(img)
                 self._tk_miniaturas[chave] = foto
-                while len(self._tk_miniaturas) > 1200:
+                while len(self._tk_miniaturas) > 600:
                     self._tk_miniaturas.popitem(last=False)
                 return foto
             except Exception:
@@ -11087,9 +11421,16 @@ class Aplicativo:
         return None
 
     def _pedir_miniatura_foto(self, caminho, chave, lado, usada):
-        if chave in self._miniaturas_pendentes:
+        agora = time.perf_counter()
+        pedido_em = self._miniaturas_pendentes.get(chave)
+        if pedido_em is not None and agora - pedido_em < 2.0:
             return
-        self._miniaturas_pendentes.add(chave)
+        self._miniaturas_pendentes[chave] = agora
+        chave_pintor = "ft:%s:%d" % (chave[0], int(usada))
+        anterior = self._pedidos_miniatura.get(chave_pintor)
+        if anterior is not None and anterior != chave:
+            self._miniaturas_pendentes.pop(anterior, None)
+        self._pedidos_miniatura[chave_pintor] = chave
 
         def trabalho():
             try:
@@ -11098,14 +11439,27 @@ class Aplicativo:
             except Exception:
                 self.fila.put(("miniatura_foto", chave, None))
 
-        self.pintor.pedir("ft:" + str(chave[0]) + ":" + str( int(usada) ), trabalho)
+        self.pintor.pedir(chave_pintor, trabalho)
+
+    def _pedido_descartado(self, chave_pintor):
+        """O Pintor jogou fora um pedido antigo: libera a chave para a miniatura poder ser pedida de novo."""
+        if chave_pintor.startswith("ft:"):
+            chave = self._pedidos_miniatura.pop(chave_pintor, None)
+            if chave is not None:
+                self._miniaturas_pendentes.pop(chave, None)
+                self.agendar("fotos_descartadas", 300, self._desenhar_fotos_visiveis)
+        elif chave_pintor.startswith("tl:"):
+            self.agendar("timeline_descartada", 300, self.desenhar_timeline)
 
     def _receber_miniatura_foto(self, chave, img):
-        self._miniaturas_pendentes.discard(chave)
+        self._miniaturas_pendentes.pop(chave, None)
+        chave_pintor = "ft:%s:%d" % (chave[0], int(chave[3]))
+        if self._pedidos_miniatura.get(chave_pintor) == chave:
+            del self._pedidos_miniatura[chave_pintor]
         if img is not None:
             try:
                 self._tk_miniaturas[chave] = ImageTk.PhotoImage(img)
-                while len(self._tk_miniaturas) > 1200:
+                while len(self._tk_miniaturas) > 600:
                     self._tk_miniaturas.popitem(last=False)
                 self.agendar("fotos", 16, self._desenhar_fotos_visiveis)
             except tk.TclError:
@@ -11488,6 +11842,7 @@ class Aplicativo:
         return self.projeto["laminas"][item]["id"]
 
     def desenhar_timeline(self):
+        self.contagem_desenhos["timeline"] += 1
         c = self.canvas_timeline
         c.delete("all")
         itens = self._itens_timeline()
@@ -11515,12 +11870,21 @@ class Aplicativo:
             area_tl = (0, 0, max(1, len(itens) * passo), altura)
             v0 = c.canvasx(0)
             v1 = v0 + max(240, c.winfo_width())
-        c.configure(scrollregion=area_tl)
+        texto_area = "%d %d %d %d" % area_tl
+        if c.cget("scrollregion") != texto_area:
+            c.configure(scrollregion=texto_area)
 
         # Virtualização da linha do tempo: renderiza e pede miniaturas apenas para a janela visível (+ overscan de 3 lâminas)
         overscan = 3
         pos_ini = max(0, int(v0 // passo) - overscan)
         pos_fim = min(len(itens), int(v1 // passo) + 1 + overscan)
+        mapa_fotos = proj.mapa_registros(self.projeto)
+        pastas_lam = {}
+
+        def pasta_de(it):
+            if it not in pastas_lam:
+                pastas_lam[it] = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][it], mapa_fotos)
+            return pastas_lam[it]
 
         for posicao in range(pos_ini, pos_fim):
             item = itens[posicao]
@@ -11565,10 +11929,10 @@ class Aplicativo:
             if len(selecionadas) > 1 and em_multi:
                 c.create_rectangle(xi + 2, yi + 2, xi + 16, yi + 15, fill=tema.DESTAQUE if ativa else tema.MULTI_SEL, outline="#ffffff", width=1)
                 c.create_text(xi + 9, yi + 8, text="✓", fill="#ffffff", font=("Segoe UI", 7, "bold"))
-            ch_pasta_lam, nome_pasta_lam, distintas_lam = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][item])
+            ch_pasta_lam, nome_pasta_lam, distintas_lam = pasta_de(item)
             pasta_ant = ""
             if posicao > 0:
-                pasta_ant, _nm_ant, _d_ant = proj.pasta_da_lamina(self.projeto, self.projeto["laminas"][itens[posicao - 1]])
+                pasta_ant, _nm_ant, _d_ant = pasta_de(itens[posicao - 1])
             mudou_pasta = bool(ch_pasta_lam and posicao > 0 and pasta_ant and ch_pasta_lam != pasta_ant)
             if mudou_pasta:
                 if vertical:
@@ -11615,7 +11979,7 @@ class Aplicativo:
             self.canvas_timeline.yview_scroll(passos, "units")
         else:
             self.canvas_timeline.xview_scroll(passos, "units")
-        self.agendar("timeline", 14, self.desenhar_timeline)
+        return "break"
 
     def _pedir_timeline(self, item, chave, assinatura, largura):
         mini = {"capa": None, "laminas": {item: copy.deepcopy(self.projeto["laminas"][item])}}
@@ -11840,6 +12204,8 @@ class Aplicativo:
         if lamina is None:
             self._sugestoes = []
             self._chave_cache_sugestoes = None
+            self._sugestoes_calculando = False
+            self._versao_sugestoes = getattr(self, "_versao_sugestoes", 0) + 1
         else:
             caminhos_f = tuple(
                 (normalizar_caminho(e["foto"]), int((e.get("edicao") or {}).get("rot", 0)) % 360)
@@ -11855,16 +12221,38 @@ class Aplicativo:
                 self.versao_fotos,
             )
             if getattr(self, "_chave_cache_sugestoes", None) != chave_sug:
-                self._chave_cache_sugestoes = chave_sug
-                fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
-                self._sugestoes = (
-                    diagramar.opcoes_lamina(fotos, self.produto, cfg_atual, maximo=12)
-                    if fotos
-                    else []
-                )
+                self._sugestoes = []
+                self._versao_sugestoes = getattr(self, "_versao_sugestoes", 0) + 1
+                self._sugestoes_calculando = False
+                if self._painel_na_tela("sugestoes"):
+                    self._chave_cache_sugestoes = chave_sug
+                    fotos = self._fotos_info([e["foto"] for e in lamina["espacos"] if e.get("foto")], lamina)
+                    if fotos:
+                        self._calcular_sugestoes_fora(self._versao_sugestoes, fotos, self.produto, cfg_atual)
+                else:
+                    self._chave_cache_sugestoes = None
         self.desenhar_sugestoes()
         self.desenhar_modelos()
         self._atualizar_fundo_ui()
+
+    def _calcular_sugestoes_fora(self, versao, fotos, produto, cfg_atual):
+        self._sugestoes_calculando = True
+
+        def trabalho():
+            opcoes = []
+            try:
+                opcoes = diagramar.opcoes_lamina(fotos, produto, cfg_atual, maximo=12)
+            finally:
+                self.fila.put(("chamar", lambda: self._receber_sugestoes(versao, opcoes)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _receber_sugestoes(self, versao, opcoes):
+        if versao != getattr(self, "_versao_sugestoes", 0):
+            return
+        self._sugestoes_calculando = False
+        self._sugestoes = opcoes
+        self.desenhar_sugestoes()
 
     def _desenhar_esquema(self, c, x, y, w, espacos, selecionado=False, paginas=2, tag=""):
         lw, lh = lamina_mm(self.produto)
@@ -11884,8 +12272,11 @@ class Aplicativo:
         c = self.canvas_sugestoes
         c.delete("all")
         if not self._sugestoes:
-            c.create_text(10, 20, anchor="w", fill=tema.TEXTO_FRACO,
-                          text="Selecione uma lâmina com fotos." if isinstance(self.atual, int) else "A capa não tem sugestões.")
+            if getattr(self, "_sugestoes_calculando", False):
+                texto = "Calculando sugestões..."
+            else:
+                texto = "Selecione uma lâmina com fotos." if isinstance(self.atual, int) else "A capa não tem sugestões."
+            c.create_text(10, 20, anchor="w", fill=tema.TEXTO_FRACO, text=texto)
             return
         largura = max(100, (c.winfo_width() - 18) // 2)
         lamina = self._lamina()
@@ -11939,6 +12330,8 @@ class Aplicativo:
 
     def desenhar_modelos(self):
         c = self.canvas_modelos
+        if not self._painel_na_tela("modelos"):
+            return
         c.delete("all")
         lamina = self._lamina()
         pagina = self.pagina_modelo.get() if self.produto.get("paginas_por_lamina", 1) > 1 else 0
@@ -11954,11 +12347,14 @@ class Aplicativo:
 
         fotos_pag = []
         lw, lh = lamina_mm(self.produto)
+        infos_saem = {}
+        for info_f in self._fotos_info([e["foto"] for e in saem if e.get("foto")], lamina):
+            infos_saem.setdefault(info_f["caminho"], info_f)
         for e in saem:
             if e.get("foto"):
-                infos = self._fotos_info([e["foto"]], lamina)
-                if infos:
-                    fotos_pag.append(dict(infos[0], edicao=e.get("edicao") or {}))
+                info_f = infos_saem.get(e["foto"])
+                if info_f:
+                    fotos_pag.append(dict(info_f, edicao=e.get("edicao") or {}))
                     continue
             prop = max(0.2, (e["w"] * lw) / max(1.0, e["h"] * lh))
             fotos_pag.append({"caminho": None, "proporcao": prop, "edicao": e.get("edicao") or {}})
@@ -12322,6 +12718,14 @@ class Aplicativo:
         self.registrar("Fundo da %s: %s" % (nome_alvo, Path(caminho).name))
         return True
 
+    @staticmethod
+    def _materializar_gerado(dados_g):
+        copia_dados = proj.copia(dados_g)
+        espec = copia_dados.get("gerado") or {}
+        if espec:
+            copia_dados["caminho"] = materializar_fundo_gerado_em_arquivo(espec, caminho_destino=copia_dados.get("caminho"))
+        return copia_dados
+
     def aplicar_fundo_em_selecionadas(self, caminho):
         alvos = self._indices_laminas_selecionadas()
         if not alvos:
@@ -12333,6 +12737,8 @@ class Aplicativo:
             dados_g = caminho
         elif isinstance(caminho, str) and eh_fundo_gerado(caminho) and hasattr(self, "galeria_fundos_gerados"):
             dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+        if dados_g:
+            dados_g = self._materializar_gerado(dados_g)
         for idx in alvos:
             lamina = self.projeto["laminas"][idx]
             if dados_g:
@@ -12357,6 +12763,8 @@ class Aplicativo:
             dados_g = caminho
         elif isinstance(caminho, str) and eh_fundo_gerado(caminho) and hasattr(self, "galeria_fundos_gerados"):
             dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
+        if dados_g:
+            dados_g = self._materializar_gerado(dados_g)
         for lamina in self.projeto["laminas"]:
             if dados_g:
                 lamina[ch_img] = proj.copia(dados_g)
@@ -12482,24 +12890,78 @@ class Aplicativo:
     def sortear_fundos_gerados(self):
         """Gera novas variações aleatórias de fundos (Preto+Cores e Branco+Cores) baseados nas fotos da página/lâmina."""
         self._seed_fundos_gerados = int(getattr(self, "_seed_fundos_gerados", 1)) + random.randint(7, 97)
-        self._chave_cache_gerados = None
-        self._atualizar_galeria_gerados(forcar=True)
+        self._gerar_galeria_gerados_agora()
         if getattr(self, "_lista_gerados_atuais", None):
             # Escolhe preferencialmente o primeiro (que segue o padrão detectado Preto+Cores ou Branco+Cores)
             escolhido = self._lista_gerados_atuais[0]
             self.aplicar_fundo_gerado_em(escolhido)
 
     def _atualizar_galeria_gerados(self, forcar=False):
+        """Só com a galeria visível, um pouco depois da última mudança, e calculada fora da janela."""
         if not hasattr(self, "galeria_fundos_gerados"):
             return
+        if forcar:
+            self._chave_cache_gerados = None
+        if self._painel_na_tela("gerados"):
+            self.agendar("galeria_gerados", 300, self._calcular_galeria_gerados)
+
+    def _parametros_galeria_gerados(self):
         alvo = self.fundo_alvo.get() if hasattr(self, "fundo_alvo") else "lamina"
         fotos_alvo = self._fotos_alvo_fundo_atual()
         estilo = self.estilo_gerador_fundo.get() if hasattr(self, "estilo_gerador_fundo") else "ambos"
         padrao_f = self.padrao_gerador_fundo.get() if hasattr(self, "padrao_gerador_fundo") else "ambos"
         seed_atual = int(getattr(self, "_seed_fundos_gerados", 1))
         chave = (self.atual, alvo, tuple(fotos_alvo), estilo, padrao_f, seed_atual)
-        paleta = extrair_paleta_fotos(fotos_alvo, self.info)
+        seed_base = seed_atual + (self.atual + 1 if isinstance(self.atual, int) else 0) * 19
+        return chave, alvo, fotos_alvo, estilo, padrao_f, seed_base
+
+    @staticmethod
+    def _gerar_lista_gerados(fotos_alvo, info, estilo, padrao_f, seed_base):
+        paleta = extrair_paleta_fotos(fotos_alvo, info)
+        gerados = gerar_galeria_fundos_procedurais(
+            paleta,
+            estilo=estilo,
+            seed_base=seed_base,
+            quantidade=8,
+            padrao_filtro=padrao_f,
+            materializar=False,
+        )
+        return paleta, gerados
+
+    def _calcular_galeria_gerados(self):
+        chave, alvo, fotos_alvo, estilo, padrao_f, seed_base = self._parametros_galeria_gerados()
+        if chave == getattr(self, "_chave_cache_gerados", None):
+            self.galeria_fundos_gerados._agendar()
+            self._atualizar_rotulo_temp_fundos()
+            return
+        self._chave_cache_gerados = chave
+        self._versao_gerados = getattr(self, "_versao_gerados", 0) + 1
+        versao, info = self._versao_gerados, self.info
+
+        def trabalho():
+            try:
+                paleta, gerados = self._gerar_lista_gerados(fotos_alvo, info, estilo, padrao_f, seed_base)
+            except Exception:
+                self.fila.put(("chamar", lambda: setattr(self, "_chave_cache_gerados", None)))
+                raise
+            self.fila.put(("chamar", lambda: self._receber_galeria_gerados(versao, alvo, fotos_alvo, paleta, gerados)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _gerar_galeria_gerados_agora(self):
+        chave, alvo, fotos_alvo, estilo, padrao_f, seed_base = self._parametros_galeria_gerados()
+        paleta, gerados = self._gerar_lista_gerados(fotos_alvo, self.info, estilo, padrao_f, seed_base)
+        self._chave_cache_gerados = chave
+        self._versao_gerados = getattr(self, "_versao_gerados", 0) + 1
+        self._receber_galeria_gerados(self._versao_gerados, alvo, fotos_alvo, paleta, gerados)
+
+    def _receber_galeria_gerados(self, versao, alvo, fotos_alvo, paleta, gerados):
+        if versao != getattr(self, "_versao_gerados", 0) or not hasattr(self, "galeria_fundos_gerados"):
+            return
+        paleta_mudou = paleta != getattr(self, "_paleta_fundo_atual", None)
         self._paleta_fundo_atual = paleta
+        if paleta_mudou and getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
+            self._agendar_fundos_pasta()
         pad_det = "Preto + Cores" if paleta.get("padrao_sugerido") == "preto" else "Branco + Cores"
         if hasattr(self, "rotulo_escopo_gerador"):
             txt_alvo = {
@@ -12508,18 +12970,6 @@ class Aplicativo:
                 "direita": "Pág. Dir. (%d foto%s)" % (len(fotos_alvo), "s" if len(fotos_alvo) != 1 else ""),
             }.get(alvo, "Lâmina")
             self.rotulo_escopo_gerador.configure(text="%s · Tom detectado: %s" % (txt_alvo, pad_det))
-        if not forcar and chave == getattr(self, "_chave_cache_gerados", None):
-            self.galeria_fundos_gerados._agendar()
-            self._atualizar_rotulo_temp_fundos()
-            return
-        self._chave_cache_gerados = chave
-        gerados = gerar_galeria_fundos_procedurais(
-            paleta,
-            estilo=estilo,
-            seed_base=seed_atual + (self.atual + 1 if isinstance(self.atual, int) else 0) * 19,
-            quantidade=8,
-            padrao_filtro=padrao_f,
-        )
         self._lista_gerados_atuais = gerados
         self.galeria_fundos_gerados.definir(gerados)
         self._atualizar_rotulo_temp_fundos()
@@ -12650,7 +13100,15 @@ class Aplicativo:
         if not hasattr(self, "galeria_fundos"):
             return
         pasta = self._pasta_fundos()
-        lista_bruta = fundos.listar_fundos(pasta)
+        try:
+            marca = Path(pasta).stat().st_mtime_ns if pasta else None
+        except OSError:
+            marca = None
+        if not forcar and pasta == self._fundos_pasta and marca == getattr(self, "_fundos_marca", None):
+            lista_bruta = list(self._fundos_lista)
+        else:
+            lista_bruta = fundos.listar_fundos(pasta)
+        self._fundos_marca = marca
         self._fundos_pasta = pasta
         self._fundos_lista = lista_bruta
         lista_exibir = list(lista_bruta)
@@ -12958,12 +13416,18 @@ class Aplicativo:
         self._rotulos_fundo["Opacidade"].configure(text="%d%%" % round(self.fundo_opacidade.get()))
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
         self._atualizar_galeria_gerados(forcar=False)
-        if getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
-            self.atualizar_fundos(forcar=False)
-        else:
-            self.galeria_fundos._agendar()
+        self._agendar_fundos_pasta()
         if self.editor_fundo is not None:
             self.editor_fundo.mostrar()
+
+    def _agendar_fundos_pasta(self):
+        """A galeria da pasta só é relida/reordenada quando aparece na tela."""
+        if not hasattr(self, "galeria_fundos") or not self._painel_na_tela("fundos_pasta"):
+            return
+        if getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
+            self.agendar("fundos_pasta", 300, lambda: self.atualizar_fundos(forcar=False))
+        else:
+            self.galeria_fundos._agendar()
 
     def _avisar_fundo_faltando(self):
         dono = self._dono_do_fundo()

@@ -114,7 +114,7 @@ class _Lru:
             self.itens.clear()
 
 
-_memoria_previa = _Lru(140)
+_memoria_previa = _Lru(30)
 _memoria_miniatura = _Lru(3500)
 
 

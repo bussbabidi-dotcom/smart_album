@@ -77,11 +77,31 @@ def registrar_uso_fundo(arquivo, caminho):
         pass
 
 
+_CACHE_FAVORITOS = {}
+
+
+def favoritos_fundo(arquivo):
+    """Conjunto dos fundos ★ (relido só quando o arquivo de configuração muda)."""
+    if not arquivo:
+        return frozenset()
+    try:
+        st = Path(arquivo).stat()
+        marca = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        marca = None
+    chave = str(arquivo)
+    guardado = _CACHE_FAVORITOS.get(chave)
+    if guardado is not None and guardado[0] == marca:
+        return guardado[1]
+    favs = frozenset(ler_config(arquivo).get("favoritos") or [])
+    _CACHE_FAVORITOS[chave] = (marca, favs)
+    return favs
+
+
 def eh_favorito_fundo(arquivo, caminho):
     if not arquivo or not caminho or eh_fundo_gerado(caminho):
         return False
-    ch = normalizar_caminho(caminho)
-    return ch in set(ler_config(arquivo).get("favoritos") or [])
+    return normalizar_caminho(caminho) in favoritos_fundo(arquivo)
 
 
 def alternar_favorito_fundo(arquivo, caminho):
@@ -199,18 +219,21 @@ class Galeria:
     programa (Degradês e Abstratos baseados nas cores das fotos).
     """
 
-    def __init__(self, pai, atual, ao_pressionar, ao_duplo, ao_menu, altura_canvas=150, texto_vazio=None, eh_favorito=None):
+    def __init__(self, pai, atual, ao_pressionar, ao_duplo, ao_menu, altura_canvas=150, texto_vazio=None, eh_favorito=None,
+                 favoritos=None, contagem=None):
         self.atual = atual
         self.ao_pressionar = ao_pressionar
         self.ao_duplo = ao_duplo
         self.ao_menu = ao_menu
         self.eh_favorito = eh_favorito
+        self.favoritos = favoritos
+        self.contagem = contagem
         self.texto_vazio = texto_vazio or "Escolha uma pasta com imagens de fundo (botão 'Pasta de fundos...')."
         self.caminhos = []
         self._mapa_gerados = {}
         self.quadro = ttk.Frame(pai)
-        barra = ttk.Scrollbar(self.quadro, orient="vertical")
-        barra.pack(side="right", fill="y")
+        self._barra = ttk.Scrollbar(self.quadro, orient="vertical")
+        self._barra.pack(side="right", fill="y")
         self.canvas = tk.Canvas(
             self.quadro,
             bg=tema.FUNDO,
@@ -220,21 +243,39 @@ class Galeria:
             yscrollincrement=20,
         )
         self.canvas.pack(side="left", fill="both", expand=True)
-        barra.configure(command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=lambda a, b: (barra.set(a, b), self._agendar()))
+        self._barra.configure(command=self.canvas.yview)
+        self._vista = None
+        self.pendente = True
+        self.canvas.configure(yscrollcommand=self._rolou)
         self.canvas.bind("<Configure>", lambda e: self._agendar())
-        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(-int(e.delta / 40), "units"))
+        self.canvas.bind("<Map>", lambda e: self._agendar(), add="+")
+        self.canvas.bind("<MouseWheel>", self._roda)
         self.canvas.bind("<ButtonPress-1>", self._pressionou)
         self.canvas.bind("<Double-Button-1>", self._duplo)
         self.canvas.bind("<Button-3>", self._menu)
         self._tk = OrderedDict()
         self._pendentes = OrderedDict()
         self._prontas = []
+        self._ocupado = 0
+        self._recebendo = None
         self._trava = threading.Condition()
         self._agendado = None
         self._medidas = (110, 96, 74)
         threading.Thread(target=self._trabalhar, daemon=True).start()
-        self.canvas.after(80, self._receber)
+
+    def _rolou(self, a, b):
+        self._barra.set(a, b)
+        if (a, b) != self._vista:
+            self._vista = (a, b)
+            self._agendar()
+
+    def _roda(self, evento):
+        primeiro, ultimo = self.canvas.yview()
+        if primeiro <= 0.0 and ultimo >= 1.0:
+            return None
+        if evento.delta:
+            self.canvas.yview_scroll(-int(evento.delta / 40), "units")
+        return "break"
 
     def pack(self, **opcoes):
         self.quadro.pack(**opcoes)
@@ -287,10 +328,21 @@ class Galeria:
     def desenhar(self):
         self._agendado = None
         c = self.canvas
+        try:
+            if not c.winfo_viewable():
+                self.pendente = True
+                return
+        except tk.TclError:
+            return
+        self.pendente = False
+        if self.contagem is not None:
+            self.contagem["galeria"] = self.contagem.get("galeria", 0) + 1
         c.delete("all")
         colunas, cw, ch, th = self.medidas()
         linhas = (len(self.caminhos) + colunas - 1) // colunas
-        c.configure(scrollregion=(0, 0, colunas * cw, max(1, linhas * ch)))
+        area = "0 0 %d %d" % (colunas * cw, max(1, linhas * ch))
+        if c.cget("scrollregion") != area:
+            c.configure(scrollregion=area)
         if not self.caminhos:
             c.create_text(
                 10,
@@ -306,6 +358,7 @@ class Galeria:
         ultima = min(linhas, int((y0 + c.winfo_height()) // ch) + 1)
         atual = self.atual()
         letras = max(8, (cw - 8) // 6)
+        favoritos = self.favoritos() if self.favoritos else None
         for linha in range(primeira, ultima):
             for coluna in range(colunas):
                 indice = linha * colunas + coluna
@@ -338,7 +391,11 @@ class Galeria:
                     self._pedir(caminho, cw - 10, th)
 
                 # Estrela dourada quando for fundo padrão/favorito da pasta
-                if self.eh_favorito and not eh_fundo_gerado(caminho) and self.eh_favorito(caminho):
+                if favoritos is not None:
+                    eh_fav = not eh_fundo_gerado(caminho) and normalizar_caminho(caminho) in favoritos
+                else:
+                    eh_fav = bool(self.eh_favorito and not eh_fundo_gerado(caminho) and self.eh_favorito(caminho))
+                if eh_fav:
                     c.create_rectangle(x + cw - 20, y + 5, x + cw - 6, y + 18, fill="#18181b", outline="#f59e0b")
                     c.create_text(x + cw - 13, y + 11, text="★", fill="#fbbf24", font=tema.FONTE_PEQUENA)
 
@@ -396,6 +453,14 @@ class Galeria:
             self._pendentes.pop(caminho, None)
             self._pendentes[caminho] = (largura, altura, dados_g)
             self._trava.notify()
+        self._garantir_recebimento()
+
+    def _garantir_recebimento(self):
+        if self._recebendo is None:
+            try:
+                self._recebendo = self.canvas.after(25, self._receber)
+            except tk.TclError:
+                self._recebendo = None
 
     def _trabalhar(self):
         while True:
@@ -403,6 +468,8 @@ class Galeria:
                 while not self._pendentes:
                     self._trava.wait()
                 caminho, (largura, altura, dados_g) = self._pendentes.popitem(last=True)
+                self._ocupado += 1
+            img = None
             try:
                 if dados_g and dados_g.get("gerado"):
                     img = renderizar_fundo_gerado(dados_g["gerado"], (max(32, largura), max(24, altura)), rapido=True)
@@ -410,11 +477,14 @@ class Galeria:
                     img = analise.miniatura(caminho).copy()
                     img.thumbnail((largura, altura))
             except Exception:
-                continue
+                img = None
             with self._trava:
-                self._prontas.append((caminho, largura + 10, img))
+                self._ocupado -= 1
+                if img is not None:
+                    self._prontas.append((caminho, largura + 10, img))
 
     def _receber(self):
+        self._recebendo = None
         try:
             if not self.canvas.winfo_exists():
                 return
@@ -422,16 +492,18 @@ class Galeria:
             return
         with self._trava:
             prontas, self._prontas = self._prontas, []
+            continuar = bool(self._pendentes or self._ocupado)
         for caminho, cw, img in prontas:
-            self._tk[(caminho, cw)] = ImageTk.PhotoImage(img)
+            try:
+                self._tk[(caminho, cw)] = ImageTk.PhotoImage(img)
+            except tk.TclError:
+                continue
             while len(self._tk) > 600:
                 self._tk.popitem(last=False)
         if prontas:
             self._agendar()
-        try:
-            self.canvas.after(25, self._receber)
-        except tk.TclError:
-            pass
+        if continuar:
+            self._garantir_recebimento()
 
 
 class EditorFundo(tk.Toplevel):

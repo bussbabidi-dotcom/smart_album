@@ -1,4 +1,5 @@
 Pillow>=10
+pillow-heif>=0.16
 numpy>=1.26
 opencv-python>=4.8
 tkinterdnd2>=0.4

@@ -9,6 +9,7 @@ Imagem de fundo (lâmina e capa, opcional): {"caminho", "modo", "opacidade", "de
 
 import copy
 import json
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -260,18 +261,24 @@ def remover_pasta_projeto(projeto, chave_pasta, remover_laminas_da_pasta=True):
     return len(caminhos_pasta), laminas_removidas
 
 
-def pasta_da_lamina(projeto, lamina):
+def mapa_registros(projeto):
+    """Registro de cada foto do projeto pelo caminho normalizado (montar uma vez e reaproveitar)."""
+    mapa = {}
+    for f in projeto.get("fotos", []):
+        if f.get("caminho"):
+            mapa.setdefault(normalizar_caminho(f["caminho"]), f)
+    return mapa
+
+
+def pasta_da_lamina(projeto, lamina, mapa_fotos=None):
     """
     Identifica a pasta principal e a lista de pastas presentes nos espaços de uma lâmina.
     Devolve (chave_pasta, nome_pasta, lista_pastas_distintas).
     """
     if not isinstance(lamina, dict):
         return "", "", []
-    mapa_fotos = {
-        normalizar_caminho(f["caminho"]): f
-        for f in projeto.get("fotos", [])
-        if f.get("caminho")
-    }
+    if mapa_fotos is None:
+        mapa_fotos = mapa_registros(projeto)
     pastas_vistas = []
     nomes_pastas = {}
     for esp in lamina.get("espacos", []):
@@ -297,8 +304,9 @@ def pasta_da_lamina(projeto, lamina):
 def laminas_com_pastas_misturadas(projeto):
     """Retorna os índices das lâminas que misturam fotos de 2 ou mais pastas carregadas diferentes."""
     misturadas = []
+    mapa = mapa_registros(projeto)
     for idx, lam in enumerate(projeto.get("laminas", [])):
-        _ch, _nm, distintas = pasta_da_lamina(projeto, lam)
+        _ch, _nm, distintas = pasta_da_lamina(projeto, lam, mapa)
         if len(distintas) > 1:
             misturadas.append(idx)
     return misturadas
@@ -447,10 +455,15 @@ def faltando(projeto):
     return saida
 
 
-def salvar(projeto, caminho):
+def caminho_projeto(caminho):
     caminho = Path(caminho)
     if not caminho.name.endswith(EXTENSAO):
         caminho = caminho.with_name(caminho.name.split(".")[0] + EXTENSAO)
+    return caminho
+
+
+def salvar(projeto, caminho):
+    caminho = caminho_projeto(caminho)
     gravar_json(caminho, projeto)
     return caminho
 
@@ -487,16 +500,41 @@ def restaurar_retrato(projeto, retrato):
         projeto[chave] = valor
 
 
-class Historico:
-    """Desfazer e refazer guardando o estado antes de cada mudança."""
+CHAVES_RETRATO = ("fotos", "laminas", "capa", "config")
 
-    def __init__(self, limite=60):
+
+class Historico:
+    """
+    Desfazer e refazer guardando o estado antes de cada mudança.
+    Cada retrato fica comprimido; a lista de fotos (grande e quase sempre igual) é
+    guardada uma vez e reaproveitada pelos retratos seguintes enquanto não muda.
+    """
+
+    def __init__(self, limite=30):
         self.limite = limite
         self.atras = []
         self.frente = []
+        self._fotos_atual = (None, None)
+
+    def _comprimir(self, valor):
+        return zlib.compress(json.dumps(valor, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
+
+    def _retrato(self, projeto):
+        texto_fotos = json.dumps(projeto.get("fotos"), ensure_ascii=False, separators=(",", ":"))
+        if self._fotos_atual[0] != texto_fotos:
+            self._fotos_atual = (texto_fotos, zlib.compress(texto_fotos.encode("utf-8"), 6))
+        resto = {k: projeto.get(k) for k in CHAVES_RETRATO if k != "fotos"}
+        return (self._fotos_atual[1], self._comprimir(resto))
+
+    @staticmethod
+    def _restaurar(projeto, retrato):
+        fotos_z, resto_z = retrato
+        projeto["fotos"] = json.loads(zlib.decompress(fotos_z).decode("utf-8"))
+        for chave, valor in json.loads(zlib.decompress(resto_z).decode("utf-8")).items():
+            projeto[chave] = valor
 
     def marcar(self, projeto):
-        retrato = foto_retrato(projeto)
+        retrato = self._retrato(projeto)
         if self.atras and self.atras[-1] == retrato:
             return
         self.atras.append(retrato)
@@ -507,15 +545,15 @@ class Historico:
     def desfazer(self, projeto):
         if not self.atras:
             return False
-        self.frente.append(foto_retrato(projeto))
-        restaurar_retrato(projeto, self.atras.pop())
+        self.frente.append(self._retrato(projeto))
+        self._restaurar(projeto, self.atras.pop())
         return True
 
     def refazer(self, projeto):
         if not self.frente:
             return False
-        self.atras.append(foto_retrato(projeto))
-        restaurar_retrato(projeto, self.frente.pop())
+        self.atras.append(self._retrato(projeto))
+        self._restaurar(projeto, self.frente.pop())
         return True
 
     def limpar(self):

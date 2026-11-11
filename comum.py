@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Caminhos, JSON e cópia de arquivos usados por todo o programa."""
 
+import functools
 import gc
 import json
 import os
@@ -70,6 +71,39 @@ def pasta_dados():
     pasta = base / "smart_album"
     pasta.mkdir(parents=True, exist_ok=True)
     return pasta
+
+
+LIMITE_LOG_ERROS = 1024 * 1024
+_TRAVA_LOG_ERROS = threading.Lock()
+
+
+def arquivo_log_erros():
+    return pasta_dados() / "erros.log"
+
+
+def registrar_erro(contexto, exc_info=None, eco=True):
+    """Acrescenta o erro (com o traceback) em %LOCALAPPDATA%\\smart_album\\erros.log; nunca levanta exceção."""
+    try:
+        import traceback
+        if exc_info is None:
+            exc_info = sys.exc_info()
+        detalhe = "".join(traceback.format_exception(*exc_info)) if exc_info and exc_info[0] is not None else ""
+        texto = "[%s] %s\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), contexto, detalhe.rstrip())
+        arquivo = arquivo_log_erros()
+        with _TRAVA_LOG_ERROS:
+            try:
+                if arquivo.stat().st_size > LIMITE_LOG_ERROS:
+                    dados = arquivo.read_bytes()[-(LIMITE_LOG_ERROS // 2):]
+                    corte = dados.find(b"\n[")
+                    arquivo.write_bytes(dados[corte + 1:] if corte >= 0 else dados)
+            except OSError:
+                pass
+            with open(arquivo, "a", encoding="utf-8") as saida:
+                saida.write(texto + "\n")
+        if eco and sys.stderr is not None:
+            sys.stderr.write(texto + "\n")
+    except Exception:
+        pass
 
 
 def pasta_fundos_temporarios():
@@ -157,8 +191,16 @@ def chave_natural(caminho):
     return [int(p) if p.isdigit() else p.casefold() for p in partes]
 
 
+@functools.lru_cache(maxsize=65536)
+def _normalizar_absoluto(texto):
+    return os.path.normcase(os.path.abspath(texto))
+
+
 def normalizar_caminho(caminho):
-    return os.path.normcase(os.path.abspath(str(caminho)))
+    texto = str(caminho)
+    if os.path.isabs(texto):
+        return _normalizar_absoluto(texto)
+    return os.path.normcase(os.path.abspath(texto))
 
 
 def mm_para_px(mm, dpi):
@@ -175,13 +217,22 @@ def ler_json(caminho, padrao=None):
         return padrao
 
 
+def texto_json(dados):
+    return json.dumps(dados, indent=2, ensure_ascii=False)
+
+
 def gravar_json(caminho, dados):
     """Grava num .tmp e troca de uma vez, garantindo remoção do .tmp em caso de falha."""
+    gravar_texto(caminho, texto_json(dados))
+
+
+def gravar_texto(caminho, texto):
+    """Como gravar_json, para um texto já pronto (permite serializar na janela e gravar numa thread)."""
     caminho = Path(caminho)
     caminho.parent.mkdir(parents=True, exist_ok=True)
     temp = caminho.with_name("%s.%s.tmp" % (caminho.name, threading.get_ident()))
     try:
-        temp.write_text(json.dumps(dados, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp.write_text(texto, encoding="utf-8")
         os.replace(temp, caminho)
     finally:
         try:

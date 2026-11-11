@@ -281,11 +281,23 @@ def pasta_modelos(criar=False):
     return pasta
 
 
+_CACHE_MODELOS = {}
+
+
+def invalidar_cache_modelos():
+    _CACHE_MODELOS.clear()
+
+
 def listar_modelos():
     from comum import chave_natural
     pasta = pasta_modelos(criar=False)
-    if not pasta.is_dir():
+    try:
+        marca = pasta.stat().st_mtime_ns
+    except OSError:
         return []
+    guardado = _CACHE_MODELOS.get(str(pasta))
+    if guardado is not None and guardado[0] == marca:
+        return [dict(m) for m in guardado[1]]
     modelos = []
     for arquivo in sorted(pasta.glob("*.json"), key=chave_natural):
         dados = ler_json(arquivo, None)
@@ -294,7 +306,8 @@ def listar_modelos():
             dados.setdefault("nome", arquivo.stem)
             dados.setdefault("escopo", "lamina")
             modelos.append(dados)
-    return modelos
+    _CACHE_MODELOS[str(pasta)] = (marca, modelos)
+    return [dict(m) for m in modelos]
 
 
 def carregar_modelo(id_modelo):
@@ -312,6 +325,7 @@ def gravar_modelo(modelo):
     if not modelo.get("id"):
         modelo["id"] = base if base not in existentes else "%s_%s" % (base, uuid.uuid4().hex[:6])
     gravar_json(pasta_modelos(criar=True) / (modelo["id"] + ".json"), modelo)
+    invalidar_cache_modelos()
     return modelo
 
 
@@ -319,6 +333,7 @@ def apagar_modelo(id_modelo):
     arquivo = pasta_modelos(criar=False) / (str(id_modelo) + ".json")
     if arquivo.is_file():
         arquivo.unlink()
+    invalidar_cache_modelos()
 
 
 def caminho_png(modelo):
