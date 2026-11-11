@@ -137,6 +137,61 @@ def _baixar_com_gdown(drive_id, pasta_destino):
     return [Path(a) for a in arqs if Path(a).suffix.lower() in EXTENSOES and Path(a).is_file()]
 
 
+def _tentar_drive_do_pc(drive_id, pasta_base, parar, progresso, avisar, sessao):
+    """
+    Se a pasta está no Google Drive para computador (G:), lista pelo índice dele e copia do G:
+    (bem mais rápido e sem os limites do Google). O que não der pelo G: vai pela internet.
+    Devolve drive.Relatorio ou None quando a pasta não está no Drive do PC.
+    """
+    try:
+        import drive_local
+    except Exception:
+        return None
+    indice = None
+    try:
+        indice = drive_local.abrir_indice()
+        if indice is None:
+            return None
+        listagem = drive_local.listar(indice, drive_id, parar=parar)
+    except Exception as e:
+        avisar("Google Drive: não deu para usar o Drive do PC (%s); baixando pela internet." % e)
+        return None
+    finally:
+        if indice is not None:
+            indice.fechar()
+    if listagem is None or not (listagem.fotos or listagem.sem_caminho):
+        return None
+
+    pasta = pasta_base / (drive.limpar_nome(listagem.titulo) or ("Drive_%s" % drive_id[:6]))
+    pasta.mkdir(parents=True, exist_ok=True)
+    itens = [f.item for f in listagem.fotos] + list(listagem.sem_caminho)
+    rel = drive.Relatorio(sessao=sessao)
+    rel.tarefas = drive.planejar_destinos(itens, pasta)
+    origem = {id(f.item): f for f in listagem.fotos}
+    avisar("Google Drive: %d foto(s) encontrada(s) no Drive do PC (G:), copiando..." % len(itens))
+
+    locais = [i for i, (item, _d) in enumerate(rel.tarefas) if id(item) in origem]
+    copias = drive_local.copiar_lote(
+        [(origem[id(rel.tarefas[i][0])].caminho, rel.tarefas[i][1], rel.tarefas[i][0].tamanho) for i in locais],
+        parar=parar,
+        progresso=(lambda feitos, _total: progresso(feitos, len(itens))) if progresso else None,
+    )
+    rel.resultados = [None] * len(rel.tarefas)
+    for i, resultado in zip(locais, copias):
+        rel.resultados[i] = resultado
+
+    pela_internet = [i for i, r in enumerate(rel.resultados) if not (r and r.ok) and not parar()]
+    if pela_internet:
+        avisar("Google Drive: %d foto(s) não vieram pelo Drive do PC; baixando pela internet..." % len(pela_internet))
+        web = drive.baixar_lote([rel.tarefas[i] for i in pela_internet], parar=parar, sessao=sessao, aviso=avisar)
+        for i, resultado in zip(pela_internet, web):
+            rel.resultados[i] = resultado
+    for i, resultado in enumerate(rel.resultados):
+        if resultado is None:
+            rel.resultados[i] = drive.ResultadoDownload(False, "cancelado")
+    return rel
+
+
 def preparar_e_baixar(tipo_id, drive_id, resourcekey, pasta_base, parar=None, progresso=None, aviso=None):
     """Lista (ou resolve o arquivo avulso), baixa em paralelo e devolve um drive.Relatorio. Roda fora da janela."""
     parar = parar or (lambda: False)
@@ -156,6 +211,10 @@ def preparar_e_baixar(tipo_id, drive_id, resourcekey, pasta_base, parar=None, pr
         rel.tarefas = drive.planejar_destinos([item], pasta_base / ("Drive_%s" % drive_id[:6]))
         rel.resultados = drive.baixar_lote(rel.tarefas, parar=parar, progresso=progresso, sessao=sessao, aviso=avisar)
         return rel
+
+    rel_local = _tentar_drive_do_pc(drive_id, pasta_base, parar, progresso, avisar, sessao)
+    if rel_local is not None:
+        return rel_local
 
     listagem = drive.listar(drive_id, resourcekey, parar=parar, chave=sessao.chave)
     rel = drive.Relatorio(

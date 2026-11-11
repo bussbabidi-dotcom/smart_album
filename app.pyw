@@ -3029,7 +3029,7 @@ class Aplicativo:
         self._atualizar_fundo_ui()
         self._atualizar_moldura_ui()
         self._atualizar_sombra_ui()
-        self.atualizar_fundos_gerados(manter_seed=True)
+        self._atualizar_galeria_gerados(forcar=True)
         self._atualizar_depois_da_moldura()
         self.registrar("Tema '%s' aplicado em %d lâmina(s)." % (t_cfg["nome"], qtd))
 
