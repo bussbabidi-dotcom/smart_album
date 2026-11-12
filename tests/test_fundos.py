@@ -78,6 +78,8 @@ def test_textura_desconhecida_nao_altera_a_imagem():
         ({"caminho": r"D:\fotos\Turma\Estudio\IMG_01.jpg"}, "colacao_royal"),
         ({"caminho": r"D:\fotos\Turma\Studio\IMG_01.jpg"}, "colacao_royal"),
         ({"caminho": r"D:\fotos\Turma\Colação 2\IMG_01.jpg"}, "estudio_dark_bokeh"),
+        ({"caminho": r"D:\fotos\Turma\COLAÇÃO\IMG_01.jpg"}, "estudio_dark_bokeh"),
+        ({"caminho": r"D:\x.jpg", "nome_grupo": "Colação 1"}, "estudio_dark_bokeh"),
         ({"caminho": r"D:\fotos\Turma\Jaleco\IMG_01.jpg"}, "jaleco_fine_art"),
         ({"caminho": r"D:\fotos\Turma\Externas\IMG_01.jpg"}, "externas_botanica"),
         ({"caminho": r"D:\fotos\Turma\Baile\IMG_01.jpg"}, "baile_dark_luxury"),

@@ -14,6 +14,8 @@ sys.dont_write_bytecode = True
 # Cache de análise, fundos gerados e drive.json vão para %LOCALAPPDATA%\smart_album;
 # precisa ser trocado antes de importar os módulos do programa.
 os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="smart_album_testes_")
+# Os testes nunca usam o login do Google de verdade (credencial em Documentos).
+os.environ["SMART_ALBUM_GOOGLE_CREDENCIAIS"] = str(Path(os.environ["LOCALAPPDATA"]) / "sem_credencial.json")
 
 from PIL import Image  # noqa: E402
 

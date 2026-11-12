@@ -18,6 +18,7 @@ from PIL import Image
 import drive
 
 CHAVE = "chave-teste"
+TOKEN_LOGIN = "token-login-teste"
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +106,8 @@ class DriveFalso:
         self._enviar(h, codigo, json.dumps({"error": erro}), cabecalhos=cabecalhos)
 
     def _chave_ok(self, h, q):
+        if h.headers.get("Authorization") == "Bearer " + TOKEN_LOGIN and "key" not in q:
+            return True  # login do Google (OAuth)
         if self.erro_chave == "accessNotConfigured":
             self._erro_json(h, 403, "accessNotConfigured",
                             "Google Drive API has not been used in project 123 before or it is disabled.",
@@ -123,6 +126,8 @@ class DriveFalso:
 
     def _campos(self, no):
         d = {"id": no["id"], "name": no["nome"], "mimeType": no["mime"]}
+        if no.get("pai"):
+            d["parents"] = [no["pai"]]
         if no.get("rk"):
             d["resourceKey"] = no["rk"]
         if no.get("dados") is not None:
@@ -425,6 +430,68 @@ def test_listagem_paginada_traz_todas_as_fotos(servidor):
         assert "trashed = false" in q["q"]
         assert q["supportsAllDrives"] == "true" and q["includeItemsFromAllDrives"] == "true"
         assert q["pageSize"] == "1000"
+
+
+def test_selecao_por_atalhos_vai_para_a_pasta_do_evento_pela_internet(servidor):
+    aluna = servidor.pasta("aluna000000000000", "Fulana")
+    studio = servidor.pasta("studio00000000000", "STUDIO", aluna)
+    colacao = servidor.pasta("colacao0000000000", "COLAÇÃO", aluna)
+    servidor.arquivo("fotoStudio0000000", "IMG_1.JPG", studio, jpeg())
+    servidor.arquivo("fotoColacao000000", "IMG_2.JPG", colacao, jpeg())
+    sel = servidor.pasta("selecao0000000000", "Seleções 2026", aluna)
+    a20 = servidor.pasta("album2000000000000", "Álbum 20x20", sel)
+    a24 = servidor.pasta("album2400000000000", "Álbum 24x34", sel)
+    servidor.atalho("at1000000000000000", "Atalho (1)", a20, "fotoStudio0000000", "image/jpeg")
+    servidor.atalho("at2000000000000000", "Atalho (2)", a24, "fotoStudio0000000", "image/jpeg")
+    servidor.atalho("at3000000000000000", "Atalho (3)", a24, "fotoColacao000000", "image/jpeg")
+
+    lst = drive.listar(sel, chave=CHAVE)
+    assert sorted((i.id, i.subpasta) for i in lst.itens) == [
+        ("fotoColacao000000", "Álbum 24x34/COLAÇÃO"),
+        ("fotoStudio0000000", "Álbum 20x20/STUDIO"),
+        ("fotoStudio0000000", "Álbum 24x34/STUDIO"),  # a mesma foto nos dois tamanhos vale nos dois
+    ]
+
+
+def test_login_do_google_lista_pasta_privada_e_baixa_sem_chave(servidor, tmp_path, monkeypatch):
+    monkeypatch.setattr(drive, "_autorizacao_oauth", lambda renovar=False: "Bearer " + TOKEN_LOGIN)
+    aluna = servidor.pasta("alunaPriv00000000", "Fulana")
+    colacao = servidor.pasta("colacaoPriv000000", "COLAÇÃO", aluna)
+    servidor.arquivo("fotoPriv000000000", "IMG_9.JPG", colacao, jpeg())
+    sel = servidor.pasta("selPriv0000000000", "Seleções", aluna)
+    alb = servidor.pasta("albPriv0000000000", "Álbum 20x20", sel)
+    servidor.atalho("atPriv00000000000", "Atalho (1)", alb, "fotoPriv000000000", "image/jpeg")
+
+    lst = drive.listar(sel, chave=drive.CHAVE_OAUTH)
+    assert lst.via_api and not lst.limitada
+    # pasta com um único "Álbum 20x20" dentro: ele vira a pasta principal, e a foto vai para o evento
+    assert lst.titulo == "Álbum 20x20"
+    assert [(i.id, i.subpasta) for i in lst.itens] == [("fotoPriv000000000", "COLAÇÃO")]
+    assert all("key" not in q for c, q, _h in servidor.requisicoes if c.startswith("/drive/v3"))
+
+    sessao = drive.Sessao(chave=drive.CHAVE_OAUTH)
+    res = drive.baixar_lote(drive.planejar_destinos(lst.itens, tmp_path), sessao=sessao)
+    assert res[0].ok and "/drive/v3/files/fotoPriv000000000" in res[0].url_usada
+    assert res[0].caminho.parent.name == "COLAÇÃO"
+    assert res[0].caminho.name == "IMG_9.JPG"  # nome original, não "Atalho (1)"
+
+
+def test_credencial_do_google_dentro_da_pasta_do_programa_e_ignorada(tmp_path, monkeypatch):
+    import google_login
+    dentro = google_login.PASTA_PROGRAMA / "tests" / "_credencial_teste.json"
+    dados = json.dumps({"installed": {"client_id": "x", "client_secret": "y", "auth_uri": "a", "token_uri": "t"}})
+    try:
+        dentro.write_text(dados, encoding="utf-8")
+        monkeypatch.setenv(google_login.VARIAVEL_CREDENCIAIS, str(dentro))
+        assert google_login.arquivo_credenciais() is None and not google_login.disponivel()
+    finally:
+        dentro.unlink()
+    fora = tmp_path / "credenciais_google_oauth.json"
+    fora.write_text(dados, encoding="utf-8")
+    monkeypatch.setenv(google_login.VARIAVEL_CREDENCIAIS, str(fora))
+    assert google_login.disponivel()
+    assert google_login.arquivo_token() == tmp_path / "token_google_drive.json"
+    assert drive.credencial_api() == drive.CHAVE_OAUTH
 
 
 def test_listagem_recursiva_com_atalhos_resource_key_e_nomes_repetidos(servidor, tmp_path):

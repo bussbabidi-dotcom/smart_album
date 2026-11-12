@@ -5715,6 +5715,38 @@ class Aplicativo:
                 "recolhido": False,
             }]
 
+        # Fotos ainda num grupo só, mas vindas de 2+ pastas de evento (ex.: STUDIO e COLAÇÃO do Drive):
+        # já abre com um grupo por evento (fotos por data), como o robô faz. O cenário não vira grupo:
+        # ele só escolhe onde cortar as lâminas dentro do evento. A usuária arruma o que precisar.
+        nome_unico = str(estado_grupos[0].get("nome") or "") if len(estado_grupos) == 1 else ""
+        if nome_unico and (nome_unico.startswith("Grupo ") or nome_unico.startswith("Evento ")):
+            por_pasta, ordem_pastas = {}, []
+            for f_ev in estado_grupos[0]["fotos"]:
+                ch_p = normalizar_caminho(proj.pasta_da_foto(f_ev))
+                if ch_p not in por_pasta:
+                    por_pasta[ch_p] = []
+                    ordem_pastas.append(ch_p)
+                por_pasta[ch_p].append(f_ev)
+            if len(ordem_pastas) >= 2:
+                def _data_foto(f_d):
+                    return (self.info.get(normalizar_caminho(f_d["caminho"])) or {}).get("data") or 0
+
+                sugeridos, usados_nomes = [], {}
+                for ch_p in ordem_pastas:
+                    fotos_p = sorted(por_pasta[ch_p], key=_data_foto)
+                    pasta_nome = proj.nome_pasta_da_foto(fotos_p[0])
+                    nome_ev = diagramar.evento_por_palavras(pasta_nome) or pasta_nome
+                    usados_nomes[nome_ev] = usados_nomes.get(nome_ev, 0) + 1
+                    if usados_nomes[nome_ev] > 1:
+                        nome_ev = "%s %d" % (nome_ev, usados_nomes[nome_ev])
+                    sugeridos.append({"nome": nome_ev, "fotos": fotos_p, "recolhido": False})
+                estado_grupos = sugeridos
+                self.registrar(
+                    "🗂 Grupos sugeridos pelas pastas de evento (%d): %s. Arrume o que precisar e salve; "
+                    "fechar sem salvar mantém como estava."
+                    % (len(estado_grupos), ", ".join("%s (%d)" % (g["nome"], len(g["fotos"])) for g in estado_grupos))
+                )
+
         grupo_ativo_idx = [0]
         fotos_sel_chaves = set()
         ultima_clicada_chave = [None]

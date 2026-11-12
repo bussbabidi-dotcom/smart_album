@@ -201,6 +201,90 @@ def _detector_yunet():
     return _detector
 
 
+# Foto vertical que vem DEITADA do fotógrafo, sem marcação EXIF (ex.: _MG_2079 da Luiza, nov/2026).
+# Mesma regra do robô DIAGRAMAR_AUTOMATICO, testada em ~350 fotos sem erro: só gira quando o rosto
+# "em pé" aparece com nota >= 0.92 girando 90°/270° e pelo menos 0.05 melhor que na foto como está.
+NOTA_ROSTO_GIRADO = 0.92
+VANTAGEM_GIRO = 0.05
+
+
+def _nota_rosto_em_pe(det, img):
+    bgr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+    det.setInputSize((img.width, img.height))
+    _ok, faces = det.detect(bgr)
+    melhor = 0.0
+    for f in faces if faces is not None else []:
+        # rosto "em pé": a boca fica abaixo dos olhos (pontos do YuNet)
+        olhos_x, olhos_y = (f[4] + f[6]) / 2.0, (f[5] + f[7]) / 2.0
+        boca_x, boca_y = (f[10] + f[12]) / 2.0, (f[11] + f[13]) / 2.0
+        dx, dy = boca_x - olhos_x, boca_y - olhos_y
+        if dy > 0 and dy > abs(dx) * 1.5:
+            melhor = max(melhor, float(f[14]))
+    return melhor
+
+
+def giro_para_endireitar(caminho, det=None):
+    """90 ou 270 quando a foto está deitada (rosto só fica em pé girando), senão 0."""
+    det = det or _novo_detector()
+    if det is None:
+        return 0
+    with Image.open(caminho) as raw:
+        raw.draft("RGB", (1600, 1600))
+        img = ImageOps.exif_transpose(raw).convert("RGB")
+    img.thumbnail((1280, 1280))
+    notas = {0: _nota_rosto_em_pe(det, img),
+             90: _nota_rosto_em_pe(det, img.rotate(90, expand=True)),
+             270: _nota_rosto_em_pe(det, img.rotate(270, expand=True))}
+    giro = max((90, 270), key=lambda g: notas[g])
+    if notas[giro] >= NOTA_ROSTO_GIRADO and notas[giro] - notas[0] >= VANTAGEM_GIRO:
+        return giro
+    return 0
+
+
+def _novo_detector():
+    modelo = modelo_rosto()
+    if not modelo.is_file():
+        return None
+    return cv2.FaceDetectorYN.create(str(modelo), "", (320, 320), 0.58, 0.3, 5000)
+
+
+def endireitar_fotos_deitadas(caminhos, parar=None):
+    """
+    Gira e regrava as fotos deitadas. Use SÓ em cópias (ex.: fotos baixadas do Drive), nunca no original
+    do fotógrafo. Devolve [(caminho, giro)] das que foram giradas.
+    """
+    parar = parar or (lambda: False)
+    det = _novo_detector()
+    if det is None:
+        return []
+    giradas = []
+    for caminho in caminhos:
+        if parar():
+            break
+        caminho = Path(caminho)
+        if caminho.suffix.lower() not in (".jpg", ".jpeg"):
+            continue
+        try:
+            giro = giro_para_endireitar(caminho, det)
+            if not giro:
+                continue
+            with Image.open(caminho) as raw:
+                icc, dpi = raw.info.get("icc_profile"), raw.info.get("dpi")
+                inteira = ImageOps.exif_transpose(raw).convert("RGB")
+            opcoes = {"quality": 97, "subsampling": 0}
+            if icc:
+                opcoes["icc_profile"] = icc
+            if dpi:
+                opcoes["dpi"] = dpi
+            temporario = caminho.with_name(caminho.name + ".girando")
+            inteira.rotate(giro, expand=True).save(temporario, "JPEG", **opcoes)
+            os.replace(temporario, caminho)
+            giradas.append((caminho, giro))
+        except Exception:
+            continue
+    return giradas
+
+
 def _iou_caixa(a, b):
     ax0, ay0, ax1, ay1 = a
     bx0, by0, bx1, by1 = b

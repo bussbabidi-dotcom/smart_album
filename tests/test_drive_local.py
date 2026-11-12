@@ -61,7 +61,8 @@ def test_atalhos_viram_a_foto_real_com_nome_original(tmp_path):
     lst = drive_local.listar(indice, "SEL")
     assert lst.titulo == "Seleções"
     assert sorted(f.item.nome for f in lst.fotos) == ["IMG_1.JPG", "IMG_2.JPG"]
-    assert all(f.item.subpasta == "Álbum 20x20" for f in lst.fotos)
+    # o atalho leva a foto para a pasta do evento de origem (dá o grupo e o tema)
+    assert all(f.item.subpasta == "Álbum 20x20/STUDIO" for f in lst.fotos)
     assert all(f.caminho.parent.name == "STUDIO" for f in lst.fotos)
     # foto sem caminho no G: fica para a internet; a da lixeira é ignorada
     assert [i.id for i in lst.sem_caminho] == ["NUVEM"]

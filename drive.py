@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from comum import EXTENSOES, gravar_json, ler_json, pasta_dados
@@ -117,6 +117,30 @@ def chave_api():
     return str(dados.get("chave_api") or "").strip()
 
 
+CHAVE_OAUTH = "oauth"  # no lugar da chave: usar o login do Google (google_login.py)
+
+
+def credencial_api():
+    """Login do Google quando há credencial em Documentos (vê pastas privadas); senão a chave da API."""
+    try:
+        import google_login
+        if google_login.disponivel():
+            return CHAVE_OAUTH
+    except Exception:
+        pass
+    return chave_api()
+
+
+def _autorizacao_oauth(renovar=False):
+    import google_login
+    if renovar:
+        google_login._cache.update(token=None, expira=0.0)
+    token = google_login.token_acesso(interativo=True)
+    if not token:
+        raise ErroApiDrive(401, "loginGoogle", "o login do Google não foi feito ou foi recusado")
+    return "Bearer " + token
+
+
 def gravar_chave_api(chave):
     dados = ler_json(_arquivo_config(), {}) or {}
     dados["chave_api"] = str(chave or "").strip()
@@ -155,6 +179,7 @@ class ItemDrive:
     tamanho: int = None
     md5: str = None
     subpasta: str = ""
+    de_atalho: bool = False  # veio de um atalho (seleção): a pasta de evento é a da foto real
 
 
 @dataclass
@@ -192,7 +217,8 @@ class ErroApiDrive(Exception):
         super().__init__(self.descricao)
 
     def _chave_invalida(self):
-        return self.motivo in _MOTIVOS_CHAVE_INVALIDA or (self.codigo == 400 and "api key" in self.mensagem.lower())
+        return (self.motivo in _MOTIVOS_CHAVE_INVALIDA or self.motivo == "loginGoogle"
+                or (self.codigo == 400 and "api key" in self.mensagem.lower()))
 
     @property
     def recusa_chave(self):
@@ -211,6 +237,8 @@ class ErroApiDrive(Exception):
     @property
     def descricao(self):
         m = self.motivo
+        if m == "loginGoogle":
+            return "o login do Google não foi feito ou foi recusado"
         if self._chave_invalida():
             return "chave da API inválida"
         if m in _MOTIVOS_API_DESATIVADA:
@@ -328,22 +356,31 @@ def _decodificar_html(raw_html):
 
 def _requisitar_api_v3(caminho_api, params, resourcekey=None, chave=None, parar=None, tentativas=4):
     """GET na Drive API v3. Sem chave devolve None; erros viram ErroApiDrive (com retentativa nos transitórios)."""
-    chave = chave_api() if chave is None else chave
+    chave = credencial_api() if chave is None else chave
     if not chave:
         return None
     headers = dict(_HEADERS)
     if resourcekey:
         headers["X-Goog-Drive-Resource-Keys"] = resourcekey
     q_params = dict(params)
-    q_params["key"] = chave
+    oauth = chave == CHAVE_OAUTH
+    if oauth:
+        headers["Authorization"] = _autorizacao_oauth()
+    else:
+        q_params["key"] = chave
     url = "%s/%s?%s" % (URL_API, caminho_api.lstrip("/"), urllib.parse.urlencode(q_params))
     ultimo = None
+    renovou = False
     for tentativa in range(tentativas):
         try:
             with _abrir(url, headers) as resp:
                 return json.loads(resp.read().decode("utf-8", errors="ignore"))
         except urllib.error.HTTPError as e:
             ultimo = _erro_de_http(e)
+            if oauth and e.code == 401 and not renovou:  # token venceu no meio: renova uma vez
+                renovou = True
+                headers["Authorization"] = _autorizacao_oauth(renovar=True)
+                continue
         except ValueError:
             ultimo = ErroApiDrive(0, "resposta", "resposta inválida da API do Google")
         except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
@@ -435,7 +472,7 @@ def resolver_atalho(file_id, resourcekey=None, chave=None):
 
 def obter_arquivo(file_id, resourcekey=None, chave=None):
     """Metadados de um arquivo avulso (segue atalhos). Devolve (ItemDrive, ErroApiDrive ou None)."""
-    chave = chave_api() if chave is None else chave
+    chave = credencial_api() if chave is None else chave
     erro = None
     if chave:
         try:
@@ -489,7 +526,7 @@ def _classificar_item_api(item, pasta_id, arquivos, subpastas, chave):
             if alvo_id != pasta_id:
                 subpastas.append((alvo_id, nome, alvo_rk))
         elif alvo_id and eh_imagem(nome, alvo_mime):
-            arquivos.append(ItemDrive(alvo_id, nome, alvo_rk, alvo_mime))
+            arquivos.append(ItemDrive(alvo_id, nome, alvo_rk, alvo_mime, de_atalho=True))
     elif eh_imagem(nome, mime):
         arquivos.append(_item_de_meta(item))
 
@@ -579,7 +616,7 @@ def _listar_html(pasta_id):
 
 def listar(pasta_id, resourcekey=None, parar=None, chave=None):
     """Lista recursivamente as fotos da pasta (atalhos, subpastas e drives compartilhados) numa Listagem."""
-    chave = chave_api() if chave is None else chave
+    chave = credencial_api() if chave is None else chave
     lst = Listagem()
     estado = {"usar_api": bool(chave)}
     if chave:
@@ -624,8 +661,11 @@ def listar(pasta_id, resourcekey=None, parar=None, chave=None):
                 lst.titulo = titulo_html
 
         for item in arquivos:
-            if item.id not in ids_arquivos:
-                ids_arquivos.add(item.id)
+            # Repetida só dentro da mesma pasta: a mesma foto escolhida para o 20x20 e o 24x34 vale nas duas.
+            if (item.id, rel) not in ids_arquivos:
+                ids_arquivos.add((item.id, rel))
+                if any(i.id == item.id for i in lst.itens):
+                    item = replace(item)
                 item.subpasta = rel
                 lst.itens.append(item)
 
@@ -639,7 +679,56 @@ def listar(pasta_id, resourcekey=None, parar=None, chave=None):
             visitar(sub_id, sub_rk, "%s/%s" % (rel, nome_limpo) if rel else nome_limpo, sub_nome, nivel + 1)
 
     visitar(pasta_id, resourcekey, "", lst.titulo, 0)
+    if estado["usar_api"] and not (parar and parar()):
+        _separar_atalhos_por_evento(lst.itens, chave, parar)
     return lst
+
+
+def _separar_atalhos_por_evento(itens, chave, parar=None):
+    """
+    Foto de seleção (atalho) vai para a subpasta do evento onde a foto real está (STUDIO, COLAÇÃO...),
+    como no Drive do PC. Precisa da API com acesso às fotos; se o Google não informar a pasta, fica como está.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    alvos = [i for i in itens if i.de_atalho]
+    if not alvos:
+        return
+    nomes_pasta = {}
+    trava = threading.Lock()
+
+    def pasta_de(item):
+        if parar and parar():
+            return ""
+        try:
+            meta = _requisitar_api_v3("files/%s" % item.id,
+                                      {"fields": "parents,name,size,md5Checksum", "supportsAllDrives": "true"},
+                                      resourcekey=_cabecalho_rk(item.id, item.resource_key), chave=chave, tentativas=2)
+            meta = meta or {}
+            if meta.get("name"):  # nome original da foto (IMG_1234.JPG), não o do atalho
+                item.nome = meta["name"].strip()
+            item.tamanho = item.tamanho or _inteiro(meta.get("size"))
+            item.md5 = item.md5 or meta.get("md5Checksum")
+            pai = (meta.get("parents") or [""])[0]
+            if not pai:
+                return ""
+            with trava:
+                if pai in nomes_pasta:
+                    return nomes_pasta[pai]
+            dados = _requisitar_api_v3("files/%s" % pai, {"fields": "name", "supportsAllDrives": "true"},
+                                       chave=chave, tentativas=2)
+            nome = limpar_nome((dados or {}).get("name") or "")
+            with trava:
+                nomes_pasta[pai] = nome
+            return nome
+        except Exception:
+            return ""
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        eventos = list(ex.map(pasta_de, alvos))
+    for item, evento in zip(alvos, eventos):
+        if evento:
+            item.subpasta = "%s/%s" % (item.subpasta, evento) if item.subpasta else evento
 
 
 def listar_pasta(folder_id, resourcekey=None):
@@ -680,7 +769,7 @@ class Sessao:
     """Estado comum aos downloads paralelos: chave, limite adaptativo de conexões e pausa após HTTP 429."""
 
     def __init__(self, chave=None, maximo=None):
-        self.chave = chave_api() if chave is None else chave
+        self.chave = credencial_api() if chave is None else chave
         self.maximo = max(1, int(maximo or (TRABALHADORES_COM_CHAVE if self.chave else TRABALHADORES_SEM_CHAVE)))
         self.limite = self.maximo
         self.ativos = 0
@@ -881,7 +970,10 @@ def _candidatos(item, sessao):
     rk_q = "&resourcekey=%s" % urllib.parse.quote(item.resource_key) if item.resource_key else ""
     fid = urllib.parse.quote(item.id)
     lista = []
-    if sessao.chave and not sessao.api_recusada:
+    if sessao.chave == CHAVE_OAUTH and not sessao.api_recusada:
+        lista.append({"url": "%s/files/%s?alt=media&supportsAllDrives=true" % (URL_API, fid),
+                      "api": True, "original": True, "oauth": True})
+    elif sessao.chave and not sessao.api_recusada:
         lista.append({
             "url": "%s/files/%s?alt=media&supportsAllDrives=true&key=%s" % (URL_API, fid, urllib.parse.quote(sessao.chave)),
             "api": True, "original": True,
@@ -894,6 +986,11 @@ def _candidatos(item, sessao):
 
 def _tentar_candidato(cand, item, destino, parcial, headers, sessao, parar):
     url = cand["url"]
+    if cand.get("oauth"):
+        try:
+            headers = dict(headers, Authorization=_autorizacao_oauth())
+        except ErroApiDrive as e:
+            raise _Falha(e.descricao, erro=e)
     for _passo in range(4):
         try:
             r = _baixar_url(url, headers, parcial, sessao, parar)

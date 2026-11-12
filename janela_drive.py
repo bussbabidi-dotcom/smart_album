@@ -193,9 +193,27 @@ def _tentar_drive_do_pc(drive_id, pasta_base, parar, progresso, avisar, sessao):
 
 
 def preparar_e_baixar(tipo_id, drive_id, resourcekey, pasta_base, parar=None, progresso=None, aviso=None):
-    """Lista (ou resolve o arquivo avulso), baixa em paralelo e devolve um drive.Relatorio. Roda fora da janela."""
+    """Lista (ou resolve o arquivo avulso), baixa em paralelo e devolve um drive.Relatorio. Roda fora da janela.
+    Depois endireita as fotos que vieram deitadas (só as cópias baixadas; o Drive não é tocado)."""
     parar = parar or (lambda: False)
     avisar = aviso or (lambda _texto: None)
+    rel = _baixar(tipo_id, drive_id, resourcekey, pasta_base, parar, progresso, avisar)
+    baixadas = [r.caminho for r in (rel.resultados or []) if r and r.ok and r.caminho]
+    if baixadas and not parar():
+        avisar("Google Drive: conferindo fotos deitadas...")
+        try:
+            import analise
+            giradas = analise.endireitar_fotos_deitadas(baixadas, parar=parar)
+        except Exception as e:
+            giradas = []
+            avisar("Google Drive: não deu para conferir fotos deitadas (%s)." % e)
+        if giradas:
+            avisar("Google Drive: %d foto(s) deitada(s) endireitada(s): %s"
+                   % (len(giradas), ", ".join("%s (%d°)" % (Path(c).name, g) for c, g in giradas)))
+    return rel
+
+
+def _baixar(tipo_id, drive_id, resourcekey, pasta_base, parar, progresso, avisar):
     pasta_base = Path(pasta_base)
     sessao = drive.Sessao()
 

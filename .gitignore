@@ -18,3 +18,9 @@ dist/Album/lightroom_plugin/
 *.parcial
 *.psd_tmp
 *.patch
+
+# Credenciais e logins do Google: ficam em Documentos, NUNCA no repositório
+*credenciais*.json
+*client_secret*.json
+token_google*.json
+*.json.json

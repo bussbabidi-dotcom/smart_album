@@ -120,6 +120,15 @@ class Indice:
             (stable_id,),
         )
 
+    def titulo_da_pasta_pai(self, stable_id):
+        """Nome da pasta onde o item está (ex.: 'COLAÇÃO' para a foto real de um atalho), ou ''."""
+        linha = self._um(
+            "SELECT i.local_title, i.mime_type FROM items i JOIN stable_parents p ON p.parent_stable_id = i.stable_id "
+            "WHERE p.item_stable_id = ? LIMIT 1",
+            (stable_id,),
+        )
+        return str(linha[0] or "").strip() if linha and _eh_pasta(linha[1]) else ""
+
     def alvo_do_atalho(self, stable_id):
         if not self._tem_atalhos:
             return None
@@ -196,15 +205,22 @@ def listar(indice, id_nuvem, parar=None):
         subpastas = []
         for filho in filhos:
             sid, _id, titulo, mime, _tam = filho
+            rel_foto = rel
             if mime == MIME_ATALHO:
                 filho = indice.alvo_do_atalho(sid)
                 if not filho:
                     continue
                 sid, _id, titulo, mime, _tam = filho
+                if not _eh_pasta(mime):
+                    # Seleção feita com atalhos: a foto vai para a subpasta do evento de onde veio
+                    # (STUDIO, COLAÇÃO...), e o nome da pasta dá o grupo e o tema no álbum.
+                    evento = drive.limpar_nome(indice.titulo_da_pasta_pai(sid))
+                    if evento:
+                        rel_foto = "%s/%s" % (rel, evento) if rel else evento
             if _eh_pasta(mime):
                 subpastas.append((sid, titulo))
             else:
-                _adicionar_foto(indice, lst, filho, rel, vistos_fotos)
+                _adicionar_foto(indice, lst, filho, rel_foto, vistos_fotos)
         for sid, titulo in subpastas:
             nome = drive.limpar_nome(titulo) or str(sid)
             visitar(sid, "%s/%s" % (rel, nome) if rel else nome, nivel + 1)
@@ -215,9 +231,11 @@ def listar(indice, id_nuvem, parar=None):
 
 def _adicionar_foto(indice, lst, linha, rel, vistos):
     sid, id_nuvem, titulo, mime, tamanho = linha
-    if sid in vistos or not drive.eh_imagem(titulo, mime):
+    # Repetida só dentro da mesma pasta: a mesma foto escolhida para o 20x20 e o 24x34 vale nas duas.
+    chave = (sid, rel)
+    if chave in vistos or not drive.eh_imagem(titulo, mime):
         return
-    vistos.add(sid)
+    vistos.add(chave)
     item = drive.ItemDrive(id=id_nuvem, nome=str(titulo or "").strip(), mime=mime or "",
                            tamanho=drive._inteiro(tamanho) or None, subpasta=rel)
     caminho = indice.caminho(sid)

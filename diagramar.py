@@ -2130,7 +2130,9 @@ PALAVRAS_EVENTO = (
 # Evento -> tema de composicao.CATALOGO_TEMAS (fundo, textura e molduras).
 TEMA_DO_EVENTO = {
     "Estúdio": "colacao_royal",
-    "Colação 1": "colacao_royal",
+    # Colação (cerimônia no salão, escuro com luzes): bokeh escuro — aprovado pela usuária nos álbuns
+    # da Luiza/Naiara (nov/2026). O roxo "royal" fica para o Estúdio, para os dois eventos se diferenciarem.
+    "Colação 1": "estudio_dark_bokeh",
     "Colação 2": "estudio_dark_bokeh",
     "Cerimônia do Jaleco": "jaleco_fine_art",
     "Fotos Externas": "externas_botanica",
