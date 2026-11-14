@@ -483,6 +483,7 @@ def abrir(caminho):
     for lamina in base["laminas"]:
         lamina.setdefault("espacos", [])
         lamina.setdefault("sobreposicoes", [])
+        lamina.setdefault("textos", [])
         lamina.setdefault("fundo", "#ffffff")
         for espaco in lamina["espacos"]:
             espaco.setdefault("edicao", {})

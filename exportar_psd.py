@@ -28,6 +28,7 @@ from produtos import caixa_px, lamina_mm, lamina_px
 from recorte import foto_no_espaco
 import exportar
 import photoshop
+import texto_bloco
 
 
 JSX_LAMINA = r"""
@@ -445,6 +446,25 @@ def _renderizar_camadas_lamina(lamina, prod_dpi, info, W, H, px_mm, off_x=0, off
                 "x": int(off_x + x + dx),
                 "y": int(off_y + y + dy),
                 "opacidade": max(5, min(100, int(round(float(opac_m))))),
+            })
+        except Exception:
+            continue
+
+    # 4. Camadas de texto (blocos de texto da lâmina, transparentes, por cima de tudo)
+    for idx_t, bloco in enumerate(lamina.get("textos") or [], start=1):
+        try:
+            x, y, w, h = caixa_px(bloco, (W, H))
+            img_t = texto_bloco.renderizar(bloco, (w, h), px_mm)
+            caixa_alfa = img_t.getchannel("A").getbbox()
+            if not caixa_alfa:
+                continue
+            primeira = " ".join(str(bloco.get("texto") or "").split())[:24]
+            camadas.append({
+                "nome": "Texto %02d - %s" % (idx_t, primeira),
+                "img": img_t.crop(caixa_alfa),
+                "x": int(off_x + x + caixa_alfa[0]),
+                "y": int(off_y + y + caixa_alfa[1]),
+                "opacidade": 100,
             })
         except Exception:
             continue

@@ -19,6 +19,7 @@ Regras principais (aplicadas em todas as ferramentas do programa):
 import itertools
 import math
 import uuid
+from pathlib import Path
 
 from produtos import area_pagina_mm, area_util_pagina_mm, espacos_do_modelo, lamina_mm, normalizar_mm
 
@@ -58,7 +59,10 @@ def configuracao(produto, projeto_cfg=None):
         "permitir_sangria_total": True,
         "modo_corte": "elastico",
         "corte_maximo": CORTE_MAXIMO,
-        "preencher_espacos_extras": False,
+        # Foto sobre foto (substitui o antigo "preencher_espacos_extras"): "nunca" | "sugerir" | "usar"
+        "foto_sobre_foto": "sugerir",
+        # Sem estrela na lâmina, a foto de rosto pequeno e nítido (pessoa longe) ganha o lugar de destaque
+        "destacar_rosto_pequeno": True,
         "excluir_repetidas": False,
         "auto_salvar_minutos": 5,
         "fundo": "#ffffff",
@@ -77,7 +81,15 @@ def configuracao(produto, projeto_cfg=None):
         "estilo_auto_molduras": "por_evento",  # "por_evento" | um estilo de composicao.ESTILOS_MOLDURA
         "cor_auto_molduras": "cores_do_evento",  # "cores_do_evento" | "contraste_automatico" | "branca" | "paleta"
         "espessura_auto_molduras_mm": 1.2,
+        # Regras que o arquivo do produto liga (hoje só o 30X22): rajadas e alternância horizontal/vertical
+        "excluir_rajadas": bool(produto.get("excluir_rajadas", False)),
+        "alternar_orientacao": bool(produto.get("alternar_orientacao", False)),
+        # 30X22: tema e molduras diferentes em cada álbum (menos o de externa) e a cor do canudo no fundo
+        "variar_tema_album": bool(produto.get("variar_tema_album", False)),
+        "cor_canudo_no_fundo": bool(produto.get("variar_tema_album", False)),
     }
+    if produto.get("excluir_repetidas"):
+        cfg["excluir_repetidas"] = True
     for chave, valor in (projeto_cfg or {}).items():
         if valor is not None:
             cfg[chave] = valor
@@ -1217,6 +1229,266 @@ def _layouts_preenchimento_maximo(fotos, produto, cfg):
     return saida
 
 
+# ------------------------------------------------------------------------------
+# Foto sobre foto: uma foto de BASE cobre a página até a sangria e 1 a 3 fotos menores vão por cima,
+# com moldura e sombra, SEMPRE fora das pessoas da base. Só é oferecida quando a base:
+#   (A) tem muito espaço sem pessoas (uma faixa livre de pelo menos 1/3 ao lado ou acima do grupo), ou
+#   (B) só tem rostos muito desfocados (a foto vira fundo).
+# cfg["foto_sobre_foto"]: "nunca" | "sugerir" (aparece nas sugestões, nunca é a escolha automática) | "usar".
+# Desligado no 30X22 (alternar_orientacao), que tem a regra própria de horizontal sozinha / verticais em dupla.
+# Limites calibrados em 969 rostos de colação (analise.nitidez_dos_rostos).
+# ------------------------------------------------------------------------------
+ROSTO_DESFOCADO = 8.0     # nitidez do rosto mais nítido abaixo disto: os rostos estão muito desfocados
+ROSTO_NITIDO = 40.0       # nitidez do rosto principal a partir disto: está em foco
+ROSTO_PEQUENO_H = 0.07    # rosto com menos de 7% da altura da foto: pessoa longe
+FAIXA_LIVRE_MIN = 0.40    # "muito espaço": a faixa livre tem de ser pelo menos 40% da página (com 1/3, 35% das fotos passavam)
+AREA_PESSOAS_MAX = 0.50
+MAX_SOBRE_FOTO = 3
+LADO_MINIMO_SOBRE_MM = 32.0
+MODOS_SOBRE_FOTO = ("nunca", "sugerir", "usar")
+
+
+def rostos_muito_desfocados(foto):
+    rosto = foto.get("rosto") if isinstance(foto, dict) else None
+    if not isinstance(rosto, dict) or rosto.get("nitidez") is None:
+        return False
+    return float(rosto["nitidez"]) < ROSTO_DESFOCADO
+
+
+def rosto_pequeno_nitido(foto):
+    """Pessoa longe (rosto pequeno) e em foco: a foto precisa de espaço grande para a pessoa aparecer."""
+    rosto = foto.get("rosto") if isinstance(foto, dict) else None
+    if not isinstance(rosto, dict) or rosto.get("nitidez") is None:
+        return False
+    nitidez = float(rosto.get("nitidez_maior") or rosto["nitidez"])
+    return 0.0 < float(rosto.get("h") or 0.0) < ROSTO_PEQUENO_H and nitidez >= ROSTO_NITIDO
+
+
+def _com_destaque_automatico(fotos, cfg):
+    """
+    Sem estrela marcada à mão na lâmina, a foto de rosto pequeno e nítido ganha o lugar de destaque
+    (cópia das fotos: a estrela do projeto não muda).
+    """
+    if (not cfg.get("destacar_rosto_pequeno", True) or cfg.get("alternar_orientacao") or len(fotos) < 2
+            or any(f.get("destaque") for f in fotos)):
+        return fotos
+    candidatas = [i for i, f in enumerate(fotos) if rosto_pequeno_nitido(f)]
+    if not candidatas or len(candidatas) == len(fotos):
+        return fotos
+    escolhida = min(candidatas, key=lambda i: float(fotos[i]["rosto"].get("h") or 1.0))
+    copia = [dict(f) for f in fotos]
+    copia[escolhida]["destaque"] = True
+    copia[escolhida]["destaque_auto"] = True
+    return copia
+
+
+def _janela_visivel(foto, quadro):
+    """Parte da foto (x0, y0, x1, y1 em 0..1) que aparece quando ela cobre o quadro: o mesmo corte do programa."""
+    import recorte
+    p = max(0.1, float(foto.get("proporcao") or 1.5))
+    W, H = 1000.0 * p, 1000.0
+    aspecto = quadro[2] / max(1e-6, float(quadro[3]))
+    corte = recorte.corte_do_espaco(W, H, aspecto, {}, foto.get("rosto"))
+    l, t, r, b = recorte.caixa_corte(W, H, aspecto, corte)
+    return max(0.0, l / W), max(0.0, t / H), min(1.0, r / W), min(1.0, b / H)
+
+
+def zona_livre_da_base(foto, quadro):
+    """
+    Onde dá para pôr fotos por cima de `foto` cobrindo `quadro` (mm) sem tapar ninguém.
+    Devolve (motivo, lado, zona em mm) ou None. motivo: "desfocada" (regra B) ou "espaco" (regra A).
+    Abaixo do grupo nunca é zona livre: é onde ficam os corpos.
+    """
+    rosto = foto.get("rosto") if isinstance(foto, dict) else None
+    if not isinstance(rosto, dict):
+        return None
+    qx, qy, qw, qh = quadro
+    if rostos_muito_desfocados(foto):
+        return "desfocada", "centro", (qx + qw * 0.08, qy + qh * 0.10, qw * 0.84, qh * 0.80)
+    vx0, vy0, vx1, vy1 = _janela_visivel(foto, quadro)
+    vw, vh = max(1e-6, vx1 - vx0), max(1e-6, vy1 - vy0)
+    limitar = lambda v: max(0.0, min(1.0, v))
+    px0 = limitar((float(rosto.get("x0", 0.0)) - vx0) / vw)
+    px1 = limitar((float(rosto.get("x1", 1.0)) - vx0) / vw)
+    py0 = limitar((float(rosto.get("y0", 0.0)) - vy0) / vh)
+    py1 = limitar((float(rosto.get("y1", 1.0)) - vy0) / vh)
+    if (px1 - px0) * (py1 - py0) > AREA_PESSOAS_MAX:
+        return None
+    lado, livre = max((("esq", px0), ("dir", 1.0 - px1), ("topo", py0)), key=lambda par: par[1])
+    if livre < FAIXA_LIVRE_MIN:
+        return None
+    folga = 0.03
+    if lado == "esq":
+        zona = (qx, qy, qw * (px0 - folga), qh)
+    elif lado == "dir":
+        zona = (qx + qw * (px1 + folga), qy, qw * (1.0 - px1 - folga), qh)
+    else:
+        zona = (qx, qy, qw, qh * (py0 - folga))
+    return "espaco", lado, zona
+
+
+def _intersecao(a, b):
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    if x1 - x0 <= 1.0 or y1 - y0 <= 1.0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _quadros_na_zona(proporcoes, zona, intervalo):
+    """
+    Quadros (mm) das fotos de cima dentro da zona livre, cada uma na sua proporção (sem corte):
+    em coluna quando a zona é alta, em linha quando é larga. None se alguma ficaria pequena demais.
+    """
+    zx, zy, zw, zh = zona
+    k = len(proporcoes)
+    props = [max(0.2, float(p)) for p in proporcoes]
+    if zh >= zw:  # coluna: todas com a mesma largura
+        largura = zw * 0.80
+        total = sum(largura / p for p in props) + intervalo * (k - 1)
+        if total > zh * 0.88:
+            largura *= (zh * 0.88 - intervalo * (k - 1)) / max(1e-6, total - intervalo * (k - 1))
+        alturas = [largura / p for p in props]
+        y = zy + (zh - (sum(alturas) + intervalo * (k - 1))) / 2.0
+        quadros = []
+        for alto in alturas:
+            quadros.append((zx + (zw - largura) / 2.0, y, largura, alto))
+            y += alto + intervalo
+    else:  # linha: todas com a mesma altura
+        altura = zh * 0.80
+        total = sum(altura * p for p in props) + intervalo * (k - 1)
+        if total > zw * 0.88:
+            altura *= (zw * 0.88 - intervalo * (k - 1)) / max(1e-6, total - intervalo * (k - 1))
+        larguras = [altura * p for p in props]
+        x = zx + (zw - (sum(larguras) + intervalo * (k - 1))) / 2.0
+        quadros = []
+        for largo in larguras:
+            quadros.append((x, zy + (zh - altura) / 2.0, largo, altura))
+            x += largo + intervalo
+    if any(min(q[2], q[3]) < LADO_MINIMO_SOBRE_MM for q in quadros):
+        return None
+    return quadros
+
+
+def _edicao_sobre_foto():
+    """Moldura branca fina e sombra: é o que separa a foto de cima da foto de baixo."""
+    edicao = {
+        "moldura": {"estilo": "simples", "espessura_mm": 1.6, "cor": "#ffffff"},
+        "sombra": {"ativa": True, "preset": "flutuante", "cor": "#000000", "opacidade": 55, "desfoque_mm": 3.0,
+                   "offset_x_mm": 1.4, "offset_y_mm": 1.8, "sincronizar_moldura": True},
+    }
+    # marcadas como automáticas: o motor de molduras pode trocá-las pelo estilo do evento, e a escolha à mão manda
+    _marcar_auto(edicao, "moldura")
+    _marcar_auto(edicao, "sombra")
+    return edicao
+
+
+def _garantir_acabamento_sobre_foto(lamina):
+    """Foto de cima sem moldura ou sem sombra se confunde com a de baixo: garante as duas."""
+    if not eh_layout_sobre_foto(lamina):
+        return False
+    mudou = False
+    for esp in lamina.get("espacos") or []:
+        if not esp.get("sobre_foto") or not esp.get("foto"):
+            continue
+        ed = esp.setdefault("edicao", {})
+        padrao = _edicao_sobre_foto()
+        moldura = ed.get("moldura")
+        if not (isinstance(moldura, dict) and moldura.get("estilo") and moldura.get("estilo") != "nenhuma"):
+            ed["moldura"] = padrao["moldura"]
+            _marcar_auto(ed, "moldura")
+            mudou = True
+        sombra = ed.get("sombra")
+        if not (isinstance(sombra, dict) and sombra.get("ativa", True)):
+            ed["sombra"] = padrao["sombra"]
+            _marcar_auto(ed, "sombra")
+            mudou = True
+    return mudou
+
+
+def eh_layout_sobre_foto(lamina_ou_opcao):
+    return str((lamina_ou_opcao or {}).get("tipo_layout") or "").startswith("sobre_foto")
+
+
+def _layouts_sobre_foto(fotos, produto, cfg):
+    """Opções de foto sobre foto para a lâmina (lista vazia quando nenhuma foto serve de base)."""
+    modo = str(cfg.get("foto_sobre_foto") or "nunca")
+    if modo not in ("sugerir", "usar") or cfg.get("alternar_orientacao"):
+        return []
+    n = len(fotos)
+    if n < 2 or n > 7:
+        return []
+    paginas = max(1, int(produto.get("paginas_por_lamina", 1) or 1))
+    margem = float(cfg["margem_mm"])
+    intervalo = max(0.0, float(cfg["espacamento_mm"]))
+    corte_max = _limite_corte_cfg(cfg)
+    max_pagina = _limites_pagina(cfg, produto)[1]
+    saida = []
+    for pagina in range(paginas):
+        area_base = area_pagina_mm(produto, pagina)
+        area_segura = area_util_pagina_mm(produto, pagina, margem, respeitar_seguranca=True)
+        for idx_base, base in enumerate(fotos):
+            p_base = max(0.15, float(base["proporcao"]))
+            if _corte_quadro(p_base, area_base) > corte_max * 1.10:
+                continue
+            desfocada = rostos_muito_desfocados(base)
+            if not desfocada and _risco_cortar_pessoas(base, area_base)[2] > 0.0:
+                continue
+            achado = zona_livre_da_base(base, area_base)
+            if not achado:
+                continue
+            motivo, lado, zona = achado
+            zona = _intersecao(zona, area_segura)
+            if not zona:
+                continue
+            outros = [i for i in range(n) if i != idx_base]
+            em_coluna = zona[3] >= zona[2]
+            # por cima: verticais na coluna, horizontais na linha; foto com estrela fica por último (merece espaço grande)
+            preferencia = sorted(outros, key=lambda i: (
+                bool(fotos[i].get("destaque")),
+                float(fotos[i]["proporcao"]) if em_coluna else -float(fotos[i]["proporcao"]),
+                i,
+            ))
+            for m in range(1, min(MAX_SOBRE_FOTO, len(outros)) + 1):
+                resto = [i for i in outros if i not in preferencia[:m]]
+                if (paginas > 1 and not resto) or (paginas == 1 and resto) or len(resto) > max_pagina:
+                    continue  # a outra página não pode ficar vazia; em 1 página todas vão por cima
+                cima = sorted(preferencia[:m])
+                quadros_cima = _quadros_na_zona([fotos[i]["proporcao"] for i in cima], zona, intervalo)
+                if not quadros_cima:
+                    continue
+                quadros_resto = {}
+                if resto:
+                    area_outra = area_util_pagina_mm(produto, 1 - pagina, margem, respeitar_seguranca=True)
+                    opcoes_r = _opcoes_pagina([max(0.1, float(fotos[i]["proporcao"])) for i in resto],
+                                              area_outra, intervalo, 1, corte_max)
+                    if not opcoes_r or not opcoes_r[0][1]:
+                        continue
+                    _c, quadros_r, _mod, ordem_r = opcoes_r[0]
+                    for q, rel in zip(quadros_r, ordem_r):
+                        quadros_resto[resto[rel]] = q
+                # ordem de pintura: a base primeiro, as da outra página, e por último as de cima
+                espacos = [_espaco(produto, area_base, base["caminho"])]
+                espacos += [_espaco(produto, quadros_resto[i], fotos[i]["caminho"]) for i in resto]
+                custo = _custo_lamina(list(espacos), fotos, produto, cfg)
+                for i, q in zip(cima, quadros_cima):
+                    espaco = _espaco(produto, q, fotos[i]["caminho"], _edicao_sobre_foto())
+                    espaco["sobre_foto"] = True
+                    espacos.append(espaco)
+                # "usar": a base desfocada ganha com folga; a de espaço livre só quando a grade não é melhor
+                estilo = (-0.35 if desfocada else -0.10) if modo == "usar" else 100.0
+                saida.append({
+                    "custo": custo + estilo,
+                    "custo_pronto": True,
+                    "espacos": espacos,
+                    "sobreposicoes": [],
+                    "modelo": None,
+                    "tipo_layout": "sobre_foto_%s" % ("desfocada" if desfocada else lado),
+                })
+    saida.sort(key=lambda op: op["custo"])
+    return saida[:6]
+
+
 def _geometrias_parecidas(a, b, produto):
     if len(a) != len(b):
         return False
@@ -1563,6 +1835,7 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
     n = len(fotos)
     if n == 0:
         return [{"custo": 0.0, "espacos": [], "sobreposicoes": [], "modelo": None}]
+    fotos = _com_destaque_automatico(fotos, cfg)  # rosto pequeno e nítido ganha o destaque (sem estrela à mão)
     lw, lh = lamina_mm(produto)
     margem = float(cfg["margem_mm"])
     paginas = produto["paginas_por_lamina"]
@@ -1618,8 +1891,14 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
 
     opcoes.extend(_opcoes_grade(fotos, produto, cfg, modelos_pagina, max_pagina, corte_max, maximo))
 
+    # Foto sobre foto: só existe quando alguma foto serve de base (espaço sem pessoas ou rostos desfocados)
+    sobre_foto = _layouts_sobre_foto(fotos, produto, cfg)
+    opcoes.extend(sobre_foto)
+
     proteger = cfg.get("reconhecer_rostos", True) and cfg.get("nao_cortar_pessoas", True)
     for op in opcoes:
+        if op.get("custo_pronto"):  # foto sobre foto já vem com o custo (a base é cortada de propósito)
+            continue
         ajuste = float(op.get("custo", 0.0))
         if proteger and not op.get("sobreposicoes"):
             op["espacos"], pen_pessoas = _proteger_espacos_contra_corte_pessoas(op["espacos"], fotos, produto, cfg)
@@ -1673,6 +1952,12 @@ def opcoes_lamina(fotos, produto, cfg, modelos=(), maximo=10):
                     unicas.pop(idx_sub)
                 unicas.append(op_esp)
         unicas.sort(key=lambda o: o["custo"])
+    # As sugestões sempre mostram a foto sobre foto quando ela é possível (até 3 variações, no fim da lista)
+    if maximo >= 6 and sobre_foto:
+        for op_sf in sobre_foto[:3]:
+            if not any(u is op_sf for u in unicas):
+                unicas.append(op_sf)
+        unicas.sort(key=lambda o: o["custo"])
     return unicas
 
 
@@ -1684,8 +1969,8 @@ def ajustar_espacos_lamina(lamina, mapa_proporcoes, produto, cfg):
     Se alguma página tiver fotos com corte > CORTE_MAXIMO, recalcula os espaços daquela
     página preservando as edições (giro, P&B, brilho) de cada foto.
     """
-    if not lamina or lamina.get("sobreposicoes"):
-        return False
+    if not lamina or lamina.get("sobreposicoes") or eh_layout_sobre_foto(lamina):
+        return False  # foto sobre foto tem fotos uma por cima da outra de propósito: não reorganiza
     espacos = lamina.get("espacos") or []
     com_foto = [e for e in espacos if e.get("foto")]
     if not com_foto or len(com_foto) != len(espacos):
@@ -2561,9 +2846,165 @@ def laminas_ideais(n, produto, cfg):
     """Nº de lâminas que deixa cada uma no meio da faixa mínimo-máximo (no máximo o limite do produto)."""
     if n <= 0:
         return 0
+    if cfg.get("alternar_orientacao"):
+        return laminas_alternando(n, produto)
     minimo, maximo = faixa_fotos_lamina(produto, cfg)
     ideal = int(math.ceil(n / max(1.0, (minimo + maximo) / 2.0)))
     return max(1, min(int(produto.get("laminas_max", ideal) or ideal), ideal))
+
+
+# ------------------------------------------------------------------------------
+# Alternância horizontal / vertical (ligada pelo arquivo do produto; hoje só o 30X22)
+#   - no máximo 2 fotos por lâmina, nunca uma pequena e outra grande;
+#   - horizontal sozinha, vertical sozinha ou duas verticais lado a lado;
+#   - horizontal SEMPRE sozinha; verticais em dupla (ou sozinhas quando sobra lâmina);
+#   - SEM limite de lâminas: cada horizontal + as duplas de verticais; com poucas fotos, separa
+#     duplas até chegar ao nº de lâminas do produto (laminas_max, 40 no 30X22) — o máximo de lâminas;
+#   - as lâminas alternam horizontal, vertical, horizontal... quando dá.
+# ------------------------------------------------------------------------------
+
+def _eh_vertical(foto):
+    return float(foto.get("proporcao") or 1.0) < 0.95
+
+
+def laminas_alternando(fotos, produto):
+    """
+    Lâminas da alternância. `fotos`: lista de fotos (com "proporcao") ou só o nº de fotos (estimativa).
+    Cada horizontal sozinha + verticais em dupla; com poucas fotos, até laminas_max (1 foto cada). Nunca mais que as fotos.
+    """
+    alvo = max(1, int(produto.get("laminas_max", 40) or 40))
+    if isinstance(fotos, int):
+        n = fotos
+        return min(n, max(alvo, int(math.ceil(n / 2.0)))) if n > 0 else 0
+    fotos = list(fotos)
+    n = len(fotos)
+    if n <= 0:
+        return 0
+    n_v = sum(1 for f in fotos if _eh_vertical(f))
+    return min(n, max(alvo, (n - n_v) + int(math.ceil(n_v / 2.0))))
+
+
+def _indices_espalhados(n, k):
+    """k posições de 0..n-1 espalhadas por igual (k <= n)."""
+    if n <= 0 or k <= 0:
+        return []
+    return [min(n - 1, int((i + 0.5) * n / float(k))) for i in range(min(k, n))]
+
+
+def _unidades_alternadas(bloco, s):
+    """Divide um bloco em `s` lâminas (se possível) de 1 horizontal, 1 vertical ou 2 verticais, alternando."""
+    horiz = [[f] for f in bloco if not _eh_vertical(f)]
+    vert_fotos = [f for f in bloco if _eh_vertical(f)]
+    vert = [vert_fotos[i:i + 2] for i in range(0, len(vert_fotos), 2)]
+    atual = len(horiz) + len(vert)
+    if atual < s:
+        # sobram lâminas: algumas duplas de verticais viram duas lâminas de 1 vertical
+        duplas = [i for i, u in enumerate(vert) if len(u) == 2]
+        escolher = {duplas[i] for i in _indices_espalhados(len(duplas), min(s - atual, len(duplas)))}
+        vert = [parte for i, u in enumerate(vert) for parte in ([[u[0]], [u[1]]] if i in escolher else [u])]
+    elif atual > s:
+        # faltam lâminas: junta horizontais vizinhas (do mesmo tamanho) duas a duas
+        pares = len(horiz) // 2
+        escolher = set(_indices_espalhados(pares, min(atual - s, pares)))
+        novo, i = [], 0
+        while i < len(horiz):
+            if i % 2 == 0 and i + 1 < len(horiz) and (i // 2) in escolher:
+                novo.append(horiz[i] + horiz[i + 1])
+                i += 2
+            else:
+                novo.append(horiz[i])
+                i += 1
+        horiz = novo
+
+    # Espalha uma lista na outra; no empate, sempre o mesmo tipo primeiro (o da foto mais antiga): h, v, h, v...
+    data_h = min((float(u[0].get("data") or 0) for u in horiz), default=float("inf"))
+    data_v = min((float(u[0].get("data") or 0) for u in vert), default=float("inf"))
+    vert_primeiro = data_v < data_h
+
+    def chave(lista, idx, eh_vert):
+        return ((idx + 0.5) / len(lista), 0 if eh_vert == vert_primeiro else 1)
+
+    seq = [u for _c, u in sorted(
+        [(chave(horiz, i, False), u) for i, u in enumerate(horiz)] + [(chave(vert, i, True), u) for i, u in enumerate(vert)],
+        key=lambda t: t[0],
+    )]
+    while len(seq) > s:
+        # último recurso: junta duas lâminas vizinhas de 1 foto (de preferência da mesma orientação)
+        cand = [i for i in range(len(seq) - 1) if len(seq[i]) + len(seq[i + 1]) <= 2]
+        if not cand:
+            break
+        i = min(cand, key=lambda k: (0 if _eh_vertical(seq[k][0]) == _eh_vertical(seq[k + 1][0]) else 1, k))
+        seq[i:i + 2] = [seq[i] + seq[i + 1]]
+    return seq
+
+
+def _grupos_alternando(blocos, total):
+    """Reparte `total` lâminas entre os blocos (sem misturar) e monta cada bloco alternando."""
+    tamanhos = [len(b) for b in blocos]
+    # mínimo de cada bloco: horizontais sozinhas + verticais em dupla (horizontal nunca é juntada)
+    pref = [sum(1 for f in b if not _eh_vertical(f)) + int(math.ceil(sum(1 for f in b if _eh_vertical(f)) / 2.0))
+            for b in blocos]
+    lo = list(pref)
+    total = max(sum(lo), min(sum(tamanhos), total))
+    aloc = list(pref)
+    while sum(aloc) < total:
+        livres = [i for i in range(len(blocos)) if aloc[i] < tamanhos[i]]
+        if not livres:
+            break
+        i = max(livres, key=lambda k: (tamanhos[k] / float(aloc[k]), -k))
+        aloc[i] += 1
+    while sum(aloc) > total:
+        livres = [i for i in range(len(blocos)) if aloc[i] > lo[i]]
+        if not livres:
+            break
+        i = min(livres, key=lambda k: (tamanhos[k] / float(aloc[k]), k))
+        aloc[i] -= 1
+    grupos = []
+    for bloco, s in zip(blocos, aloc):
+        grupos.extend(_unidades_alternadas(bloco, s))
+    return grupos
+
+
+# A usuária pediu todas as texturas menos a de externa; o ensaio_linho usa a mesma textura de folhas
+# (papel_botanico) da externa, então também fica de fora.
+TEMA_PROIBIDO_VARIAR = ("externas_botanica", "ensaio_linho")
+
+
+def estilo_do_album(fotos, cfg=None):
+    """
+    30X22: tema (textura do fundo) e trio de molduras sorteados para o álbum, sempre os mesmos para as
+    mesmas fotos (semente = nomes dos arquivos), e a cor do canudo/faixa do curso para tingir o fundo.
+    """
+    import hashlib
+    import random
+
+    import analise
+    from composicao import CATALOGO_TEMAS, ESTILOS_MOLDURA
+
+    cfg = cfg or {}
+    caminhos = [str(f.get("caminho")) for f in fotos if isinstance(f, dict) and f.get("caminho")]
+    nomes = sorted(Path(c).name.lower() for c in caminhos)
+    semente = int(hashlib.md5("|".join(nomes).encode("utf-8")).hexdigest()[:8], 16)
+    sorteio = random.Random(semente)
+    temas = [t["id"] for t in CATALOGO_TEMAS if t["id"] not in TEMA_PROIBIDO_VARIAR]
+    trio = sorteio.sample([e for e, _n in ESTILOS_MOLDURA], 3)
+    cor = None
+    if cfg.get("cor_canudo_no_fundo", True):
+        try:
+            cor = analise.cor_do_canudo(caminhos)
+        except Exception:
+            cor = None
+    return {
+        "tema": temas[semente % len(temas)],
+        "molduras": {"destaque": trio[0], "secundaria": trio[1], "alternativa": trio[2]},
+        "cor_canudo": cor,
+    }
+
+
+def _tamanhos_parecidos(espacos, minimo=0.7):
+    """As fotos da lâmina têm quase o mesmo tamanho (nada de uma pequena e outra grande)?"""
+    areas = [float(e.get("w") or 0) * float(e.get("h") or 0) for e in espacos if e.get("foto")]
+    return len(areas) < 2 or (max(areas) > 0 and min(areas) / max(areas) >= minimo)
 
 
 def _dividir_bloco_unico(fotos, minimo, maximo, s):
@@ -2884,6 +3325,17 @@ def planejar_distribuicao(fotos, produto, cfg):
         return plano
     avisos = plano["avisos"]
 
+    if cfg.get("alternar_orientacao"):
+        # 30X22: o máximo de lâminas com 1 ou 2 fotos, alternando horizontal e vertical (nenhuma foto sobra)
+        blocos = _blocos_duros(ordenadas, cfg)
+        total = min(len(ordenadas), max(pedidas, laminas_alternando(ordenadas, produto)))
+        grupos = _grupos_alternando(blocos, total)
+        if len(grupos) > laminas_max:
+            avisos.append("Horizontal sozinha e verticais em dupla: %d lâminas (passa das %d de referência do produto)."
+                          % (len(grupos), laminas_max))
+        plano.update(grupos=grupos, sobras=[], laminas=len(grupos), minimo=1, maximo=2, desejadas=len(grupos))
+        return plano
+
     sobras = []
     capacidade = laminas_max * maximo
     if len(ordenadas) > capacidade:
@@ -3039,14 +3491,23 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=N
     grupos, sobras = plano["grupos"], plano["sobras"]
     if avisos is not None:
         avisos.extend(plano["avisos"])
+    # 30X22: tema, molduras e cor do canudo do álbum (gravados em cada lâmina para valer nas edições depois)
+    estilo = estilo_do_album(list(fotos), cfg) if cfg.get("variar_tema_album") and grupos else None
+    if estilo and avisos is not None:
+        avisos.append("Tema do álbum: %s · molduras %s · cor do canudo %s." % (
+            estilo["tema"], "/".join(estilo["molduras"].values()), estilo["cor_canudo"] or "não encontrada"))
     laminas = []
     for indice, grupo in enumerate(grupos, start=1):
         grupo_layout = grupo
-        foto_sobreposta = None
-        if cfg.get("preencher_espacos_extras") and len(grupo) > 1:
-            grupo_layout = grupo[:-1]
-            foto_sobreposta = grupo[-1]
-        melhor = opcoes_lamina(grupo_layout, produto, cfg, modelos, maximo=1)[0]
+        if cfg.get("alternar_orientacao") and len(grupo_layout) == 2:
+            # nada de uma foto pequena e outra grande: a melhor opção com as duas do mesmo tamanho
+            opcoes = opcoes_lamina(grupo_layout, produto, cfg, modelos, maximo=12)
+            melhor = next((o for o in opcoes if _tamanhos_parecidos(o["espacos"])), opcoes[0])
+        else:
+            melhor = opcoes_lamina(grupo_layout, produto, cfg, modelos, maximo=1)[0]
+            if eh_layout_sobre_foto(melhor) and laminas and eh_layout_sobre_foto(laminas[-1]):
+                # nunca duas lâminas seguidas de foto sobre foto: o recurso é para variar, não para repetir
+                melhor = opcoes_lamina(grupo_layout, produto, dict(cfg, foto_sobre_foto="nunca"), modelos, maximo=1)[0]
         lamina = lamina_vazia(cfg)
         lamina["espacos"] = melhor["espacos"]
         lamina["sobreposicoes"] = melhor["sobreposicoes"]
@@ -3066,21 +3527,11 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=N
             lamina["nome_pasta"] = grupo[0].get("nome_pasta")
         if grupo and grupo[0].get("pasta"):
             lamina["pasta"] = grupo[0].get("pasta")
-        if foto_sobreposta:
-            lw, lh = lamina_mm(produto)
-            proporcao = max(0.2, float(foto_sobreposta.get("proporcao") or 1.0))
-            largura = lw * 0.34
-            altura = largura / proporcao
-            if altura > lh * 0.42:
-                altura = lh * 0.42
-                largura = altura * proporcao
-            lamina["espacos"].append(
-                _espaco(
-                    produto,
-                    ((lw - largura) / 2, (lh - altura) / 2, largura, altura),
-                    foto_sobreposta["caminho"],
-                )
-            )
+        if estilo:
+            lamina["tema_album"] = estilo["tema"]
+            lamina["molduras_album"] = dict(estilo["molduras"])
+            if estilo["cor_canudo"]:
+                lamina["cor_canudo"] = estilo["cor_canudo"]
         laminas.append(lamina)
         if ao_progresso:
             ao_progresso(indice, len(grupos))
@@ -3199,7 +3650,7 @@ def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0, tema
             lista_pasta = []
 
     usar_da_pasta = False
-    if lista_pasta:
+    if lista_pasta and not cfg.get("variar_tema_album"):
         if modo_origem == "pasta":
             usar_da_pasta = True
         elif modo_origem == "misturar":
@@ -3226,6 +3677,7 @@ def _escolher_ou_gerar_fundo_para_fotos(caminhos_fotos, cfg, indice_seed=0, tema
     if tema and tema in MAPA_TEMAS:
         dados_tema = gerar_fundo_de_tema(
             tema, fotos_lamina=caminhos_fotos, seed_extra=seed_base % 100000, medidas_mm=medidas_mm, paleta=paleta,
+            cor_acento=cfg.get("cor_canudo") or None,
         )
         cores_t = (dados_tema.get("gerado") or {}).get("cores") or [MAPA_TEMAS[tema].get("cor_base") or cor_base]
         return str(cores_t[0]), dados_tema, paleta
@@ -3327,6 +3779,10 @@ def _planejar_fundos(lamina, fotos_lamina, produto, cfg):
             if (cen_esq and cen_dir and cen_esq.isdisjoint(cen_dir)) or tipo_layout in ("meio_termo_esq", "meio_termo_dir"):
                 separar = True
     atual = lamina.get("tema_evento")
+    fixo = lamina.get("tema_album")  # 30X22: um tema sorteado para o álbum inteiro
+    if fixo:
+        return {"divisao": divisao, "separar": separar, "tema": fixo,
+                "tema_esquerda": fixo if separar else None, "tema_direita": fixo if separar else None}
     return {
         "divisao": divisao,
         "separar": separar,
@@ -3345,6 +3801,7 @@ def _chave_fundo(plano, cfg):
         "fotos": None if any(temas) else sorted(plano["divisao"]["todos"]),
         "origem": cfg.get("modo_auto_fundos"),
         "estilo": cfg.get("estilo_fundo_gerado"),
+        "canudo": cfg.get("cor_canudo"),
     })
 
 
@@ -3363,6 +3820,10 @@ def acabamento_lamina(lamina, fotos_lamina=None, produto=None, cfg=None, indice_
     produto = produto or {"paginas_por_lamina": 2}
     forcar = set(forcar or ())
     cfg.setdefault("_seed_auto_fundos", _semente_lamina(lamina))
+    if lamina.get("cor_canudo"):
+        cfg["cor_canudo"] = lamina["cor_canudo"]
+    if lamina.get("tema_album"):
+        cfg["variar_tema_album"] = True
     alterou = False
 
     if cfg.get("auto_fundos", True) or "fundos" in forcar:
@@ -3384,6 +3845,7 @@ def acabamento_lamina(lamina, fotos_lamina=None, produto=None, cfg=None, indice_
             lamina, fotos_lamina, produto, dict(cfg, auto_molduras=True), indice_lamina=indice_lamina,
             respeitar_manual="molduras" not in forcar,
         ))
+    alterou |= _garantir_acabamento_sobre_foto(lamina)
     return alterou
 
 
@@ -3800,7 +4262,7 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
     def _estilo(esp):
         if not por_evento:
             return estilo_cfg
-        conjunto = MOLDURAS_EVENTO.get(_tema(esp)) or MOLDURAS_SEM_EVENTO
+        conjunto = lamina.get("molduras_album") or MOLDURAS_EVENTO.get(_tema(esp)) or MOLDURAS_SEM_EVENTO
         if id(esp) in destaques:
             return conjunto["destaque"]
         return conjunto["secundaria"] if int(indice_lamina) % 2 == 0 else conjunto["alternativa"]

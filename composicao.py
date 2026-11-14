@@ -8,7 +8,9 @@ import threading
 
 from pathlib import Path
 import analise
+import texto_bloco
 import texturas_fundo
+import texturas_usuario
 from comum import cor_rgb, normalizar_caminho, pasta_fundos_temporarios
 from produtos import caixa_px
 from recorte import _marca_arquivo, foto_no_espaco
@@ -629,6 +631,7 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
         if medidas_mm and medidas_mm[0] and medidas_mm[1]:
             espec["largura_mm"] = round(float(medidas_mm[0]), 1)
             espec["altura_mm"] = round(float(medidas_mm[1]), 1)
+        texturas_usuario.escolher_para_espec(espec, idx)  # textura do usuário, ou só as cores
         galeria.append(criar_dados_fundo_gerado(espec, materializar=materializar))
     return galeria
 
@@ -769,10 +772,15 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
     # Texturas detalhadas de superfície por capítulo (cimento queimado, lona de estúdio, gesso/mármore, papel linho/botânico, poeira de ouro)
     textura_cap = str(esp.get("textura") or "").lower()
     textura_final = texturas_fundo.tem_textura(textura_cap)
+    # Textura do usuário (imagem ou PNG) ou "nenhuma" (degradê só com as cores): nada das texturas do programa
+    textura_usuario = bool(esp.get("textura_arquivo"))
+    so_cores = textura_usuario or textura_cap == "nenhuma"
     rng_np = np.random.RandomState(seed % 2147483647)
     ruido_fino = rng_np.normal(0.0, 1.0, (gh, gw, 1)).astype(np.float32)
 
-    if textura_final:
+    if so_cores:
+        canvas = canvas + ruido_fino * 1.2  # quase invisível: só evita faixas no degradê
+    elif textura_final:
         pass  # desenhada depois, já no tamanho final (texturas_fundo)
     elif textura_cap == "concreto_royal" or "colacao_royal" in str(esp.get("id") or ""):
         # Microtextura de cimento queimado + trama sutil + vinheta de estúdio com centro 2:1 limpo
@@ -833,11 +841,13 @@ def renderizar_fundo_gerado(espec, tamanho, rapido=False):
 
     arr_u8 = np.clip(np.round(canvas), 0, 255).astype(np.uint8)
     img_malha = Image.fromarray(arr_u8, mode="RGB")
-    if tipo == "abstrato" and not textura_cap:
+    if tipo == "abstrato" and (not textura_cap or so_cores):
         img_malha = img_malha.filter(ImageFilter.GaussianBlur(1.1))
     filtro_redim = Image.BILINEAR if rapido else Image.LANCZOS
     saida = img_malha.resize((W, H), filtro_redim)
-    if textura_final:
+    if textura_usuario:
+        saida = texturas_usuario.aplicar(saida, esp, padrao_cor)
+    elif textura_final and not so_cores:
         saida = texturas_fundo.aplicar_textura(
             saida, textura_cap, seed=seed, altura_mm=esp.get("altura_mm"),
             padrao_cor=padrao_cor, cores=cores_hex,
@@ -1218,7 +1228,7 @@ def colar_sobreposicoes(base, sobreposicoes):
 
 
 def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco=None, fundo_imagem=None,
-           px_por_mm=None, opcoes_pagina=None):
+           px_por_mm=None, opcoes_pagina=None, textos=None):
     """
     Imagem RGB com as fotos nos espaços (incluindo máscara de degradê de opacidade).
     ao_espaco(indice, espaco, erro) é chamado para cada espaço, com o erro quando a foto não abre.
@@ -1261,6 +1271,8 @@ def compor(tamanho, fundo, espacos, sobreposicoes, info, rapido=False, ao_espaco
             if ao_espaco:
                 ao_espaco(indice, espaco, e)
     colar_sobreposicoes(base, sobreposicoes)
+    if textos:
+        texto_bloco.colar_textos(base, textos, px_por_mm)  # blocos de texto: transparentes, por cima de tudo
     return base if fundo is None else base.convert("RGB")
 
 
@@ -1792,17 +1804,32 @@ def cores_moldura_com_contraste(cor, cor_secundaria, cor_fundo, minimo=CONTRASTE
     return ajustada, cor_secundaria or cor
 
 
-def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0, medidas_mm=None, paleta=None):
+FORCA_COR_ACENTO_ESCURO = 0.72   # quanto a cor do canudo entra nos temas escuros (0 a 1)
+FORCA_COR_ACENTO_CLARO = 0.48    # e nos claros (fine art, pérola)
+
+
+def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0, medidas_mm=None, paleta=None,
+                        cor_acento=None):
     """
     Gera o fundo `.png` editável na pasta temporária para o tema escolhido,
     combinando a atmosfera do tema com um toque das cores das fotos da lâmina quando disponível.
     `medidas_mm` = (largura, altura) da área coberta, para a escala da textura.
+    `cor_acento` (ex.: cor do canudo do curso) tinge o tema com mais força que a cor das fotos.
     """
     tema_cfg = MAPA_TEMAS.get(id_tema) or CATALOGO_TEMAS[0]
     espec = dict(tema_cfg["fundo_espec"])
     espec["tipo"] = espec.get("tipo") or espec.get("categoria") or "degrade"
     cores = list(espec.get("cores") or ["#121318", "#1e222d", "#282c3a"])
-    if fotos_lamina or paleta:
+    if cor_acento and len(cores) >= 3:
+        # A usuária pediu a cor do curso bem aparente (13/11/2026): tinge base, meio e brilhos do tema.
+        escuro = espec.get("padrao_cor") == "preto"
+        forca = FORCA_COR_ACENTO_ESCURO if escuro else FORCA_COR_ACENTO_CLARO
+        cores[0] = _misturar_rgb_hex(cor_rgb(cores[0]), cor_rgb(cor_acento), forca * 0.45)
+        cores[1] = _misturar_rgb_hex(cor_rgb(cores[1]), cor_rgb(cor_acento), forca)
+        cores[2] = _misturar_rgb_hex(cor_rgb(cores[2]), cor_rgb(cor_acento), forca * 0.75)
+        if len(cores) >= 4:  # brilhos/luzes do tema puxam para a cor do curso
+            cores[3] = _misturar_rgb_hex(cor_rgb(cores[3]), cor_rgb(cor_acento), min(0.9, forca + 0.15))
+    elif fotos_lamina or paleta:
         try:
             pal = paleta or extrair_paleta_fotos(fotos_lamina, info=info)
             acento_foto = (pal.get("cores_destaque_fotos") or [None])[0]
@@ -1820,6 +1847,7 @@ def gerar_fundo_de_tema(id_tema, fotos_lamina=None, info=None, seed_extra=0, med
     if medidas_mm and medidas_mm[0] and medidas_mm[1]:
         espec["largura_mm"] = round(float(medidas_mm[0]), 1)
         espec["altura_mm"] = round(float(medidas_mm[1]), 1)
+    texturas_usuario.escolher_para_espec(espec)  # o tema dá as cores; a textura é a do usuário (ou nenhuma)
     return criar_dados_fundo_gerado(espec, materializar=True)
 
 

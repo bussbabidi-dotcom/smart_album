@@ -8,6 +8,7 @@ from PIL import Image, ImageFilter
 import composicao
 import diagramar
 import texturas_fundo
+import texturas_usuario
 from comum import limpar_fundos_temporarios
 from produtos import carregar_produto
 
@@ -128,7 +129,28 @@ def _cfg(produto):
     return diagramar.configuracao(produto, {"modo_auto_fundos": "gerados", "escopo_auto_fundos": "lamina", "_seed_auto_fundos": 99})
 
 
-def test_fundo_de_evento_usa_o_tema_e_grava_tema_evento(tmp_path):
+@pytest.fixture
+def texturas_antigas():
+    """Modo "Texturas antigas do programa": as texturas desenhadas pelo programa (o padrão hoje são as do usuário)."""
+    texturas_usuario.recarregar()
+    texturas_usuario.definir_preferencia(modo="programa")
+    yield
+    texturas_usuario.definir_preferencia(modo="minhas")
+    texturas_usuario.recarregar()
+
+
+def test_sem_texturas_do_usuario_o_fundo_e_so_degrade_com_as_cores(tmp_path):
+    texturas_usuario.recarregar()
+    texturas_usuario.definir_preferencia(modo="minhas", pasta=str(tmp_path / "pasta_vazia"))
+    produto = carregar_produto("20X20")
+    lamina = _lamina_com_fotos(tmp_path / "Baile", [(200, 40, 40), (180, 60, 30)])
+    assert diagramar.aplicar_fundos_automaticos(lamina, None, produto, _cfg(produto))
+    receita = lamina["fundo_imagem"]["gerado"]
+    assert lamina["tema_evento"] == "baile_dark_luxury"  # o tema continua dando as cores
+    assert receita["textura"] == "nenhuma" and "textura_arquivo" not in receita
+
+
+def test_fundo_de_evento_usa_o_tema_e_grava_tema_evento(tmp_path, texturas_antigas):
     produto = carregar_produto("20X20")
     lamina = _lamina_com_fotos(tmp_path / "Baile", [(200, 40, 40), (180, 60, 30)])
     assert diagramar.aplicar_fundos_automaticos(lamina, None, produto, _cfg(produto))
@@ -141,7 +163,7 @@ def test_fundo_de_evento_usa_o_tema_e_grava_tema_evento(tmp_path):
 
 @pytest.mark.parametrize("cores", [[(30, 90, 200), (20, 120, 190)], [(220, 200, 170), (230, 210, 190)]],
                          ids=["fotos_escuras", "fotos_claras"])
-def test_fundo_sem_evento_tem_cor_forte_e_textura(tmp_path, cores):
+def test_fundo_sem_evento_tem_cor_forte_e_textura(tmp_path, cores, texturas_antigas):
     produto = carregar_produto("20X20")
     lamina = _lamina_com_fotos(tmp_path / "Diversas", cores)
     assert diagramar.aplicar_fundos_automaticos(lamina, None, produto, _cfg(produto))

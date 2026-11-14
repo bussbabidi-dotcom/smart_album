@@ -54,7 +54,10 @@ from comum import (
 import fundos
 import janela_drive
 import janela_exportar
+import janela_texto
 import janela_tratamento
+import texto_bloco
+import texturas_usuario
 from composicao import (
     CATALOGO_TEMAS, ESTILOS_MOLDURA, MAPA_TEMAS, MODOS_FUNDO,
     NOMES_ESTILOS_MOLDURA, PRESETS_SOMBRA_PROJETADA, aplicar_moldura,
@@ -114,6 +117,7 @@ DEFINICOES_ATALHOS = (
     ("proporcao_original", "Proporção original", "O"),
     ("igualar_tamanhos", "Igualar tamanhos", "I"),
     ("adicionar_espaco", "Novo espaço", "N"),
+    ("adicionar_texto", "Novo bloco de texto", "Shift+T"),
     ("duplicar_espaco", "Duplicar espaço", "Ctrl+D"),
     ("ordem_frente", "Trazer para frente", "U"),
     ("ordem_tras", "Mandar para trás", "J"),
@@ -397,6 +401,8 @@ class Aplicativo:
         self._tl_passo_v = 100
         self._tl_dim = None
         self.molde_sel = None
+        self.texto_sel = None  # (índice da lâmina, índice do bloco de texto) quando um bloco de texto está selecionado
+        self.janela_texto = None
         self._remendo = None
         self._previa_agendada = None
         self._previa_ultima = 0.0
@@ -717,6 +723,7 @@ class Aplicativo:
         ).pack(side="left", padx=2)
         for txt, cmd, dica in (
             ("＋", self.adicionar_espaco, "Novo espaço (N)"),
+            ("T", self.adicionar_texto, "Novo bloco de texto: transparente, com as fontes do PC (Shift+T)"),
             ("❐", self.duplicar_espaco, "Duplicar espaço (Ctrl+D)"),
             ("🗑", self._tecla_apagar, "Apagar espaço / foto (Delete)"),
         ):
@@ -999,6 +1006,8 @@ class Aplicativo:
                     "Preencher página 100% até a sangria", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "＋", self.adicionar_espaco,
                     "Novo espaço na página", estilo_ic, width=2).pack(fill="x", pady=esp)
+        self._botao(barra, "T", self.adicionar_texto,
+                    "Novo bloco de texto (transparente, fontes do PC)", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "❐", self.duplicar_espaco,
                     "Duplicar espaço selecionado", estilo_ic, width=2).pack(fill="x", pady=esp)
         self._botao(barra, "↑", lambda: self.ordem_espaco(True),
@@ -1806,6 +1815,9 @@ class Aplicativo:
         self._botao(barra_ic, "＋", self.adicionar_espaco,
                     "Adicionar novo espaço de foto na lâmina",
                     "Icone.TButton", width=3).pack(side="left", padx=1)
+        self._botao(barra_ic, "T", self.adicionar_texto,
+                    "Adicionar bloco de texto na lâmina (transparente, usa as fontes do PC) · Shift+T",
+                    "Icone.TButton", width=3).pack(side="left", padx=1)
         self._botao(barra_ic, "❐", self.duplicar_espaco,
                     "Duplicar o espaço selecionado",
                     "Icone.TButton", width=3).pack(side="left", padx=1)
@@ -2197,6 +2209,35 @@ class Aplicativo:
         combo_est_ger.bind("<<ComboboxSelected>>", _mudou_estilo_gerador)
         combo_pad_ger.bind("<<ComboboxSelected>>", _mudou_estilo_gerador)
 
+        # --- Textura dos fundos gerados: do usuário (imagem/PNG) ou só as cores do programa ---
+        linha_tex = ttk.Frame(gerador)
+        linha_tex.pack(fill="x", pady=(0, 3))
+        ttk.Label(linha_tex, text="Textura:").pack(side="left")
+        self.combo_textura = ttk.Combobox(linha_tex, state="readonly", width=26)
+        self.combo_textura.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self.combo_textura.bind("<<ComboboxSelected>>", self._combo_textura_mudou)
+        tema.dica(
+            self.combo_textura,
+            "De onde vem a textura dos fundos gerados (as cores continuam vindo das fotos, do tema e do canudo):\n"
+            "· Minhas texturas: sorteia entre as texturas reconhecidas na pasta de fundos e as que você carregou\n"
+            "· Uma textura: sempre a que você escolheu (clique numa textura da pasta, ou carregue uma imagem)\n"
+            "· Só degradê: nenhuma textura, só as cores do programa\n"
+            "· Texturas antigas do programa: as desenhadas pelo programa (como era antes)",
+        )
+        linha_tex2 = ttk.Frame(gerador)
+        linha_tex2.pack(fill="x", pady=(0, 3))
+        self._botao(
+            linha_tex2, "Imagem → textura...", lambda: self.carregar_textura(False),
+            "Escolhe uma imagem e extrai a textura dela (o desenho, sem a cor nem a luz geral) para usar nos fundos",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._botao(
+            linha_tex2, "PNG como está...", lambda: self.carregar_textura(True),
+            "Usa um PNG sem extrair nada: com transparência é colado por cima das cores; sem transparência o desenho dele vira o relevo",
+            "Compacto.TButton",
+        ).pack(side="left", fill="x", expand=True, padx=(2, 0))
+        self._atualizar_combo_textura()
+
         linha_g2 = ttk.Frame(gerador)
         linha_g2.pack(fill="x", pady=(0, 3))
         self._botao(
@@ -2247,7 +2288,7 @@ class Aplicativo:
         self.galeria_fundos_gerados.canvas.configure(height=118)
         self.galeria_fundos_gerados.pack(side="top", fill="x")
 
-        pasta = ttk.LabelFrame(quadro, text="Pasta de fundos (Sugestões & Padrões)", padding=6)
+        pasta = ttk.LabelFrame(quadro, text="Texturas da pasta de fundos", padding=6)
         pasta.pack(side="top", fill="both", expand=True, pady=(2, 0))
         linha = ttk.Frame(pasta)
         linha.pack(side="top", fill="x")
@@ -2269,10 +2310,20 @@ class Aplicativo:
             variable=self.filtro_sugeridos_pasta,
             command=lambda: self.atualizar_fundos(forcar=True),
         ).pack(side="left")
+        linha_so_tex = ttk.Frame(pasta)
+        linha_so_tex.pack(side="top", fill="x")
+        self.so_texturas_pasta = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            linha_so_tex,
+            text="Mostrar só as texturas (esconde degradês lisos e fotos de cenário)",
+            variable=self.so_texturas_pasta,
+            command=lambda: self.atualizar_fundos(forcar=True),
+        ).pack(side="left")
 
         self.rotulo_pasta_fundos = ttk.Label(pasta, text="", style="Fraco.TLabel", wraplength=300, justify="left")
         self.rotulo_pasta_fundos.pack(side="top", anchor="w", pady=(2, 2))
-        ttk.Label(pasta, text="Clique aplica · botão direito marca ★ Fundo Padrão · arraste para uma lâmina",
+        ttk.Label(pasta, text="Clique numa textura: ela passa a ser a textura dos fundos · botão direito: usar a imagem "
+                              "inteira como fundo, marcar se é textura ou não, ★ padrão",
                   style="Fraco.TLabel", wraplength=300, justify="left").pack(side="bottom", anchor="w", pady=(4, 0))
         self.galeria_fundos = fundos.Galeria(
             pasta,
@@ -3453,6 +3504,7 @@ class Aplicativo:
             "proporcao_original": lambda: self.alinhar_espaco("proporcao_foto"),
             "igualar_tamanhos": lambda: self.alinhar_espaco("igualar"),
             "adicionar_espaco": self.adicionar_espaco,
+            "adicionar_texto": self.adicionar_texto,
             "duplicar_espaco": self.duplicar_espaco,
             "ordem_frente": lambda: self.ordem_espaco(True),
             "ordem_tras": lambda: self.ordem_espaco(False),
@@ -5001,8 +5053,19 @@ class Aplicativo:
         sangria_total_var = tk.BooleanVar(value=bool(cfg.get("permitir_sangria_total", True)))
         rostos_var = tk.BooleanVar(value=bool(cfg.get("reconhecer_rostos", True)))
         nao_cortar_pessoas_var = tk.BooleanVar(value=bool(cfg.get("nao_cortar_pessoas", True)))
-        preencher_extras_var = tk.BooleanVar(value=bool(cfg.get("preencher_espacos_extras", False)))
+        # Foto sobre foto (no lugar do antigo "preencher espaços extras") e destaque do rosto pequeno e nítido
+        rotulos_sobre_foto = {"nunca": "Nunca", "sugerir": "Só sugerir (nas sugestões de layout)",
+                              "usar": "Usar na diagramação quando a regra valer"}
+        modo_sobre_inicial = str(cfg.get("foto_sobre_foto") or "sugerir")
+        sobre_foto_var = tk.StringVar(value=rotulos_sobre_foto.get(modo_sobre_inicial, rotulos_sobre_foto["sugerir"]))
+        rosto_pequeno_var = tk.BooleanVar(value=bool(cfg.get("destacar_rosto_pequeno", True)))
         repetidas_var = tk.BooleanVar(value=bool(cfg.get("excluir_repetidas", False)))
+        rajadas_var = tk.BooleanVar(value=bool(cfg.get("excluir_rajadas", False)))
+        alternar_var = tk.BooleanVar(value=bool(cfg.get("alternar_orientacao", False)))
+        variar_tema_var = tk.BooleanVar(value=bool(cfg.get("variar_tema_album", False)))
+        # Regras só do 30X22 (o arquivo do produto liga): rajadas e alternância horizontal/vertical
+        regras_30x22 = bool(self.produto.get("alternar_orientacao") or self.produto.get("excluir_rajadas")
+                            or self.produto.get("variar_tema_album"))
 
         linha_modo_corte = ttk.Frame(quadro_geom)
         linha_modo_corte.pack(fill="x", pady=2)
@@ -5053,11 +5116,44 @@ class Aplicativo:
             variable=nao_cortar_pessoas_var,
             command=lambda: rostos_var.set(bool(nao_cortar_pessoas_var.get())),
         ).pack(anchor="w", pady=2)
+        linha_sobre_foto = ttk.Frame(quadro_geom)
+        linha_sobre_foto.pack(anchor="w", pady=2, fill="x")
+        ttk.Label(linha_sobre_foto, text="Foto sobre foto:").pack(side="left")
+        combo_sobre_foto = ttk.Combobox(linha_sobre_foto, textvariable=sobre_foto_var, state="readonly", width=42,
+                                        values=list(rotulos_sobre_foto.values()))
+        combo_sobre_foto.pack(side="left", padx=(6, 0))
+        tema.dica(combo_sobre_foto,
+                  "Uma foto cobre a página e 1 a 3 fotos menores vão por cima, com moldura e sombra,\n"
+                  "sempre fora das pessoas da foto de baixo. Só aparece quando a foto de baixo tem\n"
+                  "muito espaço sem pessoas ou só rostos muito desfocados. Não vale para o 30X22.")
+        ttk.Checkbutton(
+            quadro_geom,
+            text="Dar o lugar de destaque à foto com rosto pequeno e nítido (pessoa longe), se não houver estrela",
+            variable=rosto_pequeno_var,
+        ).pack(anchor="w", pady=2)
         ttk.Checkbutton(
             quadro_geom,
             text="Excluir fotos visualmente repetidas (mantém apenas uma cópia)",
             variable=repetidas_var,
         ).pack(anchor="w", pady=2)
+        if regras_30x22:
+            ttk.Checkbutton(
+                quadro_geom,
+                text="   ↳ Também fotos de rajada (mesma câmera, até 3 s e quase iguais)",
+                variable=rajadas_var,
+            ).pack(anchor="w", pady=2)
+            ttk.Checkbutton(
+                quadro_geom,
+                text="Alternar horizontal / vertical: no máx. 2 fotos do mesmo tamanho por lâmina "
+                     "(horizontal sozinha, vertical sozinha ou em dupla) e o máximo de lâminas",
+                variable=alternar_var,
+            ).pack(anchor="w", pady=2)
+            ttk.Checkbutton(
+                quadro_geom,
+                text="Tema e molduras diferentes em cada álbum (todas as texturas menos externa) "
+                     "e a cor do canudo do curso no fundo",
+                variable=variar_tema_var,
+            ).pack(anchor="w", pady=2)
 
         # ==================================================================
         # ABA 2: GRUPOS E ORDEM (Pastas, Grupos Numerados, Cenário e Pessoas)
@@ -5436,8 +5532,13 @@ class Aplicativo:
                 "permitir_sangria_total": bool(sangria_total_var.get()),
                 "reconhecer_rostos": bool(rostos_var.get() or nao_cortar_pessoas_var.get()),
                 "nao_cortar_pessoas": bool(nao_cortar_pessoas_var.get()),
-                "preencher_espacos_extras": bool(preencher_extras_var.get()),
+                "foto_sobre_foto": next((k for k, v in rotulos_sobre_foto.items() if v == sobre_foto_var.get()), "sugerir"),
+                "destacar_rosto_pequeno": bool(rosto_pequeno_var.get()),
                 "excluir_repetidas": bool(repetidas_var.get()),
+                "excluir_rajadas": bool(rajadas_var.get()) and bool(repetidas_var.get()),
+                "alternar_orientacao": bool(alternar_var.get()),
+                "variar_tema_album": bool(variar_tema_var.get()),
+                "cor_canudo_no_fundo": bool(variar_tema_var.get()),
                 "auto_fundos": bool(auto_fundos_var.get()),
                 "modo_auto_fundos": str(modo_auto_fundos_var.get() or "misturar"),
                 "estilo_fundo_gerado": str(estilo_fundo_gerado_var.get() or "ambos"),
@@ -5509,8 +5610,12 @@ class Aplicativo:
             transpasse_var,
             rostos_var,
             nao_cortar_pessoas_var,
-            preencher_extras_var,
+            sobre_foto_var,
+            rosto_pequeno_var,
             repetidas_var,
+            rajadas_var,
+            alternar_var,
+            variar_tema_var,
             auto_fundos_var,
             auto_degrade_var,
             auto_molduras_var,
@@ -6987,31 +7092,14 @@ class Aplicativo:
         janela.grab_set()
         janela.focus_set()
 
-    def _sem_repetidas(self, fotos, parar, ao_progresso=None):
-        """Mantém a primeira imagem de cada grupo com hash visual praticamente igual."""
-        hashes = []
-        saida, removidas = [], []
-        for indice, foto in enumerate(fotos, start=1):
-            if parar():
-                return None, []
-            try:
-                valor = analise.hash_perceptual(foto["caminho"])
-            except (OSError, ValueError):
-                valor = None
-            repetida = False
-            if valor is not None:
-                for anterior, caminho in hashes:
-                    if (valor ^ anterior).bit_count() <= 3:
-                        repetida = True
-                        removidas.append(foto["caminho"])
-                        break
-                if not repetida:
-                    hashes.append((valor, foto["caminho"]))
-            if not repetida:
-                saida.append(foto)
-            if ao_progresso:
-                ao_progresso(indice, len(fotos))
-        return saida, removidas
+    def _sem_repetidas(self, fotos, parar, ao_progresso=None, rajadas=False):
+        """Mantém a primeira imagem de cada grupo com hash visual praticamente igual (e, se pedido, de cada rajada)."""
+        mantidas, removidas = analise.separar_repetidas(
+            [f["caminho"] for f in fotos], rajadas=rajadas, parar=parar, ao_progresso=ao_progresso)
+        if mantidas is None:
+            return None, []
+        ficam = set(mantidas)
+        return [f for f in fotos if f["caminho"] in ficam], [r[0] for r in removidas]
 
     def diagramar_tudo(self, confirmar=True, configuracao=None, excluir_repetidas=False, escopo="tudo", pasta_alvo=None):
         somente_livres = escopo == "nao_usadas"
@@ -7047,7 +7135,8 @@ class Aplicativo:
             removidas = []
             fotos_usadas = fotos
             if excluir_repetidas:
-                fotos_usadas, removidas = self._sem_repetidas(fotos, t.parar, t.progresso)
+                fotos_usadas, removidas = self._sem_repetidas(
+                    fotos, t.parar, t.progresso, rajadas=bool(cfg.get("excluir_rajadas")))
                 if fotos_usadas is None:
                     return None
             resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, ao_progresso=t.progresso, avisos=avisos)
@@ -7273,6 +7362,14 @@ class Aplicativo:
                 ed_f = dict(reg_f.get("edicao_padrao") or {})
                 ed_f.update(antigas.get(ch_f, {}))
                 ed_f.pop("corte", None)
+                if e.get("sobre_foto"):
+                    # foto por cima de outra: precisa de moldura e sombra (a escolhida à mão continua valendo)
+                    ed_op = e.get("edicao") or {}
+                    for chave in ("moldura", "sombra"):
+                        if ed_op.get(chave) and (not ed_f.get(chave) or diagramar.eh_automatico(ed_f, chave)):
+                            ed_f[chave] = copy.deepcopy(ed_op[chave])
+                            ed_f["_auto_" + chave] = ed_op.get("_auto_" + chave)
+                    ed_f.pop("degrade", None)
                 novos_espacos.append(dict(e, edicao=ed_f))
             else:
                 novos_espacos.append(dict(e, edicao={}))
@@ -7297,7 +7394,7 @@ class Aplicativo:
             fotos = [e["foto"] for e in lamina["espacos"] if e.get("foto")]
         if marcar:
             self.marcar_historico()
-        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), maximo=12)
+        opcoes = diagramar.opcoes_lamina(self._fotos_info(fotos, lamina), self.produto, self._cfg(), maximo=18)
         if not opcoes:
             return
         atual_geom = tuple((round(e["x"], 3), round(e["y"], 3), round(e["w"], 3), round(e["h"], 3))
@@ -8144,6 +8241,7 @@ class Aplicativo:
         self._definir_selecao_espacos(set())
         self._ancora_espaco = None
         self.molde_sel = None
+        self.texto_sel = None
         self._remendo = None
         self.pan = [0, 0]
         self.desenhar_lamina()
@@ -8939,6 +9037,15 @@ class Aplicativo:
                 x1, y1 = x0 + s["w"] * dw, y0 + s["h"] * dh
                 if ("molde", i) == alvo:
                     c.create_rectangle(x0, y0, x1, y1, outline=tema.ALERTA, width=2, tags="espaco")
+            # blocos de texto são transparentes: o contorno tracejado mostra onde estão
+            for i, t in enumerate(lamina.get("textos") or []):
+                if ("texto", i) == ocultar:
+                    continue
+                x0, y0 = ox + t["x"] * dw, oy + t["y"] * dh
+                x1, y1 = x0 + t["w"] * dw, y0 + t["h"] * dh
+                escolhido = ("texto", i) == alvo
+                c.create_rectangle(x0, y0, x1, y1, outline=tema.DESTAQUE if escolhido else tema.BORDA_CLARA,
+                                   width=2 if escolhido else 1, dash=(5, 3), tags="espaco")
         for i, e in enumerate(lamina["espacos"]):
             if ("espaco", i) == ocultar or (isinstance(ocultar, tuple) and ocultar[0] == "grupo" and i in ocultar[1]):
                 continue
@@ -8958,13 +9065,14 @@ class Aplicativo:
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
                                    outline="#00e5ff", width=1, tags="espaco")
         elif editando and alvo and alvo != ocultar:
-            cor = tema.DESTAQUE if alvo[0] == "espaco" else tema.ALERTA
+            cor = tema.DESTAQUE if alvo[0] in ("espaco", "texto") else tema.ALERTA
             for hx, hy in self._alcas(self._item_layout(alvo, lamina)).values():
                 c.create_rectangle(hx - ALCA, hy - ALCA, hx + ALCA, hy + ALCA, fill="#ffffff",
                                    outline=cor, width=1, tags="espaco")
         assinatura_paineis = (
             id(self.projeto), self.atual, self._assinatura(self.atual) if isinstance(self.atual, int) else None,
-            self.espaco_sel, tuple(sorted(selecionados)), self.molde_sel, editando, hash(frozenset(self.fotos_sel)),
+            self.espaco_sel, tuple(sorted(selecionados)), self.molde_sel, self.texto_sel, editando,
+            hash(frozenset(self.fotos_sel)),
         )
         if assinatura_paineis != getattr(self, "_assinatura_paineis", None):
             self._assinatura_paineis = assinatura_paineis
@@ -9330,7 +9438,8 @@ class Aplicativo:
             if alca:
                 definir_cursor(self.canvas, CURSOR_ALCA[alca])
                 return
-            sobre = self._espaco_em(evento.x, evento.y) is not None or self._molde_em(evento.x, evento.y) is not None
+            sobre = (self._espaco_em(evento.x, evento.y) is not None or self._molde_em(evento.x, evento.y) is not None
+                     or self._texto_em(evento.x, evento.y) is not None)
             definir_cursor(self.canvas, "fleur" if sobre else "")
             return
         indice = self._espaco_em(evento.x, evento.y)
@@ -9386,6 +9495,12 @@ class Aplicativo:
         """Duplo clique liga a edição do layout; já editando, abre a foto do espaço para o corte."""
         indice = self._espaco_em(evento.x, evento.y)
         if self._editando_lamina():
+            texto = self._texto_em(evento.x, evento.y)
+            if texto is not None:
+                self._arrasto = None
+                self._selecionar_alvo_layout(("texto", texto))
+                self.abrir_texto(self.atual, texto)
+                return
             if indice is not None:
                 self._arrasto = None
                 self.abrir_editor(("lamina", self.atual, indice))
@@ -9417,7 +9532,16 @@ class Aplicativo:
         menu = tk.Menu(self.root, tearoff=0)
         indice = self._espaco_em(evento.x, evento.y)
         molde = self._molde_em(evento.x, evento.y) if indice is None and self.editar_layout.get() else None
-        if molde is not None:
+        texto = self._texto_em(evento.x, evento.y) if self.editar_layout.get() else None
+        if texto is not None:
+            self._selecionar_alvo_layout(("texto", texto))
+            menu.add_command(label="Editar texto e fonte...", command=lambda: self.abrir_texto(self.atual, texto))
+            menu.add_command(label="Duplicar o bloco de texto", command=self.duplicar_texto)
+            menu.add_command(label="Trazer para a frente", command=lambda: self.ordem_espaco(True))
+            menu.add_command(label="Mandar para trás", command=lambda: self.ordem_espaco(False))
+            menu.add_command(label="Apagar o bloco de texto", command=self.apagar_texto_selecionado)
+            menu.add_separator()
+        elif molde is not None:
             self._selecionar_alvo_layout(("molde", molde))
             menu.add_command(label="Apagar o molde PNG", command=self.apagar_molde_selecionado)
             menu.add_separator()
@@ -9481,6 +9605,7 @@ class Aplicativo:
         menu.add_command(label="Sair da edição de layout" if self.editar_layout.get() else "Editar layout (duplo clique)",
                          accelerator="Esc" if self.editar_layout.get() else "L", command=self.alternar_modo_layout)
         menu.add_command(label="Novo espaço vazio", command=self.adicionar_espaco)
+        menu.add_command(label="Novo bloco de texto (fonte do PC)", accelerator="Shift+T", command=self.adicionar_texto)
         menu.add_command(label="Diagramar esta lâmina de novo", command=self.rediagramar_lamina)
         menu.add_separator()
         self._itens_menu_fundo(menu)
@@ -9516,6 +9641,8 @@ class Aplicativo:
             validos.clear()
         self.espacos_sel = validos
         self.espaco_sel = principal if principal in validos else (min(validos) if validos else None)
+        if validos:
+            self.texto_sel = None  # escolher uma foto desfaz a seleção do bloco de texto (limpar a seleção, não)
         if validos and getattr(self, "fotos_sel", None):
             self.fotos_sel.clear()
             if hasattr(self, "atualizar_fotos"):
@@ -9544,10 +9671,17 @@ class Aplicativo:
         return (lamina is not None and self.espaco_sel is None and self.molde_sel is not None
                 and self.molde_sel[0] == self.atual and 0 <= self.molde_sel[1] < len(lamina.get("sobreposicoes") or []))
 
+    def _texto_sel_valido(self):
+        lamina = self._lamina()
+        return (lamina is not None and self.espaco_sel is None and self.texto_sel is not None
+                and self.texto_sel[0] == self.atual and 0 <= self.texto_sel[1] < len(lamina.get("textos") or []))
+
     def _alvo_sel(self):
-        """O que está selecionado na edição: ("espaco", i), ("molde", i) ou None."""
+        """O que está selecionado na edição: ("espaco", i), ("texto", i), ("molde", i) ou None."""
         if self._espaco_sel_valido():
             return ("espaco", self.espaco_sel)
+        if self._texto_sel_valido():
+            return ("texto", self.texto_sel[1])
         if self._molde_sel_valido():
             return ("molde", self.molde_sel[1])
         return None
@@ -9556,14 +9690,34 @@ class Aplicativo:
         lamina = lamina if lamina is not None else self._lamina()
         if lamina is None or alvo is None:
             return None
-        lista = lamina["espacos"] if alvo[0] == "espaco" else (lamina.get("sobreposicoes") or [])
+        if alvo[0] == "espaco":
+            lista = lamina["espacos"]
+        elif alvo[0] == "texto":
+            lista = lamina.get("textos") or []
+        else:
+            lista = lamina.get("sobreposicoes") or []
         return lista[alvo[1]] if 0 <= alvo[1] < len(lista) else None
 
     def _selecionar_alvo_layout(self, alvo):
         self._definir_selecao_espacos({alvo[1]} if alvo and alvo[0] == "espaco" else set(),
                                       alvo[1] if alvo and alvo[0] == "espaco" else None)
         self.molde_sel = (self.atual, alvo[1]) if alvo and alvo[0] == "molde" else None
+        self.texto_sel = (self.atual, alvo[1]) if alvo and alvo[0] == "texto" else None
         self._desenhar_espacos()
+
+    def _texto_em(self, x, y):
+        """Índice do bloco de texto sob o ponto (o de cima primeiro), ou None."""
+        lamina = self._lamina()
+        if lamina is None or self._geo is None:
+            return None
+        dw, dh, ox, oy = self._geo
+        u, v = (x - ox) / float(dw), (y - oy) / float(dh)
+        textos = lamina.get("textos") or []
+        for i in range(len(textos) - 1, -1, -1):
+            t = textos[i]
+            if t["x"] <= u <= t["x"] + t["w"] and t["y"] <= v <= t["y"] + t["h"]:
+                return i
+        return None
 
     def _molde_em(self, x, y):
         lamina = self._lamina()
@@ -9594,6 +9748,7 @@ class Aplicativo:
             self.canvas.delete("guia_ima")
             self.canvas.delete("arrasto")
             self.molde_sel = None
+            self.texto_sel = None
             self.registrar("Edição de layout desligada. Duplo clique na lâmina para editar de novo.")
         self.canvas.configure(cursor="")
         self._desenhar_espacos()
@@ -9733,7 +9888,9 @@ class Aplicativo:
         if alca:
             alvo = ("grupo", tuple(sorted(selecionados))) if len(selecionados) > 1 else self._alvo_sel()
         else:
-            indice = self._espaco_em(x, y)
+            texto = self._texto_em(x, y)
+            # o bloco de texto fica por cima das fotos: clicar nele escolhe o texto (Ctrl/Shift continuam escolhendo fotos)
+            indice = None if (texto is not None and not (com_ctrl or com_shift)) else self._espaco_em(x, y)
             if indice is not None:
                 if com_ctrl:
                     if indice in selecionados:
@@ -9763,7 +9920,7 @@ class Aplicativo:
                 molde = self._molde_em(x, y)
                 self._definir_selecao_espacos(set())
                 self._ancora_espaco = None
-                alvo = ("molde", molde) if molde is not None else None
+                alvo = ("texto", texto) if texto is not None else (("molde", molde) if molde is not None else None)
         if alvo is None and not self._dentro_da_lamina(x, y):
             self.alternar_modo_layout(False)
             return
@@ -10410,6 +10567,8 @@ class Aplicativo:
             idx_alvo = a["alvo"][1]
             if a["alvo"][0] == "espaco":
                 lamina_sem["espacos"] = [e for idx, e in enumerate(lamina.get("espacos", [])) if idx != idx_alvo]
+            elif a["alvo"][0] == "texto":
+                lamina_sem["textos"] = [t for idx, t in enumerate(lamina.get("textos") or []) if idx != idx_alvo]
             else:
                 lamina_sem["sobreposicoes"] = [s for idx, s in enumerate(lamina.get("sobreposicoes") or []) if idx != idx_alvo]
             img_limpa = exportar.renderizar_lamina(
@@ -10440,6 +10599,12 @@ class Aplicativo:
                     }
                 except (OSError, ValueError):
                     pass
+        elif a["alvo"][0] == "texto":
+            try:
+                caixa = (max(1, int(round(item["w"] * dw))), max(1, int(round(item["h"] * dh))))
+                a["previa"] = {"molde": texto_bloco.renderizar(item, caixa, dw / float(lamina_mm(self.produto)[0]))}
+            except (OSError, ValueError):
+                pass
         else:
             try:
                 with Image.open(item["png"]) as png:
@@ -10666,6 +10831,8 @@ class Aplicativo:
         alvo = self._alvo_sel() if self._editando_lamina() else None
         if alvo and alvo[0] == "molde":
             self.apagar_molde_selecionado()
+        elif alvo and alvo[0] == "texto":
+            self.apagar_texto_selecionado()
         elif alvo:
             self.apagar_espaco_selecionado()
         elif self.espaco_sel is not None or getattr(self, "espacos_sel", None):
@@ -10712,6 +10879,9 @@ class Aplicativo:
         self._mudar_espacos(mudar, "Espaço novo na página %s. Arraste uma foto para ele." % (pagina + 1))
 
     def duplicar_espaco(self):
+        if isinstance(self.atual, int) and self._texto_sel_valido():
+            self.duplicar_texto()
+            return
         if not (isinstance(self.atual, int) and self._espaco_sel_valido()):
             self.registrar("Selecione um espaço para duplicar.")
             return
@@ -10734,7 +10904,93 @@ class Aplicativo:
         if isinstance(self.atual, int) and self._espaco_sel_valido():
             self.apagar_espaco(self.atual, self.espaco_sel)
 
+    # ---------------- blocos de texto (transparentes, com as fontes instaladas no PC) ----------------
+
+    def _cor_texto_para_fundo(self, lamina):
+        """Texto claro em fundo escuro e escuro em fundo claro (o fundo da cor da lâmina)."""
+        r, g, b = cor_rgb(lamina.get("fundo"), (255, 255, 255))
+        return "#222222" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#ffffff"
+
+    def adicionar_texto(self):
+        lamina = self._lamina()
+        if lamina is None:
+            self.registrar("Escolha uma lâmina para pôr um bloco de texto.")
+            return
+        pagina = self._pagina_do_espaco(lamina["espacos"][self.espaco_sel]) if self._espaco_sel_valido() \
+            else self._pagina_livre(lamina)
+        ux, uy, uw, uh = area_util_pagina_mm(self.produto, pagina, self._cfg()["margem_mm"])
+        w, h = uw * 0.6, uh * 0.25
+        novo = texto_bloco.novo_bloco(0, 0, 0.1, 0.1, cor=self._cor_texto_para_fundo(lamina))
+        self._definir_espaco_mm(novo, ux + (uw - w) / 2, uy + (uh - h) / 2, w, h)
+
+        def mudar(l):
+            l.setdefault("textos", []).append(novo)
+            self._definir_selecao_espacos(set())
+            self.texto_sel = (self.atual, len(l["textos"]) - 1)
+
+        self.alternar_modo_layout(True)
+        if self._mudar_espacos(mudar, "Bloco de texto novo na página %s. Escreva o texto e escolha a fonte." % (pagina + 1)):
+            self.abrir_texto(self.atual, len(self._lamina()["textos"]) - 1)
+
+    def abrir_texto(self, li=None, ti=None):
+        if li is None:
+            if not (isinstance(self.atual, int) and self._texto_sel_valido()):
+                self.registrar("Selecione um bloco de texto na lâmina (modo editar layout).")
+                return
+            li, ti = self.atual, self.texto_sel[1]
+        if self.janela_texto is not None:
+            try:
+                if self.janela_texto.winfo_exists():
+                    self.janela_texto.fechar()
+            except tk.TclError:
+                pass
+            self.janela_texto = None
+        self.janela_texto = janela_texto.JanelaTexto(self, li, ti)
+
+    def duplicar_texto(self):
+        if not (isinstance(self.atual, int) and self._texto_sel_valido()):
+            self.registrar("Selecione um bloco de texto para duplicar.")
+            return
+        lw, lh = self._mm()
+        original = self._lamina()["textos"][self.texto_sel[1]]
+        x, y, w, h = self._espaco_mm(original)
+        novo = copy.deepcopy(original)
+        self._definir_espaco_mm(novo, x + 5 if x + w + 5 <= lw else max(0.0, x - 5),
+                                y + 5 if y + h + 5 <= lh else max(0.0, y - 5), w, h)
+
+        def mudar(l):
+            l["textos"].append(novo)
+            self.texto_sel = (self.atual, len(l["textos"]) - 1)
+
+        self._mudar_espacos(mudar, "Bloco de texto duplicado.")
+
+    def apagar_texto(self, li, ti):
+        lamina = self._lamina(li)
+        if lamina is None or not 0 <= ti < len(lamina.get("textos") or []):
+            return
+        self.texto_sel = None
+        self._mudar_espacos(lambda l: l["textos"].pop(ti), "Bloco de texto apagado.")
+
+    def apagar_texto_selecionado(self):
+        if isinstance(self.atual, int) and self._texto_sel_valido():
+            self.apagar_texto(self.atual, self.texto_sel[1])
+
     def ordem_espaco(self, frente):
+        if isinstance(self.atual, int) and self._texto_sel_valido():
+            i = self.texto_sel[1]
+
+            def mudar_texto(l):
+                bloco = l["textos"].pop(i)
+                if frente:
+                    l["textos"].append(bloco)
+                    novo = len(l["textos"]) - 1
+                else:
+                    l["textos"].insert(0, bloco)
+                    novo = 0
+                self.texto_sel = (self.atual, novo)
+
+            self._mudar_espacos(mudar_texto)
+            return
         if not (isinstance(self.atual, int) and self._espaco_sel_valido()):
             return
         i = self.espaco_sel
@@ -10773,7 +11029,7 @@ class Aplicativo:
 
     def alinhar_espaco(self, acao):
         alvo = self._alvo_sel() if isinstance(self.atual, int) else None
-        if alvo is None or (alvo[0] == "molde" and acao == "igualar"):
+        if alvo is None or (alvo[0] in ("molde", "texto") and acao == "igualar"):
             self.registrar("Selecione um ou mais espaços na lâmina.")
             return
         lw, lh = self._mm()
@@ -12378,7 +12634,7 @@ class Aplicativo:
         def trabalho():
             opcoes = []
             try:
-                opcoes = diagramar.opcoes_lamina(fotos, produto, cfg_atual, maximo=12)
+                opcoes = diagramar.opcoes_lamina(fotos, produto, cfg_atual, maximo=18)
             finally:
                 self.fila.put(("chamar", lambda: self._receber_sugestoes(versao, opcoes)))
 
@@ -13248,7 +13504,15 @@ class Aplicativo:
         self._fundos_marca = marca
         self._fundos_pasta = pasta
         self._fundos_lista = lista_bruta
+        if (pasta or "") != texturas_usuario.preferencia()["pasta"]:
+            texturas_usuario.definir_preferencia(pasta=pasta or "")  # é nesta pasta que "Minhas texturas" procura
         lista_exibir = list(lista_bruta)
+        faltam_medir = [c for c in lista_bruta if not texturas_usuario.ja_medida(c)]
+        if faltam_medir:
+            self._medir_texturas_em_fundo(faltam_medir)
+        qtd_texturas = sum(1 for c in lista_bruta if texturas_usuario.ja_medida(c) and texturas_usuario.eh_textura(c))
+        if getattr(self, "so_texturas_pasta", None) and self.so_texturas_pasta.get():
+            lista_exibir = [c for c in lista_exibir if texturas_usuario.ja_medida(c) and texturas_usuario.eh_textura(c)]
         if lista_exibir and getattr(self, "filtro_sugeridos_pasta", None) and self.filtro_sugeridos_pasta.get():
             paleta = getattr(self, "_paleta_fundo_atual", None) or extrair_paleta_fotos(self._fotos_alvo_fundo_atual(), self.info)
             sugeridos = fundos.sugerir_fundos_da_pasta(
@@ -13264,9 +13528,10 @@ class Aplicativo:
         else:
             qtd_fav = sum(1 for c in lista_bruta if fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, c))
             extra_fav = (" · ★ %d padrão" % qtd_fav) if qtd_fav else ""
-            texto = "%s · %s imagem(ns)%s%s" % (
+            texto = "%s · %s imagem(ns) · %s textura(s)%s%s" % (
                 Path(pasta).name,
                 len(lista_bruta),
+                qtd_texturas,
                 extra_fav,
                 " · deste álbum" if self.projeto.get("pasta_fundos") else "",
             )
@@ -13286,7 +13551,11 @@ class Aplicativo:
 
     def _soltar_fundo(self, a, evento):
         if not a["ativo"]:
-            self.aplicar_fundo_em(a["caminho"])
+            # clique: textura vira a textura dos fundos gerados; o resto continua sendo aplicado como fundo inteiro
+            if texturas_usuario.ja_medida(a["caminho"]) and texturas_usuario.eh_textura(a["caminho"]):
+                self.usar_textura(a["caminho"])
+            else:
+                self.aplicar_fundo_em(a["caminho"])
             return
         alvo = self.root.winfo_containing(evento.x_root, evento.y_root)
         if alvo is self.canvas:
@@ -13307,16 +13576,146 @@ class Aplicativo:
             % (Path(caminho).name, "marcado" if marcado else "removido")
         )
 
+    # ---------------- texturas do usuário (imagem ou PNG) nos fundos gerados ----------------
+
+    def _atualizar_combo_textura(self):
+        if not hasattr(self, "combo_textura"):
+            return
+        pref = texturas_usuario.preferencia()
+        nome = Path(pref["arquivo"]).name if pref["arquivo"] else ""
+        self._rotulos_textura = {
+            "minhas": "Minhas texturas (sorteia)",
+            "uma": "Uma textura: %s" % (nome[:30] if nome else "clique numa da pasta"),
+            "nenhuma": "Só degradê (cores do programa)",
+            "programa": "Texturas antigas do programa",
+        }
+        self.combo_textura.configure(values=list(self._rotulos_textura.values()))
+        self.combo_textura.set(self._rotulos_textura[pref["modo"]])
+
+    def _combo_textura_mudou(self, _evento=None):
+        modo = next((m for m, r in self._rotulos_textura.items() if r == self.combo_textura.get()), "minhas")
+        if modo == "uma" and not texturas_usuario.preferencia()["arquivo"]:
+            self.registrar("Para usar uma textura só: clique numa textura da pasta abaixo ou carregue uma imagem.")
+        texturas_usuario.definir_preferencia(modo=modo)
+        self._textura_mudou()
+        self.registrar({
+            "minhas": "Fundos gerados: sorteando entre as suas texturas.",
+            "uma": "Fundos gerados: sempre a mesma textura.",
+            "nenhuma": "Fundos gerados: só degradê com as cores do programa, sem textura.",
+            "programa": "Fundos gerados: texturas antigas desenhadas pelo programa.",
+        }[modo])
+
+    def _textura_mudou(self, aplicar=False):
+        """A preferência de textura mudou: refaz a galeria de fundos gerados (e aplica o primeiro, se pedido)."""
+        self._chave_cache_gerados = None
+        if aplicar and self._lamina() is not None:
+            self._gerar_galeria_gerados_agora()
+            if getattr(self, "_lista_gerados_atuais", None):
+                self.aplicar_fundo_gerado_em(self._lista_gerados_atuais[0])
+        else:
+            self._atualizar_galeria_gerados(forcar=True)
+
+    def carregar_textura(self, como_png=False):
+        tipos = [("PNG", "*.png")] if como_png else [("Imagens", "*.jpg *.jpeg *.jfif *.png *.webp *.tif *.tiff *.bmp")]
+        caminho = filedialog.askopenfilename(
+            parent=self.root,
+            title="PNG para usar como está" if como_png else "Imagem para extrair a textura",
+            initialdir=self._pasta_fundos() or None,
+            filetypes=tipos + [("Todos os arquivos", "*.*")],
+        )
+        if caminho:
+            texturas_usuario.importar(caminho)
+            self.usar_textura(caminho, como_png=como_png)
+
+    def usar_textura(self, caminho, como_png=None):
+        """
+        Faz de `caminho` a textura dos fundos gerados. como_png: None decide sozinho (PNG com transparência é
+        colado como está; o resto tem a textura extraída), False extrai, True usa o PNG sem extrair.
+        """
+        self.registrar("Preparando a textura de %s..." % Path(caminho).name)
+
+        def trabalho():
+            erro = None
+            modo = "relevo"
+            try:
+                if como_png is None:
+                    modo = texturas_usuario.modo_do_arquivo(caminho)
+                else:
+                    modo = "png" if como_png else "relevo"
+                texturas_usuario.caminho_relevo(caminho, filtrar=(modo == "relevo"))
+            except Exception as e:
+                erro = str(e)
+            self.fila.put(("chamar", lambda: self._textura_pronta(caminho, modo, erro)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _textura_pronta(self, caminho, modo, erro):
+        if erro:
+            self.registrar("Não consegui usar %s como textura: %s" % (Path(caminho).name, erro))
+            return
+        texturas_usuario.definir_preferencia(modo="uma", arquivo=caminho, arquivo_modo=modo)
+        self._atualizar_combo_textura()
+        self._textura_mudou(aplicar=True)
+        self.registrar("Textura dos fundos: %s (%s)." % (
+            Path(caminho).name, "PNG usado como está" if modo == "png" else "textura extraída da imagem"))
+
+    def _marcar_textura(self, caminho, classe):
+        texturas_usuario.marcar(caminho, classe)
+        self.atualizar_fundos(forcar=True)
+        self.registrar("%s: %s." % (Path(caminho).name, {
+            "textura": "marcada como textura", "imagem": "marcada como não sendo textura",
+        }.get(classe, "de volta ao reconhecimento automático")))
+
+    def _medir_texturas_em_fundo(self, caminhos):
+        """Mede as imagens novas da pasta fora da janela (arquivos de 80 MB levam alguns segundos cada)."""
+        if getattr(self, "_medindo_texturas", False):
+            return
+        tentadas = self.__dict__.setdefault("_texturas_tentadas", set())
+        caminhos = [c for c in caminhos if c not in tentadas]
+        if not caminhos:
+            return
+        tentadas.update(caminhos)
+        self._medindo_texturas = True
+        self.registrar("Reconhecendo texturas na pasta de fundos (%d imagens)..." % len(caminhos))
+
+        def fim():
+            self._medindo_texturas = False
+            self.atualizar_fundos(forcar=True)
+            self._textura_mudou()
+
+        def trabalho():
+            try:
+                for caminho in caminhos:
+                    try:
+                        texturas_usuario.medir(caminho)
+                    except Exception:
+                        pass
+                texturas_usuario.salvar_medidas()
+            finally:
+                self.fila.put(("chamar", fim))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
     def _galeria_menu(self, caminho, evento):
         qtd_sel = len(self._indices_laminas_selecionadas())
         eh_fav = fundos.eh_favorito_fundo(ARQUIVO_FUNDOS, caminho)
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Usar como TEXTURA dos fundos (extrai o desenho da imagem)",
+                         command=lambda: self.usar_textura(caminho, como_png=False))
+        menu.add_command(label="Usar como textura do jeito que está (PNG, sem extrair)",
+                         command=lambda: self.usar_textura(caminho, como_png=True))
+        menu_marca = tk.Menu(menu, tearoff=0)
+        menu_marca.add_command(label="É textura", command=lambda: self._marcar_textura(caminho, "textura"))
+        menu_marca.add_command(label="Não é textura", command=lambda: self._marcar_textura(caminho, "imagem"))
+        menu_marca.add_command(label="Deixar o programa decidir", command=lambda: self._marcar_textura(caminho, None))
+        menu.add_cascade(label="Esta imagem...", menu=menu_marca)
+        menu.add_separator()
         menu.add_command(
             label="★ Remover de Fundo Padrão" if eh_fav else "★ Marcar como Fundo Padrão (Favorito)",
             command=lambda: self._alternar_favorito_pasta(caminho),
         )
         menu.add_separator()
-        menu.add_command(label="Aplicar no alvo atual (%s)" % self.fundo_alvo.get(), command=lambda: self.aplicar_fundo_em(caminho))
+        menu.add_command(label="Usar a imagem inteira como fundo (%s)" % self.fundo_alvo.get(), command=lambda: self.aplicar_fundo_em(caminho))
         menu.add_command(label="Aplicar na Lâmina inteira", command=lambda: (self.fundo_alvo.set("lamina"), self.aplicar_fundo_em(caminho, alvo="lamina")))
         menu.add_command(label="Aplicar na Página Esquerda", command=lambda: (self.fundo_alvo.set("esquerda"), self.aplicar_fundo_em(caminho, alvo="esquerda")))
         menu.add_command(label="Aplicar na Página Direita", command=lambda: (self.fundo_alvo.set("direita"), self.aplicar_fundo_em(caminho, alvo="direita")))

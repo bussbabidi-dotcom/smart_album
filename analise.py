@@ -442,6 +442,46 @@ def detectar_rosto(img):
     }
 
 
+LADO_NITIDEZ_ROSTO = 96
+
+
+def nitidez_dos_rostos(img, rosto):
+    """
+    Mede a nitidez DENTRO de cada rosto e grava em `rosto` (o dicionário de detectar_rosto):
+      rosto["rostos"][i]["nitidez"]  nitidez do rosto levado a 96 px (compara rostos de tamanhos diferentes)
+      rosto["nitidez"]               a do rosto mais nítido da foto
+      rosto["nitidez_maior"]         a do maior rosto (a pessoa principal)
+      rosto["nitidez_nativa"]        maior variância do Laplaciano no tamanho da análise, sem redimensionar
+    Calibrado em 969 rostos de colação (13/11/2026): plateia desfocada mede 2 a 7; rosto pequeno e nítido, 85 ou mais.
+    """
+    if not rosto or not rosto.get("rostos"):
+        return rosto
+    cinza = np.asarray(img.convert("L"))
+    H, W = cinza.shape[:2]
+    melhor = nativa = 0.0
+    maior = (0.0, 0.0)  # (altura do rosto, nitidez)
+    for r in rosto["rostos"]:
+        fw, fh = r["w"] * W, r["h"] * H
+        x0 = int(max(0, r["cx"] * W - fw / 2.0))
+        y0 = int(max(0, r["cy"] * H - fh * 0.42))  # cx, cy são o meio dos olhos
+        x1, y1 = int(min(W, x0 + fw)), int(min(H, y0 + fh))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        recorte = cinza[y0:y1, x0:x1]
+        nativa = max(nativa, float(cv2.Laplacian(recorte, cv2.CV_64F).var()))
+        modo = cv2.INTER_AREA if recorte.shape[0] > LADO_NITIDEZ_ROSTO else cv2.INTER_LINEAR
+        igual = cv2.resize(recorte, (LADO_NITIDEZ_ROSTO, LADO_NITIDEZ_ROSTO), interpolation=modo)
+        valor = round(float(cv2.Laplacian(igual, cv2.CV_64F).var()), 2)
+        r["nitidez"] = valor
+        melhor = max(melhor, valor)
+        if r["h"] > maior[0]:
+            maior = (r["h"], valor)
+    rosto["nitidez"] = round(melhor, 2)
+    rosto["nitidez_maior"] = maior[1]
+    rosto["nitidez_nativa"] = round(nativa, 2)
+    return rosto
+
+
 def nitidez(img):
     pequena = img.convert("L")
     escala = min(1.0, 480 / float(max(pequena.size)))
@@ -492,6 +532,125 @@ def hash_perceptual(caminho):
     for coeficiente in coef:
         valor = (valor << 1) | int(coeficiente > mediana)
     return valor
+
+
+DISTANCIA_REPETIDA = 3     # cópia visual (bits diferentes no hash)
+DISTANCIA_RAJADA = 8       # rajada: mesma câmera e tirada até SEGUNDOS_RAJADA da outra
+SEGUNDOS_RAJADA = 3
+
+
+def separar_repetidas(caminhos, rajadas=False, parar=None, ao_progresso=None):
+    """
+    (mantidas, removidas) na ordem recebida; mantém a primeira de cada grupo.
+    Repetida = hash visual a <= 3 bits. Com rajadas=True também tira a foto da mesma câmera
+    (4 primeiras letras do nome) tirada até 3 s de outra e com hash a <= 8 bits.
+    removidas: [(caminho, caminho_que_ficou, motivo)]. Devolve (None, []) se parar() pedir.
+    """
+    caminhos = list(caminhos)
+    mantidas, removidas, vistas = [], [], []  # vistas: (hash, data, câmera, caminho)
+    for indice, caminho in enumerate(caminhos, start=1):
+        if parar and parar():
+            return None, []
+        try:
+            valor = hash_perceptual(caminho)
+        except (OSError, ValueError):
+            valor = None
+        data = _data_foto(caminho) if (rajadas and valor is not None) else 0.0
+        camera = Path(str(caminho)).name[:4].upper()
+        par = motivo = None
+        if valor is not None:
+            for h, d, cam, c in vistas:
+                dist = (valor ^ h).bit_count()
+                if dist <= DISTANCIA_REPETIDA:
+                    par, motivo = c, "cópia"
+                elif rajadas and dist <= DISTANCIA_RAJADA and cam == camera and abs(data - d) <= SEGUNDOS_RAJADA:
+                    par, motivo = c, "rajada"
+                if par is not None:
+                    break
+        if par is not None:
+            removidas.append((caminho, par, motivo))
+        else:
+            mantidas.append(caminho)
+            if valor is not None:
+                vistas.append((valor, data, camera, caminho))
+        if ao_progresso:
+            ao_progresso(indice, len(caminhos))
+    return mantidas, removidas
+
+
+def _cor_no_corpo(det, caminho):
+    """(faixa de matiz 0-17, pixels RGB dela) da cor saturada que mais aparece abaixo dos rostos, ou None."""
+    img = _abrir_reduzida(caminho, 900)
+    arr = np.asarray(img)
+    det.setInputSize((img.width, img.height))
+    _ok, faces = det.detect(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+    if faces is None:
+        return None
+    hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+    alt, larg = arr.shape[:2]
+    matizes, pesos, cores = [], [], []
+    for f in faces:
+        if f[14] < 0.7:
+            continue
+        x, y, w, h = (float(v) for v in f[:4])
+        # tronco e mãos: onde ficam a faixa da beca e o canudo
+        x0, x1 = int(max(0, x - 0.9 * w)), int(min(larg, x + 1.9 * w))
+        y0, y1 = int(min(alt, y + 1.15 * h)), int(min(alt, y + 4.8 * h))
+        if y1 - y0 < 5 or x1 - x0 < 5:
+            continue
+        reg = hsv[y0:y1, x0:x1].reshape(-1, 3).astype(int)
+        rgb = arr[y0:y1, x0:x1].reshape(-1, 3)
+        m, s, v = reg[:, 0], reg[:, 1], reg[:, 2]
+        pele = (m >= 3) & (m <= 22) & (s < 170)
+        ok = (s >= 110) & (v >= 60) & ~pele      # cor forte: tira beca preta, jabô branco e pele
+        if ok.sum() < 0.02 * len(reg):
+            continue
+        matizes.append(m[ok])
+        pesos.append((s[ok] * v[ok]).astype(float))
+        cores.append(rgb[ok])
+    if not matizes:
+        return None
+    faixas = (np.concatenate(matizes) // 10) % 18
+    soma = np.bincount(faixas, weights=np.concatenate(pesos), minlength=18)
+    melhor = int(np.argmax(soma))
+    if soma[melhor] < 0.35 * soma.sum():
+        return None
+    return melhor, np.concatenate(cores)[faixas == melhor]
+
+
+def cor_do_canudo(caminhos, amostra=14):
+    """
+    Cor do curso (canudo e faixa da beca) em hex, ou None quando não dá para ter certeza.
+    Olha até `amostra` fotos espalhadas; cada uma vota na cor forte que mais aparece abaixo dos rostos.
+    Vence a cor (com as vizinhas de matiz) que aparece em pelo menos 3 fotos e 40% dos votos.
+    """
+    caminhos = list(caminhos)
+    if not caminhos:
+        return None
+    det = _novo_detector()
+    if det is None:
+        return None
+    n = min(amostra, len(caminhos))
+    escolhidas = [caminhos[int(i * len(caminhos) / n)] for i in range(n)]
+    votos, pixels = [0] * 18, {}
+    for c in escolhidas:
+        try:
+            achado = _cor_no_corpo(det, c)
+        except Exception:
+            achado = None
+        if achado:
+            votos[achado[0]] += 1
+            pixels.setdefault(achado[0], []).append(achado[1])
+    total = sum(votos)
+    if not total:
+        return None
+    janela = lambda b: votos[(b - 1) % 18] + votos[b] + votos[(b + 1) % 18]
+    centro = max(range(18), key=janela)
+    if janela(centro) < 3 or janela(centro) < 0.4 * total:
+        return None
+    juntos = [p for b in ((centro - 1) % 18, centro, (centro + 1) % 18) for p in pixels.get(b, [])]
+    r, g, b = np.median(np.concatenate(juntos), axis=0).astype(int)
+    return "#%02x%02x%02x" % (r, g, b)
 
 
 def orientacao(w, h):
@@ -582,6 +741,15 @@ def _chave_cache(caminho):
     return "%s|%s|%s" % (normalizar_caminho(caminho), st.st_mtime_ns, st.st_size)
 
 
+def _imagem_de_analise(caminho):
+    """A foto no tamanho em que a análise é feita (lado maior = LADO_ANALISE)."""
+    img = miniatura(caminho, LADO_PREVIA)
+    if max(img.size) > LADO_ANALISE:
+        escala = LADO_ANALISE / float(max(img.size))
+        img = img.resize((max(1, round(img.width * escala)), max(1, round(img.height * escala))))
+    return img
+
+
 def analisar_foto(caminho):
     """Dados de uma foto, do cache ou calculados agora."""
     global _cache_sujo
@@ -592,6 +760,11 @@ def analisar_foto(caminho):
         if not guardado.get("cenario"):
             assinatura = assinatura_cenario(miniatura(caminho, LADO_PREVIA))
             guardado["cenario"] = assinatura
+            with _trava_cache:
+                _cache_sujo = True
+        if guardado.get("rosto") and "nitidez" not in guardado["rosto"]:
+            # análise antiga: completa só a nitidez dos rostos (não refaz a detecção)
+            nitidez_dos_rostos(_imagem_de_analise(caminho), guardado["rosto"])
             with _trava_cache:
                 _cache_sujo = True
         return guardado
@@ -608,7 +781,7 @@ def analisar_foto(caminho):
         "proporcao": w / float(h),
         "orientacao": orientacao(w, h),
         "nitidez": nitidez(analise),
-        "rosto": detectar_rosto(analise),
+        "rosto": nitidez_dos_rostos(analise, detectar_rosto(analise)),
         "cenario": assinatura_cenario(analise),
         "data": _data_foto(caminho),
     }
