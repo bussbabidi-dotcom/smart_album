@@ -19,6 +19,7 @@ Regras principais (aplicadas em todas as ferramentas do programa):
 import itertools
 import math
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from produtos import area_pagina_mm, area_util_pagina_mm, espacos_do_modelo, lamina_mm, normalizar_mm
@@ -87,6 +88,12 @@ def configuracao(produto, projeto_cfg=None):
         # 30X22: tema e molduras diferentes em cada álbum (menos o de externa) e a cor do canudo no fundo
         "variar_tema_album": bool(produto.get("variar_tema_album", False)),
         "cor_canudo_no_fundo": bool(produto.get("variar_tema_album", False)),
+        # 30X22 (pedido dela em 16/11/2026): nunca a moldura pontilhada; repetidas também pela pose;
+        # 1ª lâmina com a 1ª foto da pessoa sozinha (YuNet); cenários sem misturar; lâminas em nº par
+        "molduras_proibidas": list(produto.get("molduras_proibidas") or []),
+        "excluir_pose": bool(produto.get("excluir_pose_repetida", False)),
+        "primeira_foto_sozinha": bool(produto.get("primeira_foto_sozinha", False)),
+        "laminas_par": bool(produto.get("laminas_par", False)),
     }
     if produto.get("excluir_repetidas"):
         cfg["excluir_repetidas"] = True
@@ -2938,8 +2945,79 @@ def _unidades_alternadas(bloco, s):
     return seq
 
 
+def _cenarios_do_bloco(bloco):
+    """
+    Fatias seguidas do bloco com o mesmo cenário (cenario_subgrupo). A alternância H/V acontece só
+    dentro de cada cenário: antes ela espalhava as horizontais entre as verticais do bloco inteiro e
+    misturava os cenários de um mesmo evento (reclamação dela em 16/11/2026).
+    """
+    partes = []
+    for f in bloco:
+        cen = f.get("cenario_subgrupo")
+        if partes and partes[-1][0] == cen:
+            partes[-1][1].append(f)
+        else:
+            partes.append((cen, [f]))
+    return [p for _c, p in partes]
+
+
+def pessoa_sozinha(foto):
+    """A foto tem uma pessoa só (YuNet: um rosto grande; os bem menores são plateia/fundo)?"""
+    rosto = foto.get("rosto") if isinstance(foto, dict) else None
+    if not isinstance(rosto, dict):
+        return False
+    rostos = [r for r in (rosto.get("rostos") or []) if isinstance(r, dict)]
+    if not rostos:
+        return int(rosto.get("qtd") or 0) == 1
+    maior = max(float(r.get("h") or 0) for r in rostos)
+    grandes = [r for r in rostos if float(r.get("h") or 0) >= maior * 0.40]
+    focos = [float(r["nitidez"]) for r in grandes if r.get("nitidez") is not None]
+    if len(focos) == len(grandes) and focos:
+        # rosto desfocado lá atrás (alguém passando, plateia) não conta como outra pessoa na foto:
+        # conta quem está nítido (>= 40, a régua de nitidez_dos_rostos). Calibrado nas 1ªs lâminas de
+        # 16/11/2026: quem passa atrás mede 7 a 23; a 2ª pessoa de verdade, 100 ou mais.
+        grandes = [r for r in grandes if float(r["nitidez"]) >= 40.0]
+    return len(grandes) == 1
+
+
+def primeira_foto_sozinha(fotos):
+    """A 1ª foto vertical (na ordem do álbum) com a pessoa sozinha: vai para a 1ª lâmina, com nome e curso."""
+    return next((f for f in fotos if _eh_vertical(f) and pessoa_sozinha(f)), None)
+
+
+def _deixar_par(grupos):
+    """
+    Nº par de lâminas (30X22): separa uma dupla de verticais em duas lâminas (no maior cenário, no meio);
+    sem dupla, junta duas verticais sozinhas vizinhas do mesmo cenário. Devolve (grupos, conseguiu).
+    """
+    if len(grupos) % 2 == 0:
+        return grupos, True
+    inicio = 1 if grupos and grupos[0] and grupos[0][0].get("_primeira_foto") else 0
+
+    def cenario(g):
+        return (g[0].get("grupo_ordem"), g[0].get("pasta"), g[0].get("cenario_subgrupo"))
+
+    tamanho_cen = Counter(cenario(g) for g in grupos[inicio:])
+    duplas = [i for i in range(inicio, len(grupos)) if len(grupos[i]) == 2 and all(_eh_vertical(f) for f in grupos[i])]
+    if duplas:
+        por_cen = {}
+        for i in duplas:
+            por_cen.setdefault(cenario(grupos[i]), []).append(i)
+        cen = max(por_cen, key=lambda c: (tamanho_cen[c], -por_cen[c][0]))
+        lista = por_cen[cen]
+        i = lista[len(lista) // 2]
+        return grupos[:i] + [[grupos[i][0]], [grupos[i][1]]] + grupos[i + 1:], True
+    for i in range(inicio, len(grupos) - 1):
+        a, b = grupos[i], grupos[i + 1]
+        if (len(a) == 1 and len(b) == 1 and _eh_vertical(a[0]) and _eh_vertical(b[0])
+                and cenario(a) == cenario(b)):
+            return grupos[:i] + [a + b] + grupos[i + 2:], True
+    return grupos, False
+
+
 def _grupos_alternando(blocos, total):
-    """Reparte `total` lâminas entre os blocos (sem misturar) e monta cada bloco alternando."""
+    """Reparte `total` lâminas entre os blocos e cenários (sem misturar) e monta cada um alternando."""
+    blocos = [parte for b in blocos for parte in _cenarios_do_bloco(b)]
     tamanhos = [len(b) for b in blocos]
     # mínimo de cada bloco: horizontais sozinhas + verticais em dupla (horizontal nunca é juntada)
     pref = [sum(1 for f in b if not _eh_vertical(f)) + int(math.ceil(sum(1 for f in b if _eh_vertical(f)) / 2.0))
@@ -2987,7 +3065,8 @@ def estilo_do_album(fotos, cfg=None):
     semente = int(hashlib.md5("|".join(nomes).encode("utf-8")).hexdigest()[:8], 16)
     sorteio = random.Random(semente)
     temas = [t["id"] for t in CATALOGO_TEMAS if t["id"] not in TEMA_PROIBIDO_VARIAR]
-    trio = sorteio.sample([e for e, _n in ESTILOS_MOLDURA], 3)
+    proibidas = set(cfg.get("molduras_proibidas") or ())
+    trio = sorteio.sample([e for e, _n in ESTILOS_MOLDURA if e not in proibidas], 3)
     cor = None
     if cfg.get("cor_canudo_no_fundo", True):
         try:
@@ -3327,9 +3406,19 @@ def planejar_distribuicao(fotos, produto, cfg):
 
     if cfg.get("alternar_orientacao"):
         # 30X22: o máximo de lâminas com 1 ou 2 fotos, alternando horizontal e vertical (nenhuma foto sobra)
-        blocos = _blocos_duros(ordenadas, cfg)
         total = min(len(ordenadas), max(pedidas, laminas_alternando(ordenadas, produto)))
-        grupos = _grupos_alternando(blocos, total)
+        primeira = primeira_foto_sozinha(ordenadas) if cfg.get("primeira_foto_sozinha") else None
+        if cfg.get("primeira_foto_sozinha") and primeira is None:
+            avisos.append("Nenhuma foto vertical com a pessoa sozinha para a 1ª lâmina (nome e curso).")
+        resto = [f for f in ordenadas if f is not primeira]
+        grupos = _grupos_alternando(_blocos_duros(resto, cfg), total - (1 if primeira else 0)) if resto else []
+        if primeira is not None:
+            # 1ª lâmina: a 1ª foto da pessoa sozinha (YuNet), sozinha na lâmina (o robô põe nome e curso ao lado)
+            grupos.insert(0, [dict(primeira, _primeira_foto=True)])
+        if cfg.get("laminas_par") and len(grupos) % 2:
+            grupos, par_ok = _deixar_par(grupos)
+            if not par_ok:
+                avisos.append("Não deu para fechar em nº par só com as fotos: entra uma lâmina vazia no fim.")
         if len(grupos) > laminas_max:
             avisos.append("Horizontal sozinha e verticais em dupla: %d lâminas (passa das %d de referência do produto)."
                           % (len(grupos), laminas_max))
@@ -3527,6 +3616,8 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=N
             lamina["nome_pasta"] = grupo[0].get("nome_pasta")
         if grupo and grupo[0].get("pasta"):
             lamina["pasta"] = grupo[0].get("pasta")
+        if grupo and grupo[0].get("_primeira_foto"):
+            lamina["primeira_foto"] = True  # 1ª foto da pessoa sozinha: o robô da 1ª lâmina põe nome e curso
         if estilo:
             lamina["tema_album"] = estilo["tema"]
             lamina["molduras_album"] = dict(estilo["molduras"])
@@ -3546,6 +3637,10 @@ def diagramar_album(fotos, produto, cfg, modelos=(), ao_progresso=None, avisos=N
             )
         while len(laminas) < min_prod:
             laminas.append(lamina_vazia(cfg))
+    if laminas and cfg.get("laminas_par") and len(laminas) % 2:
+        if avisos is not None:
+            avisos.append("Lâminas em nº par: 1 lâmina vazia no fim para fechar %d." % (len(laminas) + 1))
+        laminas.append(lamina_vazia(cfg))
     edicoes_fotos = {
         str(f.get("caminho")): dict(f.get("edicao") or {})
         for f in fotos
@@ -4259,13 +4354,21 @@ def aplicar_molduras_automaticas(lamina, fotos_lamina=None, produto=None, cfg=No
         else:
             destaques.add(id(max(da_pagina, key=lambda e: float(e.get("w", 0.0)) * float(e.get("h", 0.0)))))
 
+    proibidas = set(cfg.get("molduras_proibidas") or ())
+
     def _estilo(esp):
         if not por_evento:
-            return estilo_cfg
+            return estilo_cfg if estilo_cfg not in proibidas else "simples"
         conjunto = lamina.get("molduras_album") or MOLDURAS_EVENTO.get(_tema(esp)) or MOLDURAS_SEM_EVENTO
         if id(esp) in destaques:
-            return conjunto["destaque"]
-        return conjunto["secundaria"] if int(indice_lamina) % 2 == 0 else conjunto["alternativa"]
+            escolhido = conjunto["destaque"]
+        else:
+            escolhido = conjunto["secundaria"] if int(indice_lamina) % 2 == 0 else conjunto["alternativa"]
+        if escolhido in proibidas:
+            # moldura que o produto não usa (30X22: nunca a pontilhada): outra do mesmo conjunto
+            escolhido = next((conjunto[c] for c in ("destaque", "alternativa", "secundaria")
+                              if conjunto.get(c) not in proibidas), "simples")
+        return escolhido
 
     def _sombra(esp):
         if sombra_cfg:

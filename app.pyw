@@ -4700,6 +4700,15 @@ class Aplicativo:
         if not fotos:
             self.registrar("Nenhuma foto (JPG, PNG, TIF ou WEBP) encontrada na pasta selecionada.")
             return
+        # Mesma foto (mesmo nome de arquivo) vindo duplicada, ex.: STUDIO e "STUDIO (1)": entra uma vez só
+        fotos, copias = entrada.tirar_copias_identicas(
+            fotos, ja_no_projeto=[f["caminho"] for f in self.projeto.get("fotos", []) if f.get("caminho")]
+        )
+        if copias:
+            self._avisar_copias_identicas(copias)
+        if not fotos:
+            self.registrar("Todas essas fotos já estão no projeto (mesmo nome de arquivo).")
+            return
         novo = not self.projeto["fotos"] and not self.projeto["laminas"]
         sem_laminas = not self.projeto.get("laminas")
         pasta_origem = entrada.pasta_comum(fotos)
@@ -5195,6 +5204,9 @@ class Aplicativo:
         rajadas_var = tk.BooleanVar(value=bool(cfg.get("excluir_rajadas", False)))
         alternar_var = tk.BooleanVar(value=bool(cfg.get("alternar_orientacao", False)))
         variar_tema_var = tk.BooleanVar(value=bool(cfg.get("variar_tema_album", False)))
+        pose_var = tk.BooleanVar(value=bool(cfg.get("excluir_pose", False)))
+        primeira_var = tk.BooleanVar(value=bool(cfg.get("primeira_foto_sozinha", False)))
+        par_var = tk.BooleanVar(value=bool(cfg.get("laminas_par", False)))
         # Regras só do 30X22 (o arquivo do produto liga): rajadas e alternância horizontal/vertical
         regras_30x22 = bool(self.produto.get("alternar_orientacao") or self.produto.get("excluir_rajadas")
                             or self.produto.get("variar_tema_album"))
@@ -5276,9 +5288,25 @@ class Aplicativo:
             ).pack(anchor="w", pady=2)
             ttk.Checkbutton(
                 quadro_geom,
+                text="   ↳ Também a mesma pose (mesma pessoa no mesmo lugar e com o corpo igual; "
+                     "fica a do rosto mais nítido)",
+                variable=pose_var,
+            ).pack(anchor="w", pady=2)
+            ttk.Checkbutton(
+                quadro_geom,
                 text="Alternar horizontal / vertical: no máx. 2 fotos do mesmo tamanho por lâmina "
-                     "(horizontal sozinha, vertical sozinha ou em dupla) e o máximo de lâminas",
+                     "(horizontal sozinha, vertical sozinha ou em dupla), sem misturar cenários",
                 variable=alternar_var,
+            ).pack(anchor="w", pady=2)
+            ttk.Checkbutton(
+                quadro_geom,
+                text="1ª lâmina: a primeira foto vertical com a pessoa sozinha (reconhecimento de rosto)",
+                variable=primeira_var,
+            ).pack(anchor="w", pady=2)
+            ttk.Checkbutton(
+                quadro_geom,
+                text="Sempre terminar em nº par de lâminas",
+                variable=par_var,
             ).pack(anchor="w", pady=2)
             ttk.Checkbutton(
                 quadro_geom,
@@ -5668,6 +5696,9 @@ class Aplicativo:
                 "destacar_rosto_pequeno": bool(rosto_pequeno_var.get()),
                 "excluir_repetidas": bool(repetidas_var.get()),
                 "excluir_rajadas": bool(rajadas_var.get()) and bool(repetidas_var.get()),
+                "excluir_pose": bool(pose_var.get()) and bool(repetidas_var.get()),
+                "primeira_foto_sozinha": bool(primeira_var.get()),
+                "laminas_par": bool(par_var.get()),
                 "alternar_orientacao": bool(alternar_var.get()),
                 "variar_tema_album": bool(variar_tema_var.get()),
                 "cor_canudo_no_fundo": bool(variar_tema_var.get()),
@@ -5746,6 +5777,9 @@ class Aplicativo:
             rosto_pequeno_var,
             repetidas_var,
             rajadas_var,
+            pose_var,
+            primeira_var,
+            par_var,
             alternar_var,
             variar_tema_var,
             auto_fundos_var,
@@ -7224,10 +7258,32 @@ class Aplicativo:
         janela.grab_set()
         janela.focus_set()
 
-    def _sem_repetidas(self, fotos, parar, ao_progresso=None, rajadas=False):
-        """Mantém a primeira imagem de cada grupo com hash visual praticamente igual (e, se pedido, de cada rajada)."""
+    def _avisar_copias_identicas(self, copias):
+        """Mostra quais fotos vieram duplicadas (mesmo nome de arquivo) e foram carregadas uma vez só."""
+        def rotulo(c):
+            p = Path(str(c))
+            return "%s/%s" % (p.parent.name, p.name)
+
+        for tirada, ficou in copias:
+            self.registrar("Foto duplicada ignorada: %s (igual a %s)" % (rotulo(tirada), rotulo(ficou)))
+        grupos = {}
+        for tirada, ficou in copias:
+            grupos.setdefault(str(ficou), []).append(tirada)
+        linhas = ["%s  =  %s" % (Path(f).name, ", ".join(Path(t).name for t in ts)) for f, ts in list(grupos.items())[:10]]
+        if len(grupos) > 10:
+            linhas.append("... e mais %d" % (len(grupos) - 10))
+        messagebox.showinfo(
+            "Fotos duplicadas",
+            "%d foto(s) vieram DUPLICADAS (mesmo nome de arquivo) e entraram só uma vez:\n\n%s\n\n"
+            "Fica a primeira de cada grupo. Vale conferir a seleção do aluno no Drive (pastas repetidas?)."
+            % (len(copias), "\n".join(linhas)),
+            parent=self.root,
+        )
+
+    def _sem_repetidas(self, fotos, parar, ao_progresso=None, rajadas=False, pose=False):
+        """Mantém uma imagem de cada grupo de cópias (e, se pedido, de cada rajada e de cada pose repetida)."""
         mantidas, removidas = analise.separar_repetidas(
-            [f["caminho"] for f in fotos], rajadas=rajadas, parar=parar, ao_progresso=ao_progresso)
+            [f["caminho"] for f in fotos], rajadas=rajadas, parar=parar, ao_progresso=ao_progresso, pose=pose)
         if mantidas is None:
             return None, []
         ficam = set(mantidas)
@@ -7261,6 +7317,9 @@ class Aplicativo:
         if escopo in ("pasta", "nao_usadas"):
             produto["laminas_min"] = 0
             cfg["laminas_desejadas"] = diagramar.laminas_ideais(len(fotos), produto, cfg)
+            # só uma parte do álbum: a 1ª lâmina e o nº par valem para o álbum inteiro, não para o pedaço
+            cfg["primeira_foto_sozinha"] = False
+            cfg["laminas_par"] = False
         avisos = []
 
         def trabalho(t):
@@ -7268,7 +7327,8 @@ class Aplicativo:
             fotos_usadas = fotos
             if excluir_repetidas:
                 fotos_usadas, removidas = self._sem_repetidas(
-                    fotos, t.parar, t.progresso, rajadas=bool(cfg.get("excluir_rajadas")))
+                    fotos, t.parar, t.progresso, rajadas=bool(cfg.get("excluir_rajadas")),
+                    pose=bool(cfg.get("excluir_pose")))
                 if fotos_usadas is None:
                     return None
             resultado = diagramar.diagramar_album(fotos_usadas, produto, cfg, ao_progresso=t.progresso, avisos=avisos)

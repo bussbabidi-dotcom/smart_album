@@ -338,6 +338,39 @@ def expandir(caminhos):
     return fotos, projetos
 
 
+def tirar_copias_identicas(fotos, ja_no_projeto=()):
+    """
+    (mantidas, copias): tira as fotos REPETIDAS PELO NOME — mesmo nome de arquivo e mesmo tamanho em bytes,
+    mesmo em pastas diferentes (ex.: a mesma HIL_2744.JPG vinda de STUDIO e de "STUDIO (1)", ou o atalho
+    escolhido duas vezes na seleção do Drive). Não olha a imagem: fotos parecidas com nomes diferentes ficam.
+    Fica a primeira (na ordem recebida); as do projeto já aberto também contam como "primeira".
+    copias: [(caminho_tirado, caminho_que_ficou)].
+    """
+    fotos = list(fotos)
+
+    def chave(c):
+        try:
+            return (Path(str(c)).name.casefold(), os.path.getsize(c))
+        except OSError:
+            return None
+
+    primeiro = {}
+    for c in ja_no_projeto or ():
+        k = chave(c)
+        if k is not None:
+            primeiro.setdefault(k, c)
+    mantidas, copias = [], []
+    for f in fotos:
+        k = chave(f)
+        if k is not None and k in primeiro:
+            copias.append((f, primeiro[k]))
+            continue
+        if k is not None:
+            primeiro[k] = f
+        mantidas.append(f)
+    return mantidas, copias
+
+
 def pasta_comum(fotos):
     if not fotos:
         return None

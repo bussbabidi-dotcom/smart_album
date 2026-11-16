@@ -539,15 +539,135 @@ DISTANCIA_RAJADA = 8       # rajada: mesma câmera e tirada até SEGUNDOS_RAJADA
 SEGUNDOS_RAJADA = 3
 
 
-def separar_repetidas(caminhos, rajadas=False, parar=None, ao_progresso=None):
+# ------------------------------------------------------------
+# Pose: a mesma pessoa na mesma pose (mesmo lugar no quadro, mesma inclinação e giro da cabeça,
+# mesmo contorno do corpo). Pedido dela (16/11/2026) para o 30X22: o hash só pega cópias e
+# rajadas; fotos da mesma pose com um sorriso diferente passavam como fotos novas.
+# ------------------------------------------------------------
+LADO_POSE = 640
+ROSTO_PRINCIPAL = 0.40      # rosto com altura >= 40% da do maior conta como pessoa da foto (o resto é plateia)
+POSE_DESLOCAMENTO = 0.06    # o rosto mudou de lugar no quadro no máximo isso (fração do quadro)
+POSE_TAMANHO = 0.80         # razão mínima entre as alturas dos rostos (zoom parecido)
+POSE_INCLINACAO = 15.0      # graus de diferença na linha dos olhos (só barra cabeça bem inclinada para o outro lado)
+POSE_CORPO = 0.77           # semelhança mínima do corpo (região da pessoa em tons, sem o resto do cenário)
+# Calibrado em 16/11/2026 nas 80 fotos da Alicia (pós-venda 30X22): mesma pose 0.75 a 0.99,
+# poses diferentes no mesmo painel 0.64 a 0.75 (o pior: canudo em outra mão, 0.752). Na dúvida
+# fica a foto: 0.77 deixa passar algumas da mesma pose, mas não tira pose diferente. O giro da cabeça não entra: na mesma pose
+# a pessoa olha para o lado ou para a câmera (giro até 0.76) e continua sendo a mesma foto.
+POSE_SEGUNDOS = 600         # só compara fotos tiradas até 10 min uma da outra (quando há data)
+
+
+def _rostos_yunet(img, det=None):
+    """[(score, x, y, w, h, pontos)] em pixels da imagem (pontos: olho dir., olho esq., nariz, boca dir., boca esq.)."""
+    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    saida = []
+    with _trava_rosto:
+        det = det or _detector_yunet()
+        if det is None:
+            return saida
+        det.setInputSize((img.width, img.height))
+        _ok, faces = det.detect(bgr)
+    for f in faces if faces is not None else []:
+        if f[2] < 8 or f[3] < 8:
+            continue
+        pontos = [(float(f[4 + 2 * k]), float(f[5 + 2 * k])) for k in range(5)]
+        saida.append((float(f[14]), float(f[0]), float(f[1]), float(f[2]), float(f[3]), pontos))
+    return saida
+
+
+def pessoas_na_foto(rostos):
+    """Rostos das pessoas da foto (os grandes); os bem menores que o maior são plateia/fundo."""
+    if not rostos:
+        return []
+    maior = max(r[4] for r in rostos)
+    return [r for r in rostos if r[4] >= maior * ROSTO_PRINCIPAL]
+
+
+def assinatura_pose(caminho):
+    """
+    Pose da foto: rostos das pessoas (lugar, tamanho, inclinação, giro), contorno do corpo e
+    nitidez do rosto (para ficar a melhor). Calculada em memória; não grava nada. None se não abrir.
+    """
+    try:
+        img = _abrir_reduzida(caminho, LADO_POSE)
+    except (OSError, ValueError):
+        return None
+    W, H = img.size
+    rostos = []
+    cinza = np.asarray(img.convert("L"))
+    pessoas = pessoas_na_foto(_rostos_yunet(img))
+    for _sc, x, y, w, h, p in sorted(pessoas, key=lambda r: r[1]):
+        (ox, oy), (ex, ey), (nx, ny), (bx1, by1), (bx2, by2) = p
+        olho_x, olho_y = (ox + ex) / 2.0, (oy + ey) / 2.0
+        boca_y = (by1 + by2) / 2.0
+        dist_olhos = max(1.0, ((ex - ox) ** 2 + (ey - oy) ** 2) ** 0.5)
+        x0, y0 = int(max(0, x)), int(max(0, y))
+        recorte = cinza[y0:int(min(H, y + h)), x0:int(min(W, x + w))]
+        foco = 0.0
+        if recorte.size and min(recorte.shape) >= 8:
+            igual = cv2.resize(recorte, (96, 96), interpolation=cv2.INTER_AREA)
+            foco = float(cv2.Laplacian(igual, cv2.CV_64F).var())
+        rostos.append({
+            "x": olho_x / W, "y": olho_y / H, "h": h / H,
+            "inclinacao": float(np.degrees(np.arctan2(ey - oy, ex - ox))),
+            "giro": (nx - olho_x) / dist_olhos,
+            "queixo": (ny - olho_y) / max(1.0, boca_y - olho_y),
+            "foco": foco,
+        })
+    # corpo: a região das pessoas (dos lados do rosto até ~7 rostos abaixo) em tons, bem reduzida;
+    # braços, canudo e mãos mudam esses tons, o cenário em volta quase não entra
+    corpo = None
+    if pessoas:
+        fw = max(r[3] for r in pessoas)
+        fh = max(r[4] for r in pessoas)
+        x0 = int(max(0, min(r[1] for r in pessoas) - 2.2 * fw))
+        x1 = int(min(W, max(r[1] + r[3] for r in pessoas) + 2.2 * fw))
+        y0 = int(max(0, min(r[2] for r in pessoas) - 0.8 * fh))
+        y1 = int(min(H, min(r[2] for r in pessoas) + 7 * fh))
+        if x1 - x0 >= 8 and y1 - y0 >= 8:
+            v = cv2.resize(cinza[y0:y1, x0:x1], (16, 24), interpolation=cv2.INTER_AREA).astype(np.float32).reshape(-1)
+            v = v - float(v.mean())
+            n = float(np.linalg.norm(v))
+            corpo = v / n if n > 1e-6 else v
+    return {
+        "vertical": H > W,
+        "rostos": rostos,
+        "corpo": corpo,
+        "foco": max((r["foco"] for r in rostos), default=0.0),
+    }
+
+
+def semelhanca_pose(a, b):
+    """0..1: quanto as duas fotos são a mesma pose (0 = poses diferentes)."""
+    if not a or not b or a["vertical"] != b["vertical"]:
+        return 0.0
+    ra, rb = a["rostos"], b["rostos"]
+    if not ra or len(ra) != len(rb):
+        return 0.0
+    for x, y in zip(ra, rb):
+        if abs(x["x"] - y["x"]) > POSE_DESLOCAMENTO or abs(x["y"] - y["y"]) > POSE_DESLOCAMENTO:
+            return 0.0
+        if min(x["h"], y["h"]) / max(x["h"], y["h"], 1e-6) < POSE_TAMANHO:
+            return 0.0
+        if abs(x["inclinacao"] - y["inclinacao"]) > POSE_INCLINACAO:
+            return 0.0
+    if a["corpo"] is None or b["corpo"] is None:
+        return 0.0
+    corpo = float(np.dot(a["corpo"], b["corpo"]))
+    return corpo if corpo >= POSE_CORPO else 0.0
+
+
+def separar_repetidas(caminhos, rajadas=False, parar=None, ao_progresso=None, pose=False):
     """
     (mantidas, removidas) na ordem recebida; mantém a primeira de cada grupo.
     Repetida = hash visual a <= 3 bits. Com rajadas=True também tira a foto da mesma câmera
     (4 primeiras letras do nome) tirada até 3 s de outra e com hash a <= 8 bits.
+    Com pose=True também tira a foto da MESMA POSE (mesma pessoa no mesmo lugar, cabeça igual,
+    mesmo contorno do corpo) tirada até 10 min de outra; das duas fica a do rosto mais nítido.
     removidas: [(caminho, caminho_que_ficou, motivo)]. Devolve (None, []) se parar() pedir.
     """
     caminhos = list(caminhos)
-    mantidas, removidas, vistas = [], [], []  # vistas: (hash, data, câmera, caminho)
+    mantidas, removidas, vistas = [], [], []  # vistas: [hash, data, câmera, caminho, pose]
     for indice, caminho in enumerate(caminhos, start=1):
         if parar and parar():
             return None, []
@@ -555,24 +675,36 @@ def separar_repetidas(caminhos, rajadas=False, parar=None, ao_progresso=None):
             valor = hash_perceptual(caminho)
         except (OSError, ValueError):
             valor = None
-        data = _data_foto(caminho) if (rajadas and valor is not None) else 0.0
+        data = _data_foto(caminho) if ((rajadas or pose) and valor is not None) else 0.0
         camera = Path(str(caminho)).name[:4].upper()
+        assin = assinatura_pose(caminho) if (pose and valor is not None) else None
         par = motivo = None
         if valor is not None:
-            for h, d, cam, c in vistas:
+            for vista in vistas:
+                h, d, cam, c, a_p = vista
                 dist = (valor ^ h).bit_count()
                 if dist <= DISTANCIA_REPETIDA:
-                    par, motivo = c, "cópia"
+                    par, motivo = vista, "cópia"
                 elif rajadas and dist <= DISTANCIA_RAJADA and cam == camera and abs(data - d) <= SEGUNDOS_RAJADA:
-                    par, motivo = c, "rajada"
+                    par, motivo = vista, "rajada"
+                elif (assin and a_p and (not data or not d or abs(data - d) <= POSE_SEGUNDOS)
+                        and semelhanca_pose(assin, a_p) > 0):
+                    par, motivo = vista, "pose"
                 if par is not None:
                     break
-        if par is not None:
-            removidas.append((caminho, par, motivo))
+        if par is not None and motivo == "pose" and assin["foco"] > par[4]["foco"] * 1.15:
+            # mesma pose, mas esta está mais nítida: ela fica no lugar da outra (mesma posição no álbum)
+            antiga = par[3]
+            mantidas[mantidas.index(antiga)] = caminho
+            removidas = [(r, caminho if p == antiga else p, m) for r, p, m in removidas]
+            removidas.append((antiga, caminho, motivo))
+            par[0], par[1], par[2], par[3], par[4] = valor, data, camera, caminho, assin
+        elif par is not None:
+            removidas.append((caminho, par[3], motivo))
         else:
             mantidas.append(caminho)
             if valor is not None:
-                vistas.append((valor, data, camera, caminho))
+                vistas.append([valor, data, camera, caminho, assin])
         if ao_progresso:
             ao_progresso(indice, len(caminhos))
     return mantidas, removidas

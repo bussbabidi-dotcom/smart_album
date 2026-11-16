@@ -17,6 +17,10 @@
   "excluir_repetidas": true,
   "excluir_rajadas": true,
   "variar_tema_album": true,
+  "molduras_proibidas": ["pontilhada"],
+  "excluir_pose_repetida": true,
+  "primeira_foto_sozinha": true,
+  "laminas_par": true,
   "icc": "",
   "capa": {
     "frente_mm": [305, 225],
