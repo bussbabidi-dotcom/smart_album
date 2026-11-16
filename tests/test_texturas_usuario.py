@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Texturas do usuário: reconhecer na pasta, extrair de uma imagem, PNG como está e degradê só com as cores."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from PIL import Image, ImageFilter
@@ -65,6 +67,19 @@ def test_reconhece_textura_degrade_cenario_e_png_transparente(tmp_path):
     assert tu.classificar(_png_transparente(tmp_path / "p.png")) == "transparente"
     assert tu.eh_textura(str(tmp_path / "t.png")) and tu.eh_textura(str(tmp_path / "p.png"))
     assert not tu.eh_textura(str(tmp_path / "d.png")) and not tu.eh_textura(str(tmp_path / "c.png"))
+
+
+def test_imagem_fina_demais_e_arquivo_corrompido_nao_quebram_o_reconhecimento(tmp_path):
+    import warnings
+    fina = tmp_path / "fina.png"
+    Image.new("RGB", (4000, 10), (200, 100, 50)).save(fina)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # média de fatia vazia virava NaN
+        medidas = tu.medir(str(fina))
+    assert medidas["igual"] == 1.0
+    lixo = tmp_path / "lixo.jpg"
+    lixo.write_bytes(b"isto nao e uma imagem")
+    assert tu.classificar(str(lixo)) == "imagem"
 
 
 def test_marcar_a_mao_manda_e_volta_ao_automatico(tmp_path):
@@ -189,6 +204,29 @@ def test_png_com_transparencia_e_colado_como_esta(tmp_path):
     saida = tu.aplicar(fundo, {"textura_arquivo": png, "textura_modo": "png"})
     assert saida.getpixel((300, 200)) == (255, 200, 0)   # onde o PNG é opaco
     assert saida.getpixel((20, 20)) == (10, 20, 30)      # onde é transparente fica a cor do programa
+
+
+def test_galeria_tem_um_fundo_para_cada_textura_com_cores_sorteadas(tmp_path):
+    pasta = tmp_path / "fundos"
+    pasta.mkdir()
+    arquivos = [_textura(pasta / ("t%d.png" % i)) for i in range(3)]
+    tu.definir_preferencia(modo="minhas", pasta=str(pasta))
+    try:
+        g1 = composicao.gerar_galeria_fundos_procedurais(None, seed_base=3, materializar=False, uma_por_textura=True)
+        usadas = [g["gerado"]["textura_arquivo"] for g in g1]
+        assert sorted(usadas) == sorted(tu.listar_texturas())   # cada textura uma vez, nenhuma repetida
+        assert len(g1) == len(set(usadas)) >= 3
+        assert all(Path(a).stem in g["gerado"]["titulo"] for a, g in zip(usadas, g1))
+        g2 = composicao.gerar_galeria_fundos_procedurais(None, seed_base=99, materializar=False, uma_por_textura=True)
+        assert [g["gerado"]["textura_arquivo"] for g in g2] == usadas            # "Novas Variações": mesmas texturas
+        assert [g["gerado"]["cores"] for g in g2] != [g["gerado"]["cores"] for g in g1]  # cores novas
+        # sem a opção (robô do 30X22, diagramação) continua a quantidade pedida
+        assert len(composicao.gerar_galeria_fundos_procedurais(None, quantidade=4, seed_base=3, materializar=False)) == 4
+        tu.definir_preferencia(modo="nenhuma")
+        assert len(composicao.gerar_galeria_fundos_procedurais(None, seed_base=3, materializar=False,
+                                                               uma_por_textura=True)) == 8
+    finally:
+        tu.definir_preferencia(modo="minhas", pasta="")
 
 
 def test_tema_e_galeria_seguem_a_preferencia(tmp_path):

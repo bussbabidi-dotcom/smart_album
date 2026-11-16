@@ -52,6 +52,7 @@ from comum import (
     normalizar_caminho, pasta_dados, pasta_fundos_temporarios, registrar_erro, texto_json,
 )
 import fundos
+import janela_conferencia
 import janela_drive
 import janela_exportar
 import janela_texto
@@ -99,6 +100,7 @@ DEFINICOES_ATALHOS = (
     ("importar_link_drive", "Colar link do Drive", "Ctrl+G"),
     ("escolher_fotos", "Carregar fotos", "Ctrl+I"),
     ("abrir_exportar", "Exportar álbum", "Ctrl+E"),
+    ("abrir_conferencia", "Conferir álbum", "F6"),
     ("desfazer", "Desfazer", "Ctrl+Z"),
     ("refazer", "Refazer", "Ctrl+Y"),
     ("abrir_diagramacao", "Diagramar álbum", "F5"),
@@ -143,6 +145,10 @@ ARRANJO_PADRAO = {
     "altura_fotos": 118,
     "largura_fotos": 290,
     "largura_lateral": 310,
+    "mostrar_lateral2": False,       # segundo painel de abas, do lado oposto ao primeiro
+    "largura_lateral2": 310,
+    "aba_lateral": "Layouts",        # aba aberta em cada painel (volta assim ao abrir o programa)
+    "aba_lateral2": "",
     "lateral_conteudo_aberto": True,
     "secoes_recolhidas": {},
 }
@@ -409,6 +415,7 @@ class Aplicativo:
         self.tempos_arrasto = []
         self.tempo_inicio_arrasto = 0.0
         self.editor_fundo = None
+        self.janela_conferencia = None
         self._fundos_pasta = None
         self._fundos_lista = []
         self._camada_frente = None
@@ -528,6 +535,7 @@ class Aplicativo:
         self.canvas = tk.Canvas(centro, bg=tema.FUNDO, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.quadro_lateral = ttk.Frame(self.painel_h)
+        self.quadro_lateral2 = ttk.Frame(self.painel_h)
         self._montar_direita(self.quadro_lateral)
         self._aplicar_arranjo()
         for painel in (self.painel_v, self.painel_h, self.painel_baixo):
@@ -637,6 +645,10 @@ class Aplicativo:
         self.botao_exportar = self._botao(topo, "⤓ Exportar", self.abrir_exportar,
                                           "Exportar álbum (JPG, PSD ou PDF)", "PrimarioCompacto.TButton")
         self.botao_exportar.pack(side="right", padx=(2, 0))
+        self.botao_conferir = self._botao(topo, "✔ Conferir", self.abrir_conferencia,
+                                          "Conferir o álbum (F6): espaços vazios, fotos que sumiram, fotos repetidas, "
+                                          "resolução baixa e textos vazios, com ida direta ao problema", "Compacto.TButton")
+        self.botao_conferir.pack(side="right", padx=1)
         self.botao_capa = self._botao(topo, "◧ Capa", self.abrir_programa_capa,
                                       "Abrir programa de capas", "Compacto.TButton")
         self.botao_capa.pack(side="right", padx=1)
@@ -1250,7 +1262,8 @@ class Aplicativo:
         chave_ft = "largura_fotos" if fotos_vert else "altura_fotos"
         for chave, widget, altura in ((chave_tl, self.quadro_timeline, not usa_largura_tl),
                                       (chave_ft, self.quadro_fotos, not fotos_vert),
-                                      ("largura_lateral", self.quadro_lateral, False)):
+                                      ("largura_lateral", self.quadro_lateral, False),
+                                      ("largura_lateral2", self.quadro_lateral2, False)):
             if widget.winfo_ismapped():
                 valor = widget.winfo_height() if altura else widget.winfo_width()
                 if valor > 20:
@@ -1275,13 +1288,19 @@ class Aplicativo:
         alt_fotos = min(int(a.get("altura_fotos", 118)), max(MINIMOS["fotos"], int(sh * 0.17)))
 
         lateral = dict(width=larg_lat, minsize=MINIMOS["lateral"], stretch="never")
+        larg_lat2 = min(int(a.get("largura_lateral2", 310)), max(MINIMOS["lateral"], int(sw * 0.25)))
+        lateral2 = dict(width=larg_lat2, minsize=MINIMOS["lateral"], stretch="never")
         tl_lado = dict(width=larg_tl, minsize=MINIMOS["timeline_vertical"], stretch="never")
         ft_lado = dict(width=larg_ft, minsize=MINIMOS["fotos_vertical"], stretch="never")
         mostrar_tl = a.get("mostrar_timeline", True)
         mostrar_lat = a.get("mostrar_lateral", True)
+        mostrar_lat2 = bool(a.get("mostrar_lateral2")) and bool(getattr(self, "aba_fixada_2", None))
+        lado_lat2 = "esquerda" if a.get("lateral") == "direita" else "direita"
         mostrar_ft = a.get("mostrar_fotos", True)
         pos_fotos = a.get("fotos", "baixo")
 
+        if mostrar_lat2 and lado_lat2 == "esquerda":
+            h.add(self.quadro_lateral2, **lateral2)
         if mostrar_lat and a.get("lateral") == "esquerda":
             h.add(self.quadro_lateral, **lateral)
         if mostrar_tl and a.get("timeline") == "esquerda":
@@ -1295,6 +1314,8 @@ class Aplicativo:
             h.add(self.quadro_lateral, **lateral)
         if mostrar_ft and pos_fotos == "direita":
             h.add(self.quadro_fotos, **ft_lado)
+        if mostrar_lat2 and lado_lat2 == "direita":
+            h.add(self.quadro_lateral2, **lateral2)
 
         tl_faixa = dict(height=alt_tl, minsize=MINIMOS["timeline"], stretch="never")
         if mostrar_tl and a.get("timeline") == "cima":
@@ -1402,10 +1423,18 @@ class Aplicativo:
         except OSError:
             pass
 
+    # ---------------- painéis de abas: até dois ao mesmo tempo, um de cada lado da lâmina ----------------
+    # Painel 1 = o de sempre (lado escolhido em "lateral"); painel 2 = o do lado oposto.
+    # Clicar numa aba fechada: com os dois abertos, troca a do painel mexido por último; com um só aberto,
+    # abre no outro lado; com nenhum, abre no painel 1. Clicar numa aba aberta fecha o painel dela.
+
     def _montar_direita(self, direita):
-        self.aba_fixada_ativa = "Layouts"
         self.janelas_abas_flutuantes = {}
         self.quadros_abas = {}
+        self._painel_das_abas = {}      # aba -> painel (1 ou 2) onde o quadro dela foi montado
+        self._ultimo_painel_mexido = 1
+        self.aba_fixada_ativa = None
+        self.aba_fixada_2 = None
         self._funcoes_montar_abas = {
             "Layouts": (self._aba_layouts, False, "⊞ Layouts"),
             "Fundo": (self._aba_fundo, True, "🖼 Fundo"),
@@ -1415,50 +1444,75 @@ class Aplicativo:
             "Temas": (self._aba_temas, True, "🎨 Temas da Lâmina"),
             "⌨ Atalhos": (self._aba_atalhos, False, "⌨ Atalhos"),
         }
-
-        # Cabeçalho compacto da aba fixada na lateral (com botão Janela para desafixar e fechar)
-        cab = tk.Frame(direita, bg=tema.CABECALHO, highlightthickness=0, padx=4, pady=3)
-        cab.pack(side="top", fill="x")
-        self.cabecalho_aba_lateral = cab
         self._lateral_conteudo_aberto = bool(self.arranjo.get("lateral_conteudo_aberto", True))
-        self.bt_recolher_lateral = tk.Label(
-            cab, text="▾" if self._lateral_conteudo_aberto else "▸",
-            bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_ICONE, cursor="hand2",
-        )
-        self.bt_recolher_lateral.pack(side="left", padx=(2, 4))
-        self.bt_recolher_lateral.bind("<Button-1>", lambda _e: self._alternar_conteudo_lateral())
-        self.rotulo_aba_lateral = tk.Label(
-            cab, text="⊞ Layouts", bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA,
-        )
-        self.rotulo_aba_lateral.pack(side="left")
-
-        bt_fechar = self._botao(
-            cab,
-            "✕",
-            self.fechar_aba_fixada,
-            "Fechar aba lateral para ampliar a área da lâmina",
-            "Mini.TButton",
-            width=2,
-        )
-        bt_fechar.pack(side="right", padx=(2, 0))
-
-        bt_desafixar = self._botao(
-            cab,
-            "📌 Janela",
-            lambda: self.desafixar_aba_em_janela(self.aba_fixada_ativa),
-            "Desafixar esta aba em uma janela flutuante redimensionável",
-            "Compacto.TButton",
-        )
-        bt_desafixar.pack(side="right", padx=2)
-
-        self.container_abas_lateral = ttk.Frame(direita, padding=2)
-        if self._lateral_conteudo_aberto:
-            self.container_abas_lateral.pack(side="top", fill="both", expand=True)
-
+        self.cabecalho_aba_lateral, self.rotulo_aba_lateral, self.container_abas_lateral = \
+            self._montar_cabecalho_painel(direita, 1)
+        self.cabecalho_aba_lateral2, self.rotulo_aba_lateral2, self.container_abas_lateral2 = \
+            self._montar_cabecalho_painel(self.quadro_lateral2, 2)
+        # todas as abas ficam montadas (escondidas) no painel 1: o resto do programa usa os controles delas
+        self.aba_fixada_ativa = "Layouts"
         for titulo in self._funcoes_montar_abas:
-            self._criar_quadro_aba_lateral(titulo)
+            self._criar_quadro_aba_lateral(titulo, 1)
+        self.aba_fixada_ativa = None
 
-        self._exibir_aba_fixada(self.aba_fixada_ativa)
+        aba1 = self.arranjo.get("aba_lateral") or "Layouts"
+        if aba1 not in self._funcoes_montar_abas:
+            aba1 = "Layouts"
+        self._exibir_aba_fixada(aba1, painel=1, registrar=False)
+        aba2 = self.arranjo.get("aba_lateral2") or ""
+        if self.arranjo.get("mostrar_lateral2") and aba2 in self._funcoes_montar_abas and aba2 != aba1:
+            self._exibir_aba_fixada(aba2, painel=2, registrar=False)
+        else:
+            self.arranjo["mostrar_lateral2"] = False
+
+    def _montar_cabecalho_painel(self, pai, painel):
+        """Cabeçalho compacto do painel (nome da aba, levar para o outro lado, janela, fechar) e o recipiente."""
+        cab = tk.Frame(pai, bg=tema.CABECALHO, highlightthickness=0, padx=4, pady=3)
+        cab.pack(side="top", fill="x")
+        if painel == 1:
+            self.bt_recolher_lateral = tk.Label(
+                cab, text="▾" if self._lateral_conteudo_aberto else "▸",
+                bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_ICONE, cursor="hand2",
+            )
+            self.bt_recolher_lateral.pack(side="left", padx=(2, 4))
+            self.bt_recolher_lateral.bind("<Button-1>", lambda _e: self._alternar_conteudo_lateral())
+        # botões primeiro (lado direito), para o nome da aba encolher antes deles sumirem
+        self._botao(cab, "✕", lambda p=painel: self.fechar_aba_fixada(p),
+                    "Fechar este painel (a lâmina ganha espaço)", "Mini.TButton", width=2).pack(side="right", padx=(2, 0))
+        self._botao(cab, "📌", lambda p=painel: self.desafixar_aba_em_janela(self._aba_no_painel(p)),
+                    "Soltar esta aba numa janela flutuante redimensionável", "Mini.TButton", width=3
+                    ).pack(side="right", padx=1)
+        self._botao(cab, "⇄", lambda p=painel: self.mover_aba_para_outro_lado(p),
+                    "Levar esta aba para o outro lado da lâmina", "Mini.TButton", width=3).pack(side="right", padx=1)
+        rotulo = tk.Label(cab, text="", bg=tema.CABECALHO, fg=tema.TEXTO_FRACO, font=tema.FONTE_PEQUENA,
+                          anchor="w")
+        rotulo.pack(side="left", fill="x", expand=True)
+        container = ttk.Frame(pai, padding=2)
+        if painel == 2 or self._lateral_conteudo_aberto:
+            container.pack(side="top", fill="both", expand=True)
+        # clicar dentro do painel conta como "mexi neste": a próxima troca de aba acontece nele
+        for w in (cab, rotulo, container):
+            w.bind("<ButtonPress-1>", lambda _e, p=painel: self._marcar_painel_mexido(p), add="+")
+        return cab, rotulo, container
+
+    def _marcar_painel_mexido(self, painel):
+        if self._aba_no_painel(painel):
+            self._ultimo_painel_mexido = painel
+
+    def _aba_no_painel(self, painel):
+        return self.aba_fixada_ativa if painel == 1 else self.aba_fixada_2
+
+    def _painel_aberto(self, painel):
+        if painel == 1:
+            return bool(self.var_mostrar["lateral"].get()) and bool(self.aba_fixada_ativa)
+        return bool(self.arranjo.get("mostrar_lateral2")) and bool(self.aba_fixada_2)
+
+    def _painel_da_aba(self, titulo):
+        """Em qual painel a aba está aparecendo agora (1, 2) ou None."""
+        for p in (1, 2):
+            if self._painel_aberto(p) and self._aba_no_painel(p) == titulo:
+                return p
+        return None
 
     def _alternar_conteudo_lateral(self):
         self._lateral_conteudo_aberto = not getattr(self, "_lateral_conteudo_aberto", True)
@@ -1471,7 +1525,9 @@ class Aplicativo:
             self.bt_recolher_lateral.configure(text="▸")
         self.agendar("gravar_arranjo", 400, self.gravar_arranjo)
 
-    def _criar_quadro_aba_lateral(self, titulo):
+    def _criar_quadro_aba_lateral(self, titulo, painel=None):
+        """(Re)monta o conteúdo da aba dentro do painel (o Tk não muda um widget de pai: troca = remontar)."""
+        painel = painel or self._painel_das_abas.get(titulo, 1)
         montar_fn, rolavel, _rotulo = self._funcoes_montar_abas[titulo]
         anterior = self.quadros_abas.get(titulo)
         if anterior is not None:
@@ -1479,46 +1535,71 @@ class Aplicativo:
                 anterior.destroy()
             except tk.TclError:
                 pass
+        recipiente = self.container_abas_lateral if painel == 1 else self.container_abas_lateral2
         if rolavel:
-            quadro = ttk.Frame(self.container_abas_lateral, padding=0)
+            quadro = ttk.Frame(recipiente, padding=0)
             interno, _cont, _cv = tema.criar_corpo_rolavel(quadro, padding=6)
             montar_fn(interno)
         else:
-            quadro = ttk.Frame(self.container_abas_lateral, padding=6)
+            quadro = ttk.Frame(recipiente, padding=6)
             montar_fn(quadro)
+        tema.ajustar_responsivo(quadro)   # fileiras quebram linha e textos longos quebram: nada some
         self.quadros_abas[titulo] = quadro
+        self._painel_das_abas[titulo] = painel
         return quadro
 
     def _atualizar_botoes_abas_esquerda(self):
         if not hasattr(self, "vars_abas_esquerda"):
             return
-        lat_visivel = bool(self.var_mostrar["lateral"].get()) and bool(self.aba_fixada_ativa)
         for titulo, var_aba in self.vars_abas_esquerda.items():
             em_janela = titulo in self.janelas_abas_flutuantes
-            ativa_fixa = lat_visivel and self.aba_fixada_ativa == titulo
-            var_aba.set(bool(ativa_fixa or em_janela))
+            var_aba.set(bool(self._painel_da_aba(titulo) or em_janela))
 
-    def _exibir_aba_fixada(self, titulo):
-        self.aba_fixada_ativa = titulo
-        for nome_t, q in list(self.quadros_abas.items()):
-            try:
-                q.pack_forget()
-            except tk.TclError:
-                pass
+    def _exibir_aba_fixada(self, titulo, painel=1, registrar=True):
+        """Mostra a aba no painel pedido (monta o quadro lá se ele estava no outro painel)."""
+        anterior = self._aba_no_painel(painel)
+        if anterior and anterior != titulo:
+            q_ant = self.quadros_abas.get(anterior)
+            if q_ant is not None and self._painel_das_abas.get(anterior) == painel:
+                try:
+                    q_ant.pack_forget()
+                except tk.TclError:
+                    pass
+        if painel == 1:
+            self.aba_fixada_ativa = titulo
+        else:
+            self.aba_fixada_2 = titulo
         if titulo and titulo in self._funcoes_montar_abas:
-            if titulo not in self.quadros_abas or not self.quadros_abas[titulo].winfo_exists():
-                self._criar_quadro_aba_lateral(titulo)
+            q = self.quadros_abas.get(titulo)
+            if q is None or not q.winfo_exists() or self._painel_das_abas.get(titulo) != painel:
+                q = self._criar_quadro_aba_lateral(titulo, painel)
             _fn, _rol, rotulo_cab = self._funcoes_montar_abas[titulo]
-            self.rotulo_aba_lateral.configure(text=rotulo_cab)
-            self.quadros_abas[titulo].pack(side="top", fill="both", expand=True)
-            if not self.var_mostrar["lateral"].get():
-                self.var_mostrar["lateral"].set(True)
+            (self.rotulo_aba_lateral if painel == 1 else self.rotulo_aba_lateral2).configure(text=rotulo_cab)
+            q.pack(side="top", fill="both", expand=True)
+            if painel == 1:
+                if not self.var_mostrar["lateral"].get():
+                    self.var_mostrar["lateral"].set(True)
+                    self._mudou_exibir()
+            elif not self.arranjo.get("mostrar_lateral2"):
+                self.arranjo["mostrar_lateral2"] = True
                 self._mudou_exibir()
+            self._ultimo_painel_mexido = painel
+            self.arranjo["aba_lateral" if painel == 1 else "aba_lateral2"] = titulo
+            self.agendar("gravar_arranjo", 400, self.gravar_arranjo)
             self._aba_mudou(titulo)
         self._atualizar_botoes_abas_esquerda()
 
+    def _painel_para_abrir(self):
+        """Onde abrir uma aba nova: o painel livre (do outro lado) ou, com os dois abertos, o mexido por último."""
+        abertos = [p for p in (1, 2) if self._painel_aberto(p)]
+        if not abertos:
+            return 1
+        if len(abertos) == 1:
+            return 2 if abertos[0] == 1 else 1
+        return self._ultimo_painel_mexido if self._ultimo_painel_mexido in (1, 2) else 1
+
     def alternar_aba_lateral(self, titulo, forcar_abrir=False):
-        """Abre ou fecha a aba pela barra lateral esquerda (ou traz/fecha sua janela flutuante)."""
+        """Botões de aba da barra da esquerda: abre, troca ou fecha (ou traz/fecha a janela flutuante)."""
         if titulo in self.janelas_abas_flutuantes:
             jan = self.janelas_abas_flutuantes.get(titulo)
             if jan is not None and jan.winfo_exists():
@@ -1533,18 +1614,59 @@ class Aplicativo:
             else:
                 self.janelas_abas_flutuantes.pop(titulo, None)
 
-        lat_visivel = bool(self.var_mostrar["lateral"].get())
-        if not forcar_abrir and lat_visivel and self.aba_fixada_ativa == titulo:
-            self.fechar_aba_fixada()
+        onde = self._painel_da_aba(titulo)
+        if onde is not None:
+            if forcar_abrir:
+                self._ultimo_painel_mexido = onde
+                self._aba_mudou(titulo)
+            else:
+                self.fechar_aba_fixada(onde)
             return
-        self._exibir_aba_fixada(titulo)
+        if forcar_abrir:
+            # pedido pelo programa (atalho, outra janela): não abre painel novo se já houver um aberto
+            abertos = [p for p in (1, 2) if self._painel_aberto(p)]
+            painel = (self._ultimo_painel_mexido if self._ultimo_painel_mexido in abertos else abertos[0]) \
+                if abertos else 1
+        else:
+            painel = self._painel_para_abrir()
+        self._exibir_aba_fixada(titulo, painel)
 
-    def fechar_aba_fixada(self):
-        self.aba_fixada_ativa = None
-        if self.var_mostrar["lateral"].get():
-            self.var_mostrar["lateral"].set(False)
-            self._mudou_exibir()
+    def fechar_aba_fixada(self, painel=1):
+        titulo = self._aba_no_painel(painel)
+        q = self.quadros_abas.get(titulo) if titulo else None
+        if q is not None and self._painel_das_abas.get(titulo) == painel:
+            try:
+                q.pack_forget()
+            except tk.TclError:
+                pass
+        if painel == 1:
+            self.aba_fixada_ativa = None
+            if self.var_mostrar["lateral"].get():
+                self.var_mostrar["lateral"].set(False)
+                self._mudou_exibir()
+        else:
+            self.aba_fixada_2 = None
+            if self.arranjo.get("mostrar_lateral2"):
+                self.arranjo["mostrar_lateral2"] = False
+                self._mudou_exibir()
+        if self._ultimo_painel_mexido == painel:
+            self._ultimo_painel_mexido = 2 if painel == 1 else 1
+        self.agendar("gravar_arranjo", 400, self.gravar_arranjo)
         self._atualizar_botoes_abas_esquerda()
+
+    def mover_aba_para_outro_lado(self, painel):
+        """Leva a aba do painel para o outro lado; se lá já houver uma aba, as duas trocam de lugar."""
+        titulo = self._aba_no_painel(painel)
+        if not titulo:
+            return
+        outro = 2 if painel == 1 else 1
+        do_outro = self._aba_no_painel(outro) if self._painel_aberto(outro) else None
+        self.fechar_aba_fixada(painel)
+        if do_outro:
+            self.fechar_aba_fixada(outro)
+            self._exibir_aba_fixada(do_outro, painel)
+        self._exibir_aba_fixada(titulo, outro)
+        self.registrar("%s levada para o outro lado da lâmina." % titulo)
 
     def desafixar_aba_em_janela(self, titulo):
         """Desafixa a aba lateral e a abre como uma janela flutuante redimensionável."""
@@ -1557,15 +1679,17 @@ class Aplicativo:
                 jan_exist.lift()
                 return
 
-        # Se era a aba fixada ativa, fecha o painel lateral (ou mostra outra aba fixada se houver)
+        # Se estava num painel, fecha aquele painel
+        onde = self._painel_da_aba(titulo)
+        if onde is not None:
+            self.fechar_aba_fixada(onde)
         q_ant = self.quadros_abas.pop(titulo, None)
+        self._painel_das_abas.pop(titulo, None)
         if q_ant is not None:
             try:
                 q_ant.destroy()
             except tk.TclError:
                 pass
-        if self.aba_fixada_ativa == titulo:
-            self.fechar_aba_fixada()
 
         montar_fn, rolavel, rotulo_cab = self._funcoes_montar_abas[titulo]
         jan = tk.Toplevel(self.root)
@@ -1576,8 +1700,6 @@ class Aplicativo:
 
         topo_j = tk.Frame(jan, bg=tema.CABECALHO, highlightthickness=1, highlightbackground=tema.BORDA, padx=10, pady=6)
         topo_j.pack(side="top", fill="x")
-        tk.Label(topo_j, text=rotulo_cab, bg=tema.CABECALHO, fg=tema.TEXTO, font=tema.FONTE_CABECALHO).pack(side="left")
-
         self._botao(
             topo_j,
             "✕",
@@ -1586,14 +1708,15 @@ class Aplicativo:
             "Mini.TButton",
             width=2,
         ).pack(side="right", padx=(2, 0))
-
         self._botao(
             topo_j,
-            "📌 Fixar na Lateral",
+            "📌 Fixar",
             lambda t=titulo: self.fixar_aba_na_lateral(t),
-            "Encaixar novamente esta aba fixada na lateral da janela principal",
+            "Encaixar novamente esta aba num painel ao lado da lâmina",
             "PrimarioCompacto.TButton",
         ).pack(side="right", padx=2)
+        tk.Label(topo_j, text=rotulo_cab, bg=tema.CABECALHO, fg=tema.TEXTO, font=tema.FONTE_CABECALHO,
+                 anchor="w").pack(side="left", fill="x", expand=True)
 
         corpo_j = ttk.Frame(jan, padding=2)
         corpo_j.pack(side="top", fill="both", expand=True)
@@ -1604,6 +1727,7 @@ class Aplicativo:
             quadro_j = ttk.Frame(corpo_j, padding=8)
             quadro_j.pack(fill="both", expand=True)
             montar_fn(quadro_j)
+        tema.ajustar_responsivo(corpo_j)
 
         jan.protocol("WM_DELETE_WINDOW", lambda t=titulo: self.fechar_janela_aba(t))
         jan.bind("<Escape>", lambda _e, t=titulo: self.fechar_janela_aba(t))
@@ -1621,25 +1745,24 @@ class Aplicativo:
         self._atualizar_botoes_abas_esquerda()
 
     def fixar_aba_na_lateral(self, titulo):
-        """Fecha a janela flutuante da aba e volta a fixá-la na lateral principal."""
+        """Fecha a janela flutuante da aba e a encaixa num painel (pela mesma regra dos botões de aba)."""
         jan = self.janelas_abas_flutuantes.pop(titulo, None)
         if jan is not None:
             try:
                 jan.destroy()
             except tk.TclError:
                 pass
-        self._criar_quadro_aba_lateral(titulo)
-        self._exibir_aba_fixada(titulo)
+        self._exibir_aba_fixada(titulo, self._painel_para_abrir())
 
     def fechar_janela_aba(self, titulo):
-        """Fecha a janela flutuante e recria o quadro oculto na lateral para uso futuro."""
+        """Fecha a janela flutuante; o quadro da aba é montado de novo quando ela voltar para um painel."""
         jan = self.janelas_abas_flutuantes.pop(titulo, None)
         if jan is not None:
             try:
                 jan.destroy()
             except tk.TclError:
                 pass
-        self._criar_quadro_aba_lateral(titulo)
+        self._criar_quadro_aba_lateral(titulo, 1)
         self._atualizar_botoes_abas_esquerda()
 
     def abrir_aba_degrade(self):
@@ -1875,9 +1998,16 @@ class Aplicativo:
                     "Girar foto 90° no sentido horário", "Icone.TButton", width=3).pack(side="right", padx=1)
         self._botao(barra_enq, "↺", lambda: self.girar_foto_selecionada(-90),
                     "Girar foto 90° no sentido anti-horário", "Icone.TButton", width=3).pack(side="right", padx=1)
+        self.enq_foto_inteira = True
+        self.botao_enq_vista = self._botao(
+            barra_enq, "▣", self._alternar_vista_enquadramento,
+            "Alternar a conferência do corte:\n• Foto inteira (padrão): mostra a foto toda, escurece o que fica de fora "
+            "e marca o corte em ciano. Arraste a moldura ou clique fora dela para levar o corte até lá.\n"
+            "• Só o recorte: mostra apenas o pedaço que vai para a lâmina.", "Icone.TButton", width=3)
+        self.botao_enq_vista.pack(side="right", padx=1)
 
         self.canvas_enquadramento = tk.Canvas(
-            enq, bg="#262626", highlightthickness=1, highlightbackground=tema.BORDA, height=104, cursor="fleur"
+            enq, bg="#262626", highlightthickness=1, highlightbackground=tema.BORDA, height=260, cursor="fleur"
         )
         self.canvas_enquadramento.pack(fill="both", expand=True, pady=(0, 4))
         self.canvas_enquadramento.bind("<ButtonPress-1>", self._enquadramento_inicio)
@@ -1946,7 +2076,7 @@ class Aplicativo:
 
         grade_1c = ttk.Frame(quadro_1c)
         grade_1c.pack(fill="x")
-        for col_i in range(4):
+        for col_i in range(2):  # 2x2: em 4 colunas os botões ficavam apertados no painel estreito
             grade_1c.columnconfigure(col_i, weight=1)
         self._botao(
             grade_1c,
@@ -1954,28 +2084,28 @@ class Aplicativo:
             lambda: self.aplicar_lote_inteligente(escopo=self.escopo_1c_painel.get(), nivel="leve"),
             "Ajuste sutil automático de luz, cor e vivacidade (38%)",
             "Compacto.TButton",
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 2), pady=(0, 2))
         self._botao(
             grade_1c,
             "✦ Médio",
             lambda: self.aplicar_lote_inteligente(escopo=self.escopo_1c_painel.get(), nivel="medio"),
             "Correção equilibrada automática de exposição, sombras, cor e saturação (72%)",
             "PrimarioCompacto.TButton",
-        ).grid(row=0, column=1, sticky="ew", padx=2)
+        ).grid(row=0, column=1, sticky="ew", padx=(2, 0), pady=(0, 2))
         self._botao(
             grade_1c,
             "🔥 Pesado",
             lambda: self.aplicar_lote_inteligente(escopo=self.escopo_1c_painel.get(), nivel="pesado"),
             "Recuperação intensa em 1 clique para fotos escuras, estouradas, lavadas ou sem vida (100%)",
             "Compacto.TButton",
-        ).grid(row=0, column=2, sticky="ew", padx=2)
+        ).grid(row=1, column=0, sticky="ew", padx=(0, 2))
         self._botao(
             grade_1c,
             "↺ Orig.",
             lambda: self.restaurar_luz_cor_lote(escopo=self.escopo_1c_painel.get()),
             "Restaurar luz, cor e saturação originais no alvo selecionado (suporta Ctrl+Z)",
             "Compacto.TButton",
-        ).grid(row=0, column=3, sticky="ew", padx=(2, 0))
+        ).grid(row=1, column=1, sticky="ew", padx=(2, 0))
 
     def _aba_fundo(self, quadro):
         topo = ttk.Frame(quadro)
@@ -2938,9 +3068,10 @@ class Aplicativo:
                 style="Filtro.TRadiobutton",
                 command=lambda: (self._atualizar_temas_ui(), self.executar_tema_laminas(modo="atual")),
             )
-            rb_t.grid(row=idx_t // 2, column=idx_t % 2, sticky="ew", padx=1, pady=1)
+            # uma coluna: os nomes dos temas são longos (em duas colunas ficavam cortados ao meio)
+            rb_t.grid(row=idx_t, column=0, sticky="ew", padx=1, pady=1)
             tema.dica(rb_t, t_info["descricao"])
-            grade_t.columnconfigure(idx_t % 2, weight=1)
+        grade_t.columnconfigure(0, weight=1)
 
         self.rotulo_resumo_tema = ttk.Label(
             box_cat,
@@ -3486,6 +3617,7 @@ class Aplicativo:
             "importar_link_drive": self.importar_link_drive,
             "escolher_fotos": self.escolher_fotos,
             "abrir_exportar": self.abrir_exportar,
+            "abrir_conferencia": self.abrir_conferencia,
             "desfazer": self.desfazer,
             "refazer": self.refazer,
             "abrir_diagramacao": self.abrir_diagramacao,
@@ -8296,6 +8428,8 @@ class Aplicativo:
         self.desenhar_modelos()
         self._atualizar_fundo_ui()
         self._atualizar_degrade_ui()
+        if self.editor is not None and not self.editor.winfo_exists():
+            self.editor = None
         if self.editor and self.editor.alvo:
             self.editor.mostrar(self.editor.alvo if self._alvo_valido(self.editor.alvo) else self._alvo_padrao())
         self._atualizar_barra_opcoes()
@@ -8320,7 +8454,7 @@ class Aplicativo:
         return ("lamina", self.atual, min(ei, len(lamina["espacos"]) - 1))
 
     def _alvo_valido(self, alvo):
-        if alvo[0] != "lamina":
+        if not alvo or alvo[0] != "lamina":
             return False
         lamina = self._lamina(alvo[1])
         return lamina is not None and 0 <= alvo[2] < len(lamina["espacos"])
@@ -11243,7 +11377,11 @@ class Aplicativo:
         if img_t is None:
             return
 
-        # Desenha a janela proporcional do espaço no centro do canvas_enquadramento
+        if getattr(self, "enq_foto_inteira", True):
+            self._desenhar_enquadramento_foto_inteira(c, cw, ch, img_t, aspecto, cx, cy, zoom)
+            return
+
+        # Só o recorte: a janela proporcional do espaço no centro do canvas_enquadramento
         margem_c = 10
         disp_w = max(40, cw - 2 * margem_c)
         disp_h = max(40, ch - 2 * margem_c)
@@ -11268,6 +11406,64 @@ class Aplicativo:
         c.create_line(qx0, qy0 + 2 * qh / 3.0, qx0 + qw, qy0 + 2 * qh / 3.0, fill="#00e5ff", stipple="gray50")
         c.create_rectangle(qx0, qy0, qx0 + qw, qy0 + qh, outline="#00e5ff", width=2)
         self._geo_enq_inline = (qx0, qy0, qw, qh)
+        self._geo_enq_inteira = None
+
+    def _alternar_vista_enquadramento(self):
+        self.enq_foto_inteira = not getattr(self, "enq_foto_inteira", True)
+        self.botao_enq_vista.configure(text="▣" if self.enq_foto_inteira else "⛶")
+        if not self.enq_foto_inteira:
+            self.canvas_enquadramento.configure(height=200)
+        self._atualizar_enquadramento_inline()
+        self.registrar("Conferência do corte: %s." % ("foto inteira com o corte marcado" if self.enq_foto_inteira
+                                                      else "só o recorte"))
+
+    def _desenhar_enquadramento_foto_inteira(self, c, cw, ch, img_t, aspecto, cx, cy, zoom):
+        """A foto toda, escurecida fora do corte, com a moldura do corte e os terços por cima."""
+        W, H = img_t.size
+        margem = 8
+        # o quadro acompanha a forma da foto: vertical ganha altura, horizontal não sobra faixa vazia
+        desejada = int(min(460, max(180, (cw - 2 * margem) * H / float(W) + 2 * margem)))
+        try:
+            atual_h = int(float(c.cget("height")))
+        except (tk.TclError, ValueError):
+            atual_h = desejada
+        if abs(atual_h - desejada) > 6:
+            c.configure(height=desejada)
+            ch = max(ch, desejada)
+        disp_w, disp_h = max(40, cw - 2 * margem), max(40, ch - 2 * margem)
+        s = min(disp_w / float(W), disp_h / float(H))
+        dw, dh = max(1, int(round(W * s))), max(1, int(round(H * s)))
+        ix0, iy0 = (cw - dw) // 2, (ch - dh) // 2
+
+        guardada = getattr(self, "_cache_enq_inteira", None)
+        if guardada and guardada[0] is img_t and guardada[1] == (dw, dh):
+            clara, escura = guardada[2], guardada[3]
+        else:
+            clara = img_t.convert("RGB").resize((dw, dh), Image.BILINEAR)
+            escura = ImageEnhance.Brightness(clara).enhance(0.35)
+            self._cache_enq_inteira = (img_t, (dw, dh), clara, escura)
+
+        l, t, r, b = recorte.caixa_corte(W, H, aspecto, {"cx": cx, "cy": cy, "zoom": zoom})
+        L, T = max(0, int(round(l * s))), max(0, int(round(t * s)))
+        R, B = min(dw, int(round(r * s))), min(dh, int(round(b * s)))
+        composta = escura.copy()
+        if R > L and B > T:
+            composta.paste(clara.crop((L, T, R, B)), (L, T))
+        self._tk_enq_inline = ImageTk.PhotoImage(composta)
+        c.create_image(ix0, iy0, image=self._tk_enq_inline, anchor="nw")
+        x0, y0, x1, y1 = ix0 + l * s, iy0 + t * s, ix0 + r * s, iy0 + b * s
+        for k in (1, 2):
+            gx = x0 + (x1 - x0) * k / 3.0
+            gy = y0 + (y1 - y0) * k / 3.0
+            c.create_line(gx, y0, gx, y1, fill="#00e5ff", stipple="gray50")
+            c.create_line(x0, gy, x1, gy, fill="#00e5ff", stipple="gray50")
+        c.create_rectangle(x0, y0, x1, y1, outline="#00e5ff", width=2)
+        c.create_rectangle(ix0, iy0, ix0 + dw, iy0 + dh, outline=tema.BORDA_CLARA)
+        pct = 100.0 * (r - l) * (b - t) / float(W * H)
+        c.create_text(ix0 + 4, iy0 + dh - 4, anchor="sw", fill="#ffffff", font=tema.FONTE_PEQUENA,
+                      text="usa %d%% da foto" % round(min(100.0, pct)))
+        self._geo_enq_inline = (x0, y0, x1 - x0, y1 - y0)
+        self._geo_enq_inteira = (ix0, iy0, s, W, H, aspecto)
 
     def _aplicar_corte_inline(self, cx, cy, zoom, final=False):
         _idx, esp = self._espaco_enquadramento_ativo()
@@ -11322,10 +11518,31 @@ class Aplicativo:
             "cy": float(corte.get("cy", 0.5)),
             "zoom": float(corte.get("zoom", 1.0)),
         }
+        inteira = getattr(self, "_geo_enq_inteira", None) if getattr(self, "enq_foto_inteira", True) else None
+        geo = getattr(self, "_geo_enq_inline", None)
+        if inteira and geo:
+            bx, by, bw, bh = geo
+            if not (bx <= evento.x <= bx + bw and by <= evento.y <= by + bh):
+                # clique fora da moldura: o corte vai para onde clicou
+                ix0, iy0, s, W, H, aspecto = inteira
+                novo = recorte.limitar_corte(W, H, aspecto, {
+                    "cx": (evento.x - ix0) / (W * s), "cy": (evento.y - iy0) / (H * s), "zoom": self._arrasto_enq["zoom"]})
+                self._arrasto_enq.update(cx=novo["cx"], cy=novo["cy"])
+                self._aplicar_corte_inline(novo["cx"], novo["cy"], novo["zoom"], final=False)
 
     def _enquadramento_arrastar(self, evento):
         st = getattr(self, "_arrasto_enq", None)
         if not st:
+            return
+        inteira = getattr(self, "_geo_enq_inteira", None) if getattr(self, "enq_foto_inteira", True) else None
+        if inteira:
+            # foto inteira na tela: a moldura do corte acompanha o mouse
+            _ix0, _iy0, s, W, H, aspecto = inteira
+            novo = recorte.limitar_corte(W, H, aspecto, {
+                "cx": st["cx"] + (evento.x - st["x"]) / (W * s),
+                "cy": st["cy"] + (evento.y - st["y"]) / (H * s),
+                "zoom": st["zoom"]})
+            self._aplicar_corte_inline(novo["cx"], novo["cy"], novo["zoom"], final=False)
             return
         geo = getattr(self, "_geo_enq_inline", None)
         qw = max(40, geo[2]) if geo else 120
@@ -13045,10 +13262,23 @@ class Aplicativo:
     def definir_imagem_fundo(self, caminho):
         self.aplicar_fundo_em(caminho, self.atual)
 
-    def aplicar_fundo_gerado_em(self, dados_gerado, item=None, alvo=None):
+    # O que o editor de fundo ajusta: ficam no dicionário do fundo (fundos.EditorFundo) e não no desenho gerado.
+    CHAVES_AJUSTE_FUNDO = ("ajustes", "opacidade", "desfoque", "escala", "giro", "espelhar_h", "espelhar_v", "cx", "cy", "modo")
+
+    def _fundo_gerado_ja_aplicado(self, dados_gerado, alvo=None, item=None):
+        """True se este fundo gerado já é o fundo do alvo: clicar nele de novo não pode apagar os ajustes de cor."""
+        dono = self._lamina(self.atual if item is None else item)
+        espec = (dados_gerado or {}).get("gerado") if isinstance(dados_gerado, dict) else None
+        if dono is None or not isinstance(espec, dict):
+            return False
+        _ch_cor, ch_img = self._chaves_fundo_alvo(alvo)
+        return (dono.get(ch_img) or {}).get("gerado") == espec
+
+    def aplicar_fundo_gerado_em(self, dados_gerado, item=None, alvo=None, manter_ajustes=False):
         """
         Aplica um dicionário de fundo gerado proceduralmente (Degradê ou Abstrato) na lâmina/página,
         garantindo que esteja salvo como arquivo .png real na pasta temporária para edição livre.
+        `manter_ajustes`: o novo fundo herda os ajustes de cor do fundo gerado que estava ali (troca de textura).
         """
         item = self.atual if item is None else item
         dono = self._lamina(item)
@@ -13057,11 +13287,16 @@ class Aplicativo:
             return False
         ch_cor, ch_img = self._chaves_fundo_alvo(alvo)
         self.marcar_historico()
+        anterior = dono.get(ch_img)
         copia_dados = proj.copia(dados_gerado)
         espec = copia_dados.get("gerado") or {}
         if espec:
             cam_real = materializar_fundo_gerado_em_arquivo(espec, caminho_destino=copia_dados.get("caminho"))
             copia_dados["caminho"] = cam_real
+        if manter_ajustes and isinstance(anterior, dict) and isinstance(anterior.get("gerado"), dict):
+            for chave in self.CHAVES_AJUSTE_FUNDO:
+                if chave in anterior:
+                    copia_dados[chave] = copy.deepcopy(anterior[chave])
         dono[ch_img] = copia_dados
         cores = espec.get("cores") or []
         if cores:
@@ -13083,10 +13318,14 @@ class Aplicativo:
         com ajustes zerados exclusivos para este fundo (não herda ajustes de outros fundos).
         """
         if isinstance(caminho, dict) and eh_fundo_gerado(caminho):
+            if self._fundo_gerado_ja_aplicado(caminho, alvo, item):
+                return False  # já é este fundo: não zera os ajustes de cor que a usuária fez
             return self.aplicar_fundo_gerado_em(caminho, item=item, alvo=alvo)
         if isinstance(caminho, str) and hasattr(self, "galeria_fundos_gerados"):
             dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
             if dados_g:
+                if self._fundo_gerado_ja_aplicado(dados_g, alvo, item):
+                    return False
                 return self.aplicar_fundo_gerado_em(dados_g, item=item, alvo=alvo)
         item = self.atual if item is None else item
         dono = self._lamina(item)
@@ -13318,6 +13557,7 @@ class Aplicativo:
             quantidade=8,
             padrao_filtro=padrao_f,
             materializar=False,
+            uma_por_textura=True,   # "Minhas texturas": um fundo para cada textura, cores sorteadas
         )
         return paleta, gerados
 
@@ -13370,7 +13610,8 @@ class Aplicativo:
     def _galeria_gerados_pressionou(self, caminho, evento):
         dados_g = self.galeria_fundos_gerados.obter_dados_gerado(caminho)
         if dados_g:
-            self.aplicar_fundo_gerado_em(dados_g)
+            if not self._fundo_gerado_ja_aplicado(dados_g):  # clicar no fundo que já está aplicado não apaga os ajustes
+                self.aplicar_fundo_gerado_em(dados_g)
             self._arrasto = {"tipo": "fundo", "caminho": dados_g.get("caminho") or caminho, "x": evento.x_root, "y": evento.y_root, "ativo": False}
 
     def _galeria_gerados_menu(self, caminho, evento):
@@ -13611,7 +13852,8 @@ class Aplicativo:
         if aplicar and self._lamina() is not None:
             self._gerar_galeria_gerados_agora()
             if getattr(self, "_lista_gerados_atuais", None):
-                self.aplicar_fundo_gerado_em(self._lista_gerados_atuais[0])
+                # trocar a textura não pode devolver a cor original: os ajustes de cor do fundo ficam
+                self.aplicar_fundo_gerado_em(self._lista_gerados_atuais[0], manter_ajustes=True)
         else:
             self._atualizar_galeria_gerados(forcar=True)
 
@@ -13734,6 +13976,8 @@ class Aplicativo:
             return
         if caminho:
             self.aplicar_fundo_em(caminho)
+        if self.editor_fundo is not None and not self.editor_fundo.winfo_exists():
+            self.editor_fundo = None
         if self.editor_fundo is None:
             self.editor_fundo = fundos.EditorFundo(self)
         else:
@@ -13953,6 +14197,8 @@ class Aplicativo:
         self._rotulos_fundo["Desfoque"].configure(text="%d" % round(self.fundo_desfoque.get()))
         self._atualizar_galeria_gerados(forcar=False)
         self._agendar_fundos_pasta()
+        if self.editor_fundo is not None and not self.editor_fundo.winfo_exists():
+            self.editor_fundo = None
         if self.editor_fundo is not None:
             self.editor_fundo.mostrar()
 
@@ -13992,7 +14238,7 @@ class Aplicativo:
 
     def alvo_espaco(self, alvo):
         """(espaço, proporção do espaço, descrição) para a tela de edição."""
-        if alvo[0] != "lamina":
+        if not alvo or alvo[0] != "lamina":  # álbum novo e vazio: não há foto para mostrar
             return None, 1.0, ""
         _t, li, ei = alvo
         lamina = self._lamina(li)
@@ -14809,6 +15055,18 @@ class Aplicativo:
         self.janela_exportar = janela_exportar.JanelaExportar(self)
         return self.janela_exportar
 
+    def abrir_conferencia(self):
+        """Lista os problemas do álbum; a janela fica aberta para ir corrigindo e conferir de novo."""
+        if self.janela_conferencia is not None and self.janela_conferencia.winfo_exists():
+            self.janela_conferencia.conferir()
+            self.janela_conferencia.lift()
+            return self.janela_conferencia
+        if not self.projeto.get("laminas"):
+            self.registrar("Não há lâminas para conferir.")
+            return None
+        self.janela_conferencia = janela_conferencia.JanelaConferencia(self)
+        return self.janela_conferencia
+
     def parar_fila_exportacao(self):
         """Cancela a exportação atual em background e esvazia os jobs pendentes da fila de exportação."""
         if hasattr(self, "fila_jobs_exportacao"):
@@ -14984,7 +15242,10 @@ class Aplicativo:
             exportar_pdf=(tipo in ("pdf", "jpg_pdf")),
         )
         avisos = janela_exportar.conferir(self.projeto, janela_exportar.indices_escolhidos(op, self.projeto, self.atual))
-        if avisos and not messagebox.askyesno("Exportar", "\n".join(avisos) + "\n\nExportar mesmo assim?", parent=self.root):
+        if avisos and not messagebox.askyesno(
+                "Exportar", "\n".join(avisos) + "\n\nExportar mesmo assim?\n(Responda Não para ver, lâmina por lâmina, "
+                "onde estão os problemas.)", parent=self.root):
+            self.abrir_conferencia()
             return False
         return self.executar_exportacao(op)
 

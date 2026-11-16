@@ -141,6 +141,7 @@ _CACHE_PALETA_FOTO = OrderedDict()
 
 # Quanto da cor das fotos entra nos fundos gerados pela paleta (sobre a base preta ou branca).
 FATOR_COR_FUNDO = (0.55, 0.75)
+MAX_FUNDOS_POR_TEXTURA = 60   # galeria "um fundo para cada textura": limite para não travar com pastas enormes
 TEXTURAS_ESCURAS = ("veludo", "concreto")
 TEXTURAS_CLARAS = ("papel", "gesso")
 
@@ -501,16 +502,24 @@ def criar_dados_fundo_gerado(espec, materializar=True):
 
 
 def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_base=None, quantidade=8, padrao_filtro="ambos",
-                                     medidas_mm=None, materializar=True):
+                                     medidas_mm=None, materializar=True, uma_por_textura=False):
     """
     Gera uma galeria de fundos nos dois padrões, com cor forte das fotos (FATOR_COR_FUNDO) e textura:
       - Padrão Preto + Cores da Foto (veludo ou concreto)
       - Padrão Branco + Cores da Foto (papel ou gesso)
     `medidas_mm` = (largura, altura) da área coberta, guardada na receita para a escala da textura.
+    `uma_por_textura`: com a preferência "minhas texturas", a galeria tem um fundo para cada textura
+    (na ordem da lista), e as cores continuam sorteadas a cada "Novas Variações".
     Salva cada fundo gerado na pasta temporária (`pasta_fundos_temporarios()`) para a prévia.
     """
     import random
     import time
+
+    texturas_da_galeria = None
+    if uma_por_textura and texturas_usuario.preferencia()["modo"] == "minhas":
+        texturas_da_galeria = texturas_usuario.listar_texturas()[:MAX_FUNDOS_POR_TEXTURA] or None
+        if texturas_da_galeria:
+            quantidade = len(texturas_da_galeria)
 
     pal = paleta or extrair_paleta_fotos([])
     if seed_base is None:
@@ -631,7 +640,12 @@ def gerar_galeria_fundos_procedurais(paleta, estilo="degrade_e_abstrato", seed_b
         if medidas_mm and medidas_mm[0] and medidas_mm[1]:
             espec["largura_mm"] = round(float(medidas_mm[0]), 1)
             espec["altura_mm"] = round(float(medidas_mm[1]), 1)
-        texturas_usuario.escolher_para_espec(espec, idx)  # textura do usuário, ou só as cores
+        if texturas_da_galeria:
+            arquivo_tex = texturas_da_galeria[idx]
+            texturas_usuario.escolher_para_espec(espec, idx, arquivo=arquivo_tex)
+            espec["titulo"] = "%s · %s" % (Path(arquivo_tex).stem[:28], titulo_base.split(" · ")[0])
+        else:
+            texturas_usuario.escolher_para_espec(espec, idx)  # textura do usuário, ou só as cores
         galeria.append(criar_dados_fundo_gerado(espec, materializar=materializar))
     return galeria
 

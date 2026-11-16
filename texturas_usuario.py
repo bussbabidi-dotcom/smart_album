@@ -127,9 +127,12 @@ def medir(caminho):
     # textura tem grão na imagem toda; cenário tem partes lisas e partes cheias (menor bloco / bloco mediano)
     fino = np.abs(fino)
     alto, largo = fino.shape
-    blocos = np.array([fino[i * alto // 5:(i + 1) * alto // 5, j * largo // 5:(j + 1) * largo // 5].mean()
-                       for i in range(5) for j in range(5)])
-    igual = float(blocos.min() / max(1e-6, float(np.median(blocos))))
+    if alto < 5 or largo < 5:  # tira fina demais para dividir em blocos
+        igual = 1.0
+    else:
+        blocos = np.array([fino[i * alto // 5:(i + 1) * alto // 5, j * largo // 5:(j + 1) * largo // 5].mean()
+                           for i in range(5) for j in range(5)])
+        igual = float(blocos.min() / max(1e-6, float(np.median(blocos))))
     hsv = np.asarray(rgb.convert("HSV"), dtype=np.float32)
     vivos = (hsv[..., 1] > 76) & (hsv[..., 2] > 50)  # saturação > 30%, brilho > 20%
     grupos = 0
@@ -168,7 +171,7 @@ def classificar(caminho, usar_marcacao=True):
             return marcada
     try:
         m = medir(caminho)
-    except (OSError, ValueError):
+    except Exception:  # arquivo corrompido, enorme demais (Pillow recusa) ou formato estranho
         return "imagem"
     if m["transparencia"] >= TRANSPARENCIA_MINIMA:
         return "transparente"
@@ -262,19 +265,22 @@ def modo_do_arquivo(caminho):
         return "relevo"
 
 
-def escolher_para_espec(espec, indice=0):
+def escolher_para_espec(espec, indice=0, arquivo=None):
     """
     Põe na receita do fundo gerado a textura que a preferência manda (a receita guarda o arquivo,
     para o fundo sair igual depois). Devolve a própria receita.
+    `arquivo` força uma textura (galeria "um fundo para cada textura").
     """
     pref = preferencia()
     modo = pref["modo"]
-    if modo == "programa":
+    if modo == "programa" and not arquivo:
         return espec
     espec.pop("textura_arquivo", None)
     espec.pop("textura_modo", None)
     escolhida = None
-    if modo == "uma" and pref["arquivo"] and Path(pref["arquivo"]).is_file():
+    if arquivo and Path(arquivo).is_file():
+        escolhida, modo_arq = str(arquivo), modo_do_arquivo(arquivo)
+    elif modo == "uma" and pref["arquivo"] and Path(pref["arquivo"]).is_file():
         escolhida, modo_arq = pref["arquivo"], pref["arquivo_modo"]
     elif modo == "minhas":
         lista = listar_texturas()

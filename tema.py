@@ -487,6 +487,314 @@ def dica(widget, texto):
     return widget
 
 
+# ------------------------------------------------------------
+# Painéis responsivos: nada de texto cortado nem botão espremido
+# ------------------------------------------------------------
+# Depois de montar uma aba, ajustar_responsivo(quadro) faz duas coisas, em qualquer largura:
+#  1. Fileiras de botões (filhos lado a lado com pack side="left") viram "fluxo": o que não cabe desce
+#     para a linha de baixo, em vez de ser espremido até sumir.
+#  2. Textos longos quebram em linhas: rótulos (wraplength) e caixas/botões (o texto ganha quebras).
+
+CLASSES_TEXTO = ("TLabel", "Label", "TCheckbutton", "Checkbutton", "TRadiobutton", "Radiobutton",
+                 "TButton", "Button")
+_FONTES_MEDIDA = {}
+
+
+def _fonte_do_widget(w):
+    import tkinter.font as tkfont
+    fonte = ""
+    try:
+        fonte = w.cget("font")
+    except tk.TclError:
+        pass
+    if not fonte:
+        estilo = ""
+        try:
+            estilo = w.cget("style")
+        except tk.TclError:
+            pass
+        st = ttk.Style(w)
+        fonte = st.lookup(estilo or w.winfo_class(), "font") or st.lookup(w.winfo_class(), "font") or "TkDefaultFont"
+    chave = str(fonte)
+    if chave not in _FONTES_MEDIDA:
+        try:
+            _FONTES_MEDIDA[chave] = tkfont.Font(root=w, font=fonte)
+        except tk.TclError:
+            _FONTES_MEDIDA[chave] = tkfont.nametofont("TkDefaultFont", root=w)
+    return _FONTES_MEDIDA[chave]
+
+
+def quebrar_texto(texto, fonte, largura):
+    """Quebra o texto em palavras para caber em `largura` pixels (mantém as quebras que já existem)."""
+    linhas = []
+    for paragrafo in str(texto).split("\n"):
+        atual = ""
+        for palavra in paragrafo.split(" "):
+            teste = palavra if not atual else atual + " " + palavra
+            if not atual or fonte.measure(teste) <= largura:
+                atual = teste
+            else:
+                linhas.append(atual)
+                atual = palavra
+        linhas.append(atual)
+    return "\n".join(linhas)
+
+
+def _pad_total(valor):
+    try:
+        partes = [int(float(p)) for p in str(valor).split()]
+    except ValueError:
+        return 0
+    if not partes:
+        return 0
+    return partes[0] * 2 if len(partes) == 1 else partes[0] + partes[1]
+
+
+def _largura_disponivel(w):
+    """Largura que o gerenciador dá ao widget (célula da grade, ou o pai inteiro quando empilhado)."""
+    try:
+        gerente = w.winfo_manager()
+        pai = w.nametowidget(w.winfo_parent())
+        if gerente == "grid":
+            info = w.grid_info()
+            col, lin, cs = int(info["column"]), int(info["row"]), int(info.get("columnspan", 1))
+            caixa = pai.grid_bbox(col, lin, col + cs - 1, lin)
+            return (caixa[2] if caixa else w.winfo_width()) - _pad_total(info.get("padx", 0))
+        if gerente == "pack":
+            info = w.pack_info()
+            if info.get("side") in ("top", "bottom") or len(pai.pack_slaves()) == 1:
+                return pai.winfo_width() - 2 * max(0, w.winfo_x()) - _pad_total(info.get("padx", 0)) // 2
+            return None
+        if gerente == "place" and getattr(pai, "_fluxo", None) is not None:
+            return pai.winfo_width() - 2
+    except (tk.TclError, KeyError, ValueError):
+        return None
+    return None
+
+
+def _ajustar_texto(w):
+    try:
+        if not w.winfo_exists():
+            return
+        cls = w.winfo_class()
+        atual = str(w.cget("text"))
+    except tk.TclError:
+        return
+    if getattr(w, "_texto_posto", None) != atual:
+        w._texto_original = atual       # o programa trocou o texto: esse é o novo original
+    original = getattr(w, "_texto_original", atual)
+    if not original or len(original) < 8:
+        return
+    disponivel = _largura_disponivel(w)
+    if not disponivel or disponivel < 30:
+        return
+    if cls in ("TLabel", "Label"):
+        alvo = max(40, int(disponivel) - 2)
+        try:
+            if abs(int(float(str(w.cget("wraplength")) or 0)) - alvo) > 2:
+                w.configure(wraplength=alvo)
+        except (tk.TclError, ValueError):
+            pass
+        w._texto_posto = atual
+        return
+    fonte = _fonte_do_widget(w)
+    if getattr(w, "_folga_texto", None) is None:
+        larg_texto = max(fonte.measure(l) for l in atual.split("\n"))
+        w._folga_texto = max(8, w.winfo_reqwidth() - larg_texto)
+    cabe = disponivel - w._folga_texto
+    novo = original if max(fonte.measure(l) for l in original.split("\n")) <= cabe else quebrar_texto(original, fonte, cabe)
+    if novo != atual:
+        w._texto_posto = novo
+        w._mudando_texto = True
+        try:
+            tk.Misc.configure(w, text=novo)
+            if cls in ("Checkbutton", "Radiobutton"):
+                tk.Misc.configure(w, justify="left")
+        except tk.TclError:
+            pass
+        w._mudando_texto = False
+        try:
+            fluxo = getattr(w.nametowidget(w.winfo_parent()), "_fluxo", None)
+            if fluxo is not None:
+                fluxo._agendar()   # a altura do botão mudou: a fileira se arruma de novo
+        except tk.TclError:
+            pass
+    else:
+        w._texto_posto = atual
+
+
+def _vigiar_troca_de_texto(w):
+    """Quando o programa troca o texto (ex.: 'Aplicar nas selecionadas (3)'), quebra de novo."""
+    original = w.configure
+
+    def configurar(cnf=None, **kw):
+        resultado = original(cnf, **kw)
+        if not getattr(w, "_mudando_texto", False) and ("text" in kw or (isinstance(cnf, dict) and "text" in cnf)):
+            try:
+                w.after_idle(lambda: _ajustar_texto(w))
+            except tk.TclError:
+                pass
+        return resultado
+    w.configure = w.config = configurar
+
+
+class _Fluxo:
+    """Fileira de widgets que quebra linha quando não cabe (place dentro do quadro, altura calculada)."""
+
+    def __init__(self, quadro, filhos):
+        self.quadro = quadro
+        self.itens = []
+        esquerda, direita = [], []
+        for f in filhos:
+            info = f.pack_info()
+            item = {
+                "w": f,
+                "padx": _pad_total(info.get("padx", 0)) // 2,
+                "pady": _pad_total(info.get("pady", 0)) // 2,
+                "expand": str(info.get("expand", "0")) in ("1", "True", "true"),
+                "fill": info.get("fill") in ("x", "both"),
+                "direita": info.get("side") == "right",
+            }
+            (direita if item["direita"] else esquerda).append(item)
+        # ordem na tela: os da esquerda na ordem do pack; os da direita ao contrário (o 1º fica no canto)
+        self.itens = esquerda + direita[::-1]
+        for it in self.itens:
+            it["w"].pack_forget()
+        self._ultimo = None
+        quadro._fluxo = self
+        quadro.configure(width=1, height=1)
+        quadro.pack_propagate(False)
+        quadro.grid_propagate(False)
+        quadro.bind("<Configure>", lambda _e: self.arrumar(), add="+")
+        for it in self.itens:
+            it["w"].bind("<Configure>", lambda _e: self._agendar(), add="+")
+        self.arrumar()
+
+    def _agendar(self):
+        try:
+            self.quadro.after_idle(self.arrumar)
+        except tk.TclError:
+            pass
+
+    def arrumar(self):
+        q = self.quadro
+        try:
+            if not q.winfo_exists():
+                return
+            largura = q.winfo_width()
+            if largura <= 2:
+                largura = sum(it["w"].winfo_reqwidth() + 2 * it["padx"] for it in self.itens)
+            linhas, linha, usado = [], [], 0
+            for it in self.itens:
+                w = it["w"]
+                if not w.winfo_exists():
+                    continue
+                larg = w.winfo_reqwidth() + 2 * it["padx"]
+                if linha and usado + larg > largura:
+                    linhas.append(linha)
+                    linha, usado = [], 0
+                linha.append((it, larg))
+                usado += larg
+            if linha:
+                linhas.append(linha)
+            plano, y = [], 0
+            for linha in linhas:
+                alt = max(it["w"].winfo_reqheight() + 2 * it["pady"] for it, _l in linha)
+                usado = sum(l for _it, l in linha)
+                sobra = max(0, largura - usado)
+                esticam = [it for it, _l in linha if it["expand"] or (it["fill"] and len(linha) == 1)]
+                extra = sobra // len(esticam) if esticam else 0
+                # sem ninguém esticando, os itens "da direita" encostam na borda direita (como no pack)
+                direita_ini = None
+                if not esticam and any(it["direita"] for it, _l in linha):
+                    direita_ini = largura - sum(l for it, l in linha if it["direita"])
+                x = 0
+                for it, larg in linha:
+                    w = it["w"]
+                    if it["direita"] and direita_ini is not None and x < direita_ini:
+                        x = direita_ini
+                    larg_w = min(largura, larg + (extra if it in esticam else 0)) - 2 * it["padx"]
+                    alt_w = w.winfo_reqheight()
+                    plano.append((w, x + it["padx"], y + (alt - alt_w) // 2, max(1, larg_w), alt_w))
+                    x += larg_w + 2 * it["padx"]
+                y += alt
+            chave = (largura, tuple((p[1], p[2], p[3], p[4]) for p in plano))
+            if chave == self._ultimo:
+                return
+            self._ultimo = chave
+            for w, x, y0, larg_w, alt_w in plano:
+                w.place(in_=q, x=x, y=y0, width=larg_w, height=alt_w)
+            if int(q.cget("height")) != max(1, y):
+                q.configure(height=max(1, y))
+        except tk.TclError:
+            pass
+
+
+def _candidato_fluxo(f):
+    """Quadro cujos filhos estão todos em fila (pack side=left) e que recebe a largura do pai."""
+    try:
+        if f.winfo_class() not in ("TFrame", "Frame"):
+            return None
+        filhos = f.pack_slaves()
+        if len(filhos) < 2 or f.grid_slaves() or f.place_slaves():
+            return None
+        if any(c.pack_info().get("side") not in ("left", "right") for c in filhos):
+            return None
+        if any(c.pack_info().get("fill") in ("y", "both") for c in filhos):
+            return None   # barras verticais (rolagem, divisórias) não são fileiras de botões
+        gerente = f.winfo_manager()
+        if gerente == "pack":
+            info = f.pack_info()
+            # só quem ocupa a largura toda do pai (empilhado e esticado na horizontal)
+            if info.get("side") not in ("top", "bottom") or info.get("fill") not in ("x", "both"):
+                return None
+        elif gerente == "grid":
+            sticky = str(f.grid_info().get("sticky", ""))
+            if "e" not in sticky or "w" not in sticky:
+                return None
+        else:
+            return None
+        return filhos
+    except tk.TclError:
+        return None
+
+
+def ajustar_responsivo(raiz):
+    """Aplica fluxo nas fileiras e quebra de texto em tudo dentro de `raiz` (chamar depois de montar)."""
+    quadros, textos = [], []
+
+    def desce(w):
+        for f in w.winfo_children():
+            if isinstance(f, tk.Toplevel):
+                continue
+            filhos = _candidato_fluxo(f)
+            if filhos:
+                quadros.append((f, filhos))
+            try:
+                if f.winfo_class() in CLASSES_TEXTO and not str(f.cget("image") or ""):
+                    textos.append(f)
+            except tk.TclError:
+                pass
+            desce(f)
+    desce(raiz)
+    for f, filhos in quadros:
+        if getattr(f, "_fluxo", None) is None:
+            _Fluxo(f, filhos)
+    for w in textos:
+        if getattr(w, "_responsivo", False):
+            continue
+        w._responsivo = True
+        if w.winfo_class() not in ("TLabel", "Label"):
+            _vigiar_troca_de_texto(w)
+        try:
+            pai = w.nametowidget(w.winfo_parent())
+            pai.bind("<Configure>", lambda _e, x=w: x.after_idle(lambda: _ajustar_texto(x)), add="+")
+            w.bind("<Map>", lambda _e, x=w: x.after_idle(lambda: _ajustar_texto(x)), add="+")
+        except tk.TclError:
+            pass
+    return len(quadros), len(textos)
+
+
 def criar_grupo_colapsavel(pai, titulo, arranjo=None, chave=None, padding=4):
     """Grupo recolhível estilo painéis do Photoshop (▾/▸ no título)."""
     externo = ttk.Frame(pai)
